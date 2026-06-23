@@ -132,6 +132,60 @@ On H100 80GB GPUs, Unified-Shared completed the smoke run on 4 GPUs and
 Unified-TwoAction completed on 6 GPUs. Fewer GPUs may run out of memory during
 ZeRO optimizer steps.
 
+### RoboTwin smoke
+
+RoboTwin 2.0 has a much larger instruction table than LIBERO. A full text-cache
+precompute scans all tasks and can take a long time. For a minimal training
+smoke, use one fixed instruction for all samples and precompute only that prompt:
+
+```bash
+python scripts/precompute_text_embeds.py \
+  task=robotwin_unified_shared_3cam_384_1e-4 \
+  '+override_instruction=Grab the smooth green plastic bottle and lift it with the left arm' \
+  +overwrite=false
+```
+
+Unified-Shared RoboTwin smoke:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+bash scripts/train_zero1.sh 6 \
+  task=robotwin_unified_shared_3cam_384_1e-4 \
+  output_dir=./runs/smoke_robotwin_unified_shared \
+  batch_size=1 \
+  num_workers=0 \
+  max_steps=3 \
+  log_every=1 \
+  save_every=0 \
+  eval_every=0 \
+  model.mot_checkpoint_mixed_attn=true \
+  '+data.train.override_instruction=Grab the smooth green plastic bottle and lift it with the left arm' \
+  '+data.val.override_instruction=Grab the smooth green plastic bottle and lift it with the left arm'
+```
+
+Unified-TwoAction RoboTwin smoke:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+bash scripts/train_zero1.sh 6 \
+  task=robotwin_unified_two_action_3cam_384_1e-4 \
+  output_dir=./runs/smoke_robotwin_unified_two_action \
+  batch_size=1 \
+  num_workers=0 \
+  max_steps=3 \
+  log_every=1 \
+  save_every=0 \
+  eval_every=0 \
+  model.mot_checkpoint_mixed_attn=true \
+  '+data.train.override_instruction=Grab the smooth green plastic bottle and lift it with the left arm' \
+  '+data.val.override_instruction=Grab the smooth green plastic bottle and lift it with the left arm'
+```
+
+On H100 80GB GPUs, both RoboTwin smoke commands above completed with 6 GPUs.
+With fewer GPUs, the ZeRO optimizer step may run out of memory.
+
 ## Static evaluation mode
 
 Unified models expose:
