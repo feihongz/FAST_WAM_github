@@ -1,14 +1,41 @@
 """Utils for evaluating policies in LIBERO simulation environments."""
 
 import math
+import os
 import time
 import pathlib
+import sys
 
 import imageio
 from PIL import Image, ImageDraw
 import numpy as np
-from libero.libero import get_libero_path
-from libero.libero.envs import OffScreenRenderEnv, SubprocVectorEnv
+
+
+def _prefer_fastwam_libero_package() -> None:
+    fastwam_libero_root = os.environ.get("FASTWAM_LIBERO_ROOT")
+    if fastwam_libero_root:
+        sys.path = [p for p in sys.path if p != "/root/code/feihong/LIBERO/libero"]
+        if fastwam_libero_root not in sys.path:
+            sys.path.insert(0, fastwam_libero_root)
+
+
+_prefer_fastwam_libero_package()
+
+def _ensure_libero_compat_alias() -> None:
+    import libero as libero_pkg
+
+    sys.modules.setdefault("libero.libero", libero_pkg)
+
+
+try:
+    from libero.libero import get_libero_path
+    from libero.libero.envs import OffScreenRenderEnv, SubprocVectorEnv
+except ModuleNotFoundError as exc:
+    if exc.name != "libero.libero":
+        raise
+    _ensure_libero_compat_alias()
+    from libero import get_libero_path
+    from libero.libero.envs import OffScreenRenderEnv, SubprocVectorEnv
 from fastwam.utils.video_io import save_mp4
 
 DATE = time.strftime("%Y_%m_%d")

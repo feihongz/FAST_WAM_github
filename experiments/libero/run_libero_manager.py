@@ -1,13 +1,38 @@
 import os
 import shlex
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 
 import hydra
 from hydra.core.hydra_config import HydraConfig
-from libero.libero import benchmark
 from omegaconf import DictConfig, OmegaConf
+
+
+def _prefer_fastwam_libero_package() -> None:
+    fastwam_libero_root = os.environ.get("FASTWAM_LIBERO_ROOT")
+    if fastwam_libero_root:
+        sys.path = [p for p in sys.path if p != "/root/code/feihong/LIBERO/libero"]
+        if fastwam_libero_root not in sys.path:
+            sys.path.insert(0, fastwam_libero_root)
+
+
+_prefer_fastwam_libero_package()
+
+def _ensure_libero_compat_alias() -> None:
+    import libero as libero_pkg
+
+    sys.modules.setdefault("libero.libero", libero_pkg)
+
+
+try:
+    from libero.libero import benchmark
+except ModuleNotFoundError as exc:
+    if exc.name != "libero.libero":
+        raise
+    _ensure_libero_compat_alias()
+    from libero import benchmark
 
 
 def create_task_file(output_file: Path, task_suite_names: list[str]) -> Path:

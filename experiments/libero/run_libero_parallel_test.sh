@@ -24,7 +24,7 @@ run_libero_eval() {
     export RUN_ID
     OUTPUT_DIR=${OUTPUT_DIR:-"$ROOT_DIR/evaluate_results/$RUN_ID"}
     export OUTPUT_DIR  # Use run_id as the output subdirectory
-    SESSION_NAME="libero_test_v3"
+    SESSION_NAME=${SESSION_NAME:-"libero_test_v3"}
     EXP_NAME=${EXP_NAME:-""}
     PYTHON_BIN=${PYTHON_BIN:-python}
     export EXP_NAME
@@ -68,6 +68,15 @@ run_libero_eval() {
         echo "Error: invalid tmux grid configuration, TMUX_GRID_ROWS=$TMUX_GRID_ROWS TMUX_GRID_COLS=$TMUX_GRID_COLS"
         exit 1
     fi
+    USE_TMUX=${USE_TMUX:-auto}
+    if [ "$USE_TMUX" = "auto" ]; then
+        if command -v tmux >/dev/null 2>&1; then
+            USE_TMUX=1
+        else
+            USE_TMUX=0
+        fi
+    fi
+    echo "USE_TMUX: $USE_TMUX"
     
     # GPU load tracking files
     GPU_LOAD_FILE="$OUTPUT_DIR/gpu_load.txt"
@@ -265,17 +274,22 @@ run_libero_eval() {
     init_gpu_load_tracking
 
     # Check for an existing tmux session
-    if tmux has-session -t $SESSION_NAME 2>/dev/null; then
-        # If the session exists, delete it
-        tmux kill-session -t $SESSION_NAME
-        echo "Session '$SESSION_NAME' has been deleted"
-    fi
+    if [ "$USE_TMUX" = "1" ]; then
+        if tmux has-session -t $SESSION_NAME 2>/dev/null; then
+            # If the session exists, delete it
+            tmux kill-session -t $SESSION_NAME
+            echo "Session '$SESSION_NAME' has been deleted"
+        fi
 
-    # Create a new detached session
-    tmux new-session -d -s $SESSION_NAME
+        # Create a new detached session
+        tmux new-session -d -s $SESSION_NAME
+    else
+        echo "tmux is unavailable or disabled; launching workers as background subprocesses."
+    fi
 
     # Create the grid layout
     create_grid_layout() {
+        [ "$USE_TMUX" = "1" ] || return 0
         local window=$1
         if [ $window -gt 0 ]; then
             # Check whether the window exists
@@ -302,6 +316,7 @@ run_libero_eval() {
     
     # Helper to ensure a window and pane exist
     ensure_pane_exists() {
+        [ "$USE_TMUX" = "1" ] || return 0
         local window_id=$1
         local pane_id=$2
         
@@ -333,22 +348,45 @@ run_libero_eval() {
         rm -f "$status_file"
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] Launching task: $suite task_id=$task_id on GPU$gpu_id pane $pane_info"
         
-        # Launch the task in a tmux pane.
-        # When the task exits, write a status file so the scheduler can detect failures promptly.
-        tmux select-pane -t $SESSION_NAME:$pane_info 2>/dev/null
-        tmux send-keys -t $SESSION_NAME:$pane_info "clear" C-m 2>/dev/null
-        tmux send-keys -t $SESSION_NAME:$pane_info "source ~/.bashrc && cd $ROOT_DIR && export EXP_NAME=$EXP_NAME && \
-            STATUS_FILE='$status_file' LOG_FILE='$log_file' RESULT_FILE='$result_file' && \
-            CUDA_VISIBLE_DEVICES=$gpu_id $PYTHON_BIN experiments/libero/eval_libero_single.py \
-            task=$CONFIG ckpt=$CKPT \
-            EVALUATION.task_suite_name=$suite EVALUATION.task_id=$task_id gpu_id=$gpu_id \
-            EVALUATION.num_trials=$NUM_TRIALS EVALUATION.output_dir=$OUTPUT_DIR $EXTRA_ARGS > \"\$LOG_FILE\" 2>&1; \
-            rc=\$?; \
-            if [ \$rc -eq 0 ] && [ -f \"\$RESULT_FILE\" ]; then \
-                echo \"SUCCESS|$gpu_id|\$rc|\$(date +%s)|\$LOG_FILE\" > \"\$STATUS_FILE\"; \
-            else \
-                echo \"FAILED|$gpu_id|\$rc|\$(date +%s)|\$LOG_FILE\" > \"\$STATUS_FILE\"; \
-            fi" C-m 2>/dev/null
+        # Launch the task and write a status file so the scheduler can detect failures promptly.
+        if [ "$USE_TMUX" = "1" ]; then
+            tmux select-pane -t $SESSION_NAME:$pane_info 2>/dev/null
+            tmux send-keys -t $SESSION_NAME:$pane_info "clear" C-m 2>/dev/null
+            tmux send-keys -t $SESSION_NAME:$pane_info "source ~/.bashrc && cd $ROOT_DIR && \
+                export EXP_NAME=$EXP_NAME && \
+                if [ -n '${PYTHONPATH:-}' ]; then export PYTHONPATH='${PYTHONPATH:-}'; fi && \
+                if [ -n '${LIBERO_CONFIG_PATH:-}' ]; then export LIBERO_CONFIG_PATH='${LIBERO_CONFIG_PATH:-}'; fi && \
+                STATUS_FILE='$status_file' LOG_FILE='$log_file' RESULT_FILE='$result_file' && \
+                CUDA_VISIBLE_DEVICES=$gpu_id $PYTHON_BIN experiments/libero/eval_libero_single.py \
+                task=$CONFIG ckpt=$CKPT \
+                EVALUATION.task_suite_name=$suite EVALUATION.task_id=$task_id gpu_id=$gpu_id \
+                EVALUATION.num_trials=$NUM_TRIALS EVALUATION.output_dir=$OUTPUT_DIR $EXTRA_ARGS > \"\$LOG_FILE\" 2>&1; \
+                rc=\$?; \
+                if [ \$rc -eq 0 ] && [ -f \"\$RESULT_FILE\" ]; then \
+                    echo \"SUCCESS|$gpu_id|\$rc|\$(date +%s)|\$LOG_FILE\" > \"\$STATUS_FILE\"; \
+                else \
+                    echo \"FAILED|$gpu_id|\$rc|\$(date +%s)|\$LOG_FILE\" > \"\$STATUS_FILE\"; \
+                fi" C-m 2>/dev/null
+        else
+            (
+                source ~/.bashrc
+                cd "$ROOT_DIR"
+                export EXP_NAME="$EXP_NAME"
+                if [ -n "${PYTHONPATH:-}" ]; then export PYTHONPATH="${PYTHONPATH:-}"; fi
+                if [ -n "${LIBERO_CONFIG_PATH:-}" ]; then export LIBERO_CONFIG_PATH="${LIBERO_CONFIG_PATH:-}"; fi
+                STATUS_FILE="$status_file" LOG_FILE="$log_file" RESULT_FILE="$result_file" \
+                CUDA_VISIBLE_DEVICES="$gpu_id" "$PYTHON_BIN" experiments/libero/eval_libero_single.py \
+                    task="$CONFIG" ckpt="$CKPT" \
+                    EVALUATION.task_suite_name="$suite" EVALUATION.task_id="$task_id" gpu_id="$gpu_id" \
+                    EVALUATION.num_trials="$NUM_TRIALS" EVALUATION.output_dir="$OUTPUT_DIR" $EXTRA_ARGS > "$log_file" 2>&1
+                rc=$?
+                if [ $rc -eq 0 ] && [ -f "$result_file" ]; then
+                    echo "SUCCESS|$gpu_id|$rc|$(date +%s)|$log_file" > "$status_file"
+                else
+                    echo "FAILED|$gpu_id|$rc|$(date +%s)|$log_file" > "$status_file"
+                fi
+            ) &
+        fi
         return 0
     }
 

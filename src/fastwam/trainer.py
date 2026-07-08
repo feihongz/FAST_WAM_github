@@ -3,6 +3,7 @@ import json
 import inspect
 import os
 import re
+import shutil
 from math import ceil
 from pathlib import Path
 import time
@@ -41,6 +42,13 @@ class Wan22Trainer:
         self.max_steps = int(max_steps) if max_steps is not None else None
         self.log_every = int(cfg.log_every)
         self.save_every = int(cfg.save_every)
+        self.save_final_checkpoint = bool(cfg.get("save_final_checkpoint", True))
+        self.checkpoint_keep_last = int(cfg.get("checkpoint_keep_last", 5))
+        if self.checkpoint_keep_last < 0:
+            raise ValueError("`checkpoint_keep_last` must be non-negative.")
+        self.state_checkpoint_keep_last = int(cfg.get("state_checkpoint_keep_last", 1))
+        if self.state_checkpoint_keep_last < 1:
+            raise ValueError("`state_checkpoint_keep_last` must be at least 1.")
         self.eval_every = int(cfg.eval_every)
         self.eval_num_inference_steps = int(cfg.eval_num_inference_steps)
         self.gradient_accumulation_steps = int(cfg.gradient_accumulation_steps)
@@ -61,6 +69,7 @@ class Wan22Trainer:
             mixed_precision=self.mixed_precision,
             step_scheduler_with_optimizer=False,
         )
+        self._align_model_device_with_accelerator()
         
         logger.info(
             "Accelerate training: distributed_type=%s zero_stage=%s world_size=%d process_index=%d cfg_mixed_precision=%s accelerator_mixed_precision=%s grad_accum=%d grad_clip=%.4f",
@@ -127,6 +136,25 @@ class Wan22Trainer:
 
         val_size = len(self.val_dataset) if self.val_dataset is not None else len(self.train_dataset)
         logger.info("Train/val dataset size: %d/%d", len(self.train_dataset), val_size)
+
+    def _align_model_device_with_accelerator(self):
+        model_device = getattr(self.model, "device", None)
+        if model_device is None:
+            return
+
+        model_device = torch.device(model_device)
+        accelerator_device = torch.device(self.accelerator.device)
+        if model_device == accelerator_device:
+            return
+
+        logger.warning(
+            "Model device %s differs from accelerator.device %s; moving model before prepare().",
+            model_device,
+            accelerator_device,
+        )
+        self.model.to(device=accelerator_device)
+        if hasattr(self.model, "device"):
+            self.model.device = accelerator_device
 
     def _init_wandb(self):
         if not self.wandb_enabled or not self.accelerator.is_main_process:
@@ -580,8 +608,71 @@ class Wan22Trainer:
         with open(state_file, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=True, indent=2)
 
-    def save_checkpoint(self):
-        step_tag = f"step_{self.global_step:06d}"
+    @staticmethod
+    def _step_from_checkpoint_name(name: str):
+        step_pattern = re.compile(r"^step_(\d+)$")
+        match = step_pattern.match(name)
+        return int(match.group(1)) if match else None
+
+    def _periodic_weight_steps(self):
+        steps = set()
+        weights_root = Path(self.weights_dir)
+
+        for path in weights_root.glob("step_*.pt"):
+            step = self._step_from_checkpoint_name(path.stem)
+            if step is not None:
+                steps.add(step)
+
+        return sorted(steps)
+
+    def _periodic_state_steps(self):
+        steps = set()
+        state_root = Path(self.state_dir)
+
+        for path in state_root.glob("step_*"):
+            step = self._step_from_checkpoint_name(path.name)
+            if step is not None:
+                steps.add(step)
+
+        return sorted(steps)
+
+    def _prune_periodic_weights(self):
+        if self.checkpoint_keep_last <= 0:
+            return
+        for step in self._periodic_weight_steps()[:-self.checkpoint_keep_last]:
+            step_tag = f"step_{step:06d}"
+            weights_path = Path(self.weights_dir) / f"{step_tag}.pt"
+
+            if weights_path.exists():
+                weights_path.unlink()
+                logger.info("[ckpt] pruned step=%d weights=%s", step, weights_path)
+
+    def _prune_periodic_states(self):
+        if self.state_checkpoint_keep_last == 1:
+            stale_steps = self._periodic_state_steps()
+        else:
+            stale_steps = self._periodic_state_steps()[:-self.state_checkpoint_keep_last]
+
+        for step in stale_steps:
+            step_tag = f"step_{step:06d}"
+            state_path = Path(self.state_dir) / step_tag
+            if state_path.exists():
+                shutil.rmtree(state_path)
+                logger.info("[ckpt] pruned step=%d state=%s", step, state_path)
+
+    def _prune_periodic_checkpoints(self, *, prune_weights: bool = True):
+        if prune_weights:
+            self._prune_periodic_weights()
+        self._prune_periodic_states()
+
+    def _state_checkpoint_path(self, step_tag: str):
+        if self.state_checkpoint_keep_last == 1:
+            return os.path.join(self.state_dir, "latest")
+        return os.path.join(self.state_dir, step_tag)
+
+    def save_checkpoint(self, *, step_tag: str | None = None, prune_periodic: bool = True):
+        if step_tag is None:
+            step_tag = f"step_{self.global_step:06d}"
 
         self.accelerator.wait_for_everyone()
         ckpt_path = None
@@ -589,11 +680,16 @@ class Wan22Trainer:
             ckpt_path = self._save_weights_checkpoint(step_tag=step_tag)
         self.accelerator.wait_for_everyone()
 
-        state_path = os.path.join(self.state_dir, step_tag)
+        state_path = self._state_checkpoint_path(step_tag)
+        self.accelerator.wait_for_everyone()
+        if self.accelerator.is_main_process and Path(state_path).exists():
+            shutil.rmtree(state_path)
+        self.accelerator.wait_for_everyone()
         ensure_dir(state_path)
         self.accelerator.save_state(output_dir=state_path)
         if self.accelerator.is_main_process:
             self._save_trainer_state(state_path)
+            self._prune_periodic_checkpoints(prune_weights=prune_periodic)
         self.accelerator.wait_for_everyone()
 
         return {"weights_path": ckpt_path, "state_path": state_path}
@@ -770,22 +866,34 @@ class Wan22Trainer:
                             )
 
                     if self.global_step >= self.max_steps:
-                        ckpt_info = self.save_checkpoint()
-                        if self.accelerator.is_main_process:
+                        if self.save_final_checkpoint:
+                            ckpt_info = self.save_checkpoint(step_tag="latest", prune_periodic=False)
+                            if self.accelerator.is_main_process:
+                                logger.info(
+                                    "[done] max_steps reached step=%d weights=%s state=%s",
+                                    self.global_step,
+                                    ckpt_info["weights_path"],
+                                    ckpt_info["state_path"],
+                                )
+                        elif self.accelerator.is_main_process:
                             logger.info(
-                                "[done] max_steps reached step=%d weights=%s state=%s",
+                                "[done] max_steps reached step=%d final checkpoint skipped.",
                                 self.global_step,
-                                ckpt_info["weights_path"],
-                                ckpt_info["state_path"],
                             )
                         return
 
-        ckpt_info = self.save_checkpoint()
-        if self.accelerator.is_main_process:
+        if self.save_final_checkpoint:
+            ckpt_info = self.save_checkpoint(step_tag="latest", prune_periodic=False)
+            if self.accelerator.is_main_process:
+                logger.info(
+                    "[done] training finished step=%d weights=%s state=%s",
+                    self.global_step,
+                    ckpt_info["weights_path"],
+                    ckpt_info["state_path"],
+                )
+        elif self.accelerator.is_main_process:
             logger.info(
-                "[done] training finished step=%d weights=%s state=%s",
+                "[done] training finished step=%d final checkpoint skipped.",
                 self.global_step,
-                ckpt_info["weights_path"],
-                ckpt_info["state_path"],
             )
         

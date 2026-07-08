@@ -26,6 +26,13 @@ EVALUATION:
   binarize_gripper: true
   use_action_ensembler: false
   visualize_future_video: false
+  save_videos: true
+  retry_invalid_episodes: false
+  max_invalid_episode_retries: 20
+  black_screen_filter: false
+  black_screen_mean_threshold: 5.0
+  black_screen_std_threshold: 2.0
+  black_screen_min_frame_fraction: 0.8
 
   # Action inference
   inference_mode: wo

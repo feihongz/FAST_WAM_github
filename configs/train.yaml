@@ -19,7 +19,10 @@ learning_rate: 1.0e-4
 num_epochs: 1
 max_steps: null
 log_every: 10
-save_every: 100
+save_every: 1000
+save_final_checkpoint: true
+checkpoint_keep_last: 5
+state_checkpoint_keep_last: 1
 eval_every: 50
 eval_num_inference_steps: 10
 

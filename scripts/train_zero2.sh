@@ -105,7 +105,12 @@ PY
   fi
 fi
 
+export TORCH_NCCL_TRACE_BUFFER_SIZE="${TORCH_NCCL_TRACE_BUFFER_SIZE:-1048576}"
+export TORCH_NCCL_DUMP_ON_TIMEOUT="${TORCH_NCCL_DUMP_ON_TIMEOUT:-1}"
+export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
+
 echo "[launch] nproc_per_node=${NPROC_PER_NODE} num_machines=${NUM_MACHINES} machine_rank=${MACHINE_RANK} run_id=${RUN_ID}"
+echo "[nccl] TORCH_NCCL_TRACE_BUFFER_SIZE=${TORCH_NCCL_TRACE_BUFFER_SIZE} TORCH_NCCL_DUMP_ON_TIMEOUT=${TORCH_NCCL_DUMP_ON_TIMEOUT} NCCL_DEBUG=${NCCL_DEBUG}"
 
 accelerate launch \
   --config_file scripts/accelerate_configs/accelerate_zero2_ds.yaml \

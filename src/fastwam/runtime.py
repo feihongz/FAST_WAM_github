@@ -523,6 +523,15 @@ def _resolve_train_device() -> str:
     return f"cuda:{local_rank}"
 
 
+def _set_current_cuda_device(device: str):
+    resolved = torch.device(device)
+    if resolved.type != "cuda":
+        return
+    if resolved.index is None:
+        raise ValueError(f"Training CUDA device must include an index, got {device!r}.")
+    torch.cuda.set_device(resolved)
+
+
 def run_training(cfg: DictConfig):
     setup_logging(
         log_level=logging.INFO,
@@ -534,6 +543,14 @@ def run_training(cfg: DictConfig):
         OmegaConf.save(config_payload, f)
 
     model_device = _resolve_train_device()
+    _set_current_cuda_device(model_device)
+    logger.info(
+        "Resolved training device: model_device=%s current_cuda_device=%s local_rank=%s visible_cuda_devices=%s",
+        model_device,
+        torch.cuda.current_device() if torch.cuda.is_available() else "cpu",
+        os.environ.get("LOCAL_RANK", "0"),
+        os.environ.get("CUDA_VISIBLE_DEVICES", "<unset>"),
+    )
     mixed_precision = _normalize_mixed_precision(cfg.mixed_precision)
     model_dtype = _mixed_precision_to_model_dtype(mixed_precision)
     model = instantiate(cfg.model, model_dtype=model_dtype, device=model_device)

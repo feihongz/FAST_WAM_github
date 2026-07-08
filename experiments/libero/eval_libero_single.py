@@ -25,6 +25,17 @@ project_root = Path(__file__).resolve().parents[2]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
+
+def _prefer_fastwam_libero_package() -> None:
+    fastwam_libero_root = os.environ.get("FASTWAM_LIBERO_ROOT")
+    if fastwam_libero_root:
+        sys.path = [p for p in sys.path if p != "/root/code/feihong/LIBERO/libero"]
+        if fastwam_libero_root not in sys.path:
+            sys.path.insert(0, fastwam_libero_root)
+
+
+_prefer_fastwam_libero_package()
+
 from experiments.libero.libero_utils import (
     LIBERO_ENV_RESOLUTION,
     get_libero_dummy_action,
@@ -39,7 +50,22 @@ from fastwam.datasets.lerobot.processors.fastwam_processor import FastWAMProcess
 from fastwam.datasets.lerobot.utils.normalizer import load_dataset_stats_from_json
 from fastwam.utils.pytorch_utils import set_global_seed
 from fastwam.datasets.lerobot.robot_video_dataset import DEFAULT_PROMPT
-from libero.libero import benchmark
+
+
+def _ensure_libero_compat_alias() -> None:
+    import libero as libero_pkg
+
+    sys.modules.setdefault("libero.libero", libero_pkg)
+
+
+try:
+    from libero.libero import benchmark
+except ModuleNotFoundError as exc:
+    if exc.name != "libero.libero":
+        raise
+    _ensure_libero_compat_alias()
+    from libero import benchmark
+
 from action_ensembler import ActionEnsembler
 
 OmegaConf.register_new_resolver("eval", eval)
@@ -356,6 +382,46 @@ def _compute_clip_mean_psnr(
     return float(np.mean(frame_psnr_values))
 
 
+def _is_black_frame(
+    frame: Any,
+    *,
+    mean_threshold: float,
+    std_threshold: float,
+) -> bool:
+    image = _frame_to_rgb_array(frame)
+    if image.size == 0:
+        return True
+    if image.ndim == 2:
+        image = image[..., None]
+    image_f32 = image.astype(np.float32)
+    return (
+        float(image_f32.mean()) <= float(mean_threshold)
+        and float(image_f32.std()) <= float(std_threshold)
+    )
+
+
+def _invalid_episode_reason(replay_images: list, cfg: DictConfig) -> Optional[str]:
+    if len(replay_images) == 0:
+        return "no_replay_images"
+    if not bool(cfg.EVALUATION.get("black_screen_filter", False)):
+        return None
+
+    black_count = sum(
+        1
+        for frame in replay_images
+        if _is_black_frame(
+            frame,
+            mean_threshold=float(cfg.EVALUATION.get("black_screen_mean_threshold", 5.0)),
+            std_threshold=float(cfg.EVALUATION.get("black_screen_std_threshold", 2.0)),
+        )
+    )
+    fraction = black_count / max(len(replay_images), 1)
+    min_fraction = float(cfg.EVALUATION.get("black_screen_min_frame_fraction", 0.8))
+    if fraction >= min_fraction:
+        return f"black_screen_frames={black_count}/{len(replay_images)}"
+    return None
+
+
 def _predict_action_chunk(
     obs: dict,
     task_description: str,
@@ -604,51 +670,112 @@ def run_single_task(
 ) -> dict:
     env, task_description = get_libero_env(task, LIBERO_ENV_RESOLUTION, cfg.get("seed"))
     visualize_future_video = bool(cfg.EVALUATION.get("visualize_future_video", False))
+    save_videos = bool(cfg.EVALUATION.get("save_videos", True))
+    retry_invalid_episodes = bool(cfg.EVALUATION.get("retry_invalid_episodes", False))
+    max_invalid_retries = int(cfg.EVALUATION.get("max_invalid_episode_retries", 20))
     results = {
         "successes": 0,
         "failure_episodes": [],
         "success_episodes": [],
+        "invalid_episodes": [],
+        "invalid_episode_count": 0,
+        "attempted_episodes": 0,
         "task_description": task_description,
     }
     if visualize_future_video:
         results["episode_future_video_psnr"] = []
         results["future_video_psnr_mean"] = None
 
-    for trial_idx in range(int(cfg.EVALUATION.num_trials)):
-        success, replay_images, predicted_future_video_clips, episode_mean_psnr = run_single_episode(
-            env=env,
-            initial_state=initial_states[trial_idx],
-            task_description=task_description,
-            model=model,
-            processor=processor,
-            cfg=cfg,
-            episode_idx=trial_idx,
-            action_horizon=action_horizon,
-            input_w=input_w,
-            input_h=input_h,
-            model_device=model_device,
-        )
+    target_valid_trials = int(cfg.EVALUATION.num_trials)
+    valid_trial_idx = 0
+    invalid_retries = 0
+    attempted_idx = 0
+
+    while valid_trial_idx < target_valid_trials:
+        try:
+            success, replay_images, predicted_future_video_clips, episode_mean_psnr = run_single_episode(
+                env=env,
+                initial_state=initial_states[valid_trial_idx],
+                task_description=task_description,
+                model=model,
+                processor=processor,
+                cfg=cfg,
+                episode_idx=valid_trial_idx,
+                action_horizon=action_horizon,
+                input_w=input_w,
+                input_h=input_h,
+                model_device=model_device,
+            )
+            invalid_reason = _invalid_episode_reason(replay_images, cfg)
+        except Exception as exc:
+            if not retry_invalid_episodes:
+                raise
+            logging.exception(
+                "Invalid LIBERO episode due to exception: task=%s trial=%s attempt=%s",
+                cfg.EVALUATION.task_id,
+                valid_trial_idx,
+                attempted_idx,
+            )
+            success = False
+            replay_images = []
+            predicted_future_video_clips = []
+            episode_mean_psnr = None
+            invalid_reason = f"exception:{type(exc).__name__}"
+
+        results["attempted_episodes"] += 1
+        attempted_idx += 1
+
+        if invalid_reason is not None:
+            if not retry_invalid_episodes:
+                raise RuntimeError(
+                    f"Invalid LIBERO episode detected but retry_invalid_episodes=false: {invalid_reason}"
+                )
+            invalid_retries += 1
+            invalid_record = {
+                "target_trial": valid_trial_idx,
+                "attempt": attempted_idx - 1,
+                "reason": invalid_reason,
+            }
+            results["invalid_episodes"].append(invalid_record)
+            results["invalid_episode_count"] = invalid_retries
+            logging.warning(
+                "Discarding invalid LIBERO episode and retrying: task=%s trial=%s attempt=%s reason=%s invalid_retries=%s/%s",
+                cfg.EVALUATION.task_id,
+                valid_trial_idx,
+                attempted_idx - 1,
+                invalid_reason,
+                invalid_retries,
+                max_invalid_retries,
+            )
+            if invalid_retries > max_invalid_retries:
+                raise RuntimeError(
+                    "Exceeded max_invalid_episode_retries="
+                    f"{max_invalid_retries} for task={cfg.EVALUATION.task_suite_name}/{cfg.EVALUATION.task_id}."
+                )
+            continue
+
         if success:
             results["successes"] += 1
-            results["success_episodes"].append(trial_idx)
+            results["success_episodes"].append(valid_trial_idx)
         else:
-            results["failure_episodes"].append(trial_idx)
+            results["failure_episodes"].append(valid_trial_idx)
         if visualize_future_video:
             results["episode_future_video_psnr"].append(episode_mean_psnr)
 
-        save_rollout_video(
-            video_dir,
-            replay_images,
-            f"task{cfg.EVALUATION.task_id}_trial{trial_idx}",
-            success=success,
-            task_description=task_description,
-        )
-        if visualize_future_video:
+        if save_videos:
+            save_rollout_video(
+                video_dir,
+                replay_images,
+                f"task{cfg.EVALUATION.task_id}_trial{valid_trial_idx}",
+                success=success,
+                task_description=task_description,
+            )
+        if visualize_future_video and save_videos:
             if len(predicted_future_video_clips) == 0:
                 logging.warning(
                     "No predicted future frames collected for task %s trial %s.",
                     cfg.EVALUATION.task_id,
-                    trial_idx,
+                    valid_trial_idx,
                 )
             else:
                 all_gt_frames = []
@@ -660,7 +787,7 @@ def run_single_task(
                         predicted_video_dir,
                         clip["gt_frames"],
                         clip["pred_frames"],
-                        f"task{cfg.EVALUATION.task_id}_trial{trial_idx}",
+                        f"task{cfg.EVALUATION.task_id}_trial{valid_trial_idx}",
                         clip["replan_idx"],
                         success=success,
                         task_description=task_description,
@@ -669,11 +796,12 @@ def run_single_task(
                     predicted_video_dir,
                     all_gt_frames,
                     all_pred_frames,
-                    f"task{cfg.EVALUATION.task_id}_trial{trial_idx}",
+                    f"task{cfg.EVALUATION.task_id}_trial{valid_trial_idx}",
                     "all",
                     success=success,
                     task_description=task_description,
                 )
+        valid_trial_idx += 1
 
     if visualize_future_video:
         valid_episode_psnr = [x for x in results["episode_future_video_psnr"] if x is not None]
@@ -733,9 +861,10 @@ def eval_single_process(cfg: DictConfig):
     local_log_dir = Path(cfg.EVALUATION.output_dir)
     local_log_dir.mkdir(parents=True, exist_ok=True)
     video_dir = local_log_dir / cfg.EVALUATION.task_suite_name / "videos"
-    video_dir.mkdir(parents=True, exist_ok=True)
+    if bool(cfg.EVALUATION.get("save_videos", True)):
+        video_dir.mkdir(parents=True, exist_ok=True)
     predicted_video_dir = local_log_dir / cfg.EVALUATION.task_suite_name / "predicted_videos"
-    if bool(cfg.EVALUATION.get("visualize_future_video", False)):
+    if bool(cfg.EVALUATION.get("visualize_future_video", False)) and bool(cfg.EVALUATION.get("save_videos", True)):
         predicted_video_dir.mkdir(parents=True, exist_ok=True)
 
     benchmark_dict = benchmark.get_benchmark_dict()

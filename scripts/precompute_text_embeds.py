@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -160,11 +161,41 @@ def _model_id_to_enc_id(model_id: str) -> str:
     return enc_id or "textenc"
 
 
-def _atomic_torch_save(payload: dict[str, torch.Tensor], output_path: Path):
+def _atomic_torch_save(
+    payload: dict[str, torch.Tensor],
+    output_path: Path,
+    *,
+    attempts: int = 3,
+    retry_delay: float = 2.0,
+):
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = output_path.parent / f".{output_path.name}.tmp.{uuid.uuid4().hex}"
-    torch.save(payload, str(tmp_path))
-    os.replace(tmp_path, output_path)
+    for attempt in range(1, attempts + 1):
+        tmp_path = output_path.parent / f".{output_path.name}.tmp.{uuid.uuid4().hex}"
+        try:
+            torch.save(payload, str(tmp_path))
+            os.replace(tmp_path, output_path)
+            return
+        except Exception as exc:
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError as cleanup_exc:
+                logger.warning(
+                    "Failed to remove incomplete cache file %s after save error: %s",
+                    tmp_path,
+                    cleanup_exc,
+                )
+            if attempt == attempts:
+                raise
+            logger.warning(
+                "Failed to save text cache %s on attempt %d/%d: %s. Retrying in %.1fs.",
+                output_path,
+                attempt,
+                attempts,
+                exc,
+                retry_delay,
+            )
+            time.sleep(retry_delay)
 
 
 @hydra.main(config_path="../configs", config_name="train", version_base="1.3")
