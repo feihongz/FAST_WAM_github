@@ -38,6 +38,12 @@ EVALUATION:
   inference_mode: wo
   video_prefix_steps: 0
   force_custom_prefix: true
+  gate:
+    enabled: false
+    mode: fixed_0  # fixed_0 | fixed_full | random | learned (Phase 3)
+    full_probability: 0.5
+    seed: ${seed}
+    threshold: 0.0
   action_horizon: null
   num_inference_steps: ${eval_num_inference_steps}
   sigma_shift: null

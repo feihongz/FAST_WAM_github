@@ -46,6 +46,11 @@ from experiments.libero.libero_utils import (
     save_prediction_video,
     save_rollout_video,
 )
+from experiments.libero.gate.router import (
+    GateRequest,
+    GateRouter,
+    validate_gate_eval_settings,
+)
 from fastwam.datasets.lerobot.processors.fastwam_processor import FastWAMProcessor
 from fastwam.datasets.lerobot.utils.normalizer import load_dataset_stats_from_json
 from fastwam.utils.pytorch_utils import set_global_seed
@@ -317,6 +322,37 @@ def _validate_visualize_future_video_cfg(cfg: DictConfig) -> None:
         )
 
 
+def _get_num_inference_steps(cfg: DictConfig) -> int:
+    configured = cfg.EVALUATION.get("num_inference_steps", None)
+    if configured is None:
+        return int(cfg.get("eval_num_inference_steps", 20))
+    return int(configured)
+
+
+def _build_gate_router(cfg: DictConfig, *, num_inference_steps: int) -> Optional[GateRouter]:
+    gate_cfg = cfg.EVALUATION.get("gate", None)
+    if gate_cfg is None or not bool(gate_cfg.get("enabled", False)):
+        return None
+
+    inference_mode = str(cfg.EVALUATION.get("inference_mode", "wo")).lower()
+    validate_gate_eval_settings(
+        enabled=True,
+        inference_mode=inference_mode,
+        visualize_future_video=bool(cfg.EVALUATION.get("visualize_future_video", False)),
+    )
+
+    gate_seed = gate_cfg.get("seed", cfg.get("seed", 42))
+    if gate_seed is None:
+        gate_seed = 42
+    return GateRouter(
+        mode=str(gate_cfg.get("mode", "fixed_0")),
+        num_inference_steps=num_inference_steps,
+        full_probability=float(gate_cfg.get("full_probability", 0.5)),
+        seed=int(gate_seed),
+        threshold=float(gate_cfg.get("threshold", 0.0)),
+    )
+
+
 def _select_predicted_future_frames(pred_video: list[Image.Image], cfg: DictConfig) -> list[Image.Image]:
     if len(pred_video) == 0:
         raise ValueError("`infer_joint` returned an empty predicted video.")
@@ -433,12 +469,11 @@ def _predict_action_chunk(
     input_w: int,
     input_h: int,
     model_device: str,
-) -> tuple[np.ndarray, dict, Optional[list[Image.Image]]]:
-    num_inference_steps_cfg = cfg.EVALUATION.get("num_inference_steps", None)
-    if num_inference_steps_cfg is None:
-        num_inference_steps = int(cfg.get("eval_num_inference_steps", 20))
-    else:
-        num_inference_steps = int(num_inference_steps_cfg)
+    episode_idx: int,
+    replan_idx: int,
+    gate_router: Optional[GateRouter] = None,
+) -> tuple[np.ndarray, dict, Optional[list[Image.Image]], Optional[dict[str, Any]]]:
+    num_inference_steps = _get_num_inference_steps(cfg)
     prompt_template = DEFAULT_PROMPT
     prompt = prompt_template.format(task=task_description)
 
@@ -471,19 +506,45 @@ def _predict_action_chunk(
     }
     visualize_future_video = bool(cfg.EVALUATION.get("visualize_future_video", False))
     inference_mode = str(cfg.EVALUATION.get("inference_mode", "wo")).lower()
+    gate_decision = None
+    gate_latency_ms = 0.0
+    if gate_router is not None:
+        if visualize_future_video:
+            raise ValueError(
+                "visualize_future_video=true cannot be used while Gate routing is enabled"
+            )
+        gate_t0 = time.perf_counter()
+        gate_decision = gate_router.select(
+            GateRequest(
+                task_key=f"{cfg.EVALUATION.task_suite_name}/{cfg.EVALUATION.task_id}",
+                episode_idx=episode_idx,
+                replan_idx=replan_idx,
+                prompt=prompt,
+                image=image,
+                proprio=proprio,
+            )
+        )
+        gate_latency_ms = (time.perf_counter() - gate_t0) * 1000.0
+        inference_mode = "prefix"
+
     predicted_future_frames = None
     if visualize_future_video or inference_mode in {"w", "prefix"}:
         infer_kwargs["num_video_frames"] = _get_num_video_frames(cfg)
     elif "num_video_frames" in inspect.signature(model.infer_action).parameters:
         infer_kwargs["num_video_frames"] = _get_num_video_frames(cfg)
 
+    action_infer_t0 = time.perf_counter()
     with torch.no_grad():
         if visualize_future_video:
             pred = model.infer_joint(**infer_kwargs)
             predicted_future_frames = _select_predicted_future_frames(pred["video"], cfg)
         elif hasattr(model, "infer_action_mode"):
             if inference_mode == "prefix":
-                infer_kwargs["video_prefix_steps"] = int(cfg.EVALUATION.get("video_prefix_steps", 0))
+                infer_kwargs["video_prefix_steps"] = (
+                    gate_decision.selected_n
+                    if gate_decision is not None
+                    else int(cfg.EVALUATION.get("video_prefix_steps", 0))
+                )
                 infer_kwargs["force_custom_prefix"] = True
             pred = model.infer_action_mode(**infer_kwargs, inference_mode=inference_mode)
         else:
@@ -492,6 +553,41 @@ def _predict_action_chunk(
                     f"Model {type(model).__name__} does not support inference_mode={inference_mode}"
                 )
             pred = model.infer_action(**infer_kwargs)
+    action_inference_latency_ms = (time.perf_counter() - action_infer_t0) * 1000.0
+
+    route_record = None
+    if gate_decision is not None:
+        actual_prefix_steps = pred.get("video_prefix_steps", None)
+        if actual_prefix_steps is None or int(actual_prefix_steps) != gate_decision.selected_n:
+            raise AssertionError(
+                "Gate route mismatch: "
+                f"selected_n={gate_decision.selected_n}, model_reported={actual_prefix_steps}"
+            )
+        route_record = {
+            "task_key": f"{cfg.EVALUATION.task_suite_name}/{cfg.EVALUATION.task_id}",
+            "episode_idx": int(episode_idx),
+            "replan_idx": int(replan_idx),
+            "gate_mode": gate_decision.mode,
+            "gate_score": float(gate_decision.score),
+            "threshold": float(gate_decision.threshold),
+            "selected_n": int(gate_decision.selected_n),
+            "num_inference_steps": int(num_inference_steps),
+            "gate_latency_ms": float(gate_latency_ms),
+            "action_inference_latency_ms": float(action_inference_latency_ms),
+        }
+        logging.info(
+            "[gate] task=%s episode=%d replan=%d mode=%s score=%.6f "
+            "threshold=%.6f selected_n=%d gate_ms=%.3f action_ms=%.3f",
+            route_record["task_key"],
+            route_record["episode_idx"],
+            route_record["replan_idx"],
+            route_record["gate_mode"],
+            route_record["gate_score"],
+            route_record["threshold"],
+            route_record["selected_n"],
+            route_record["gate_latency_ms"],
+            route_record["action_inference_latency_ms"],
+        )
     action = pred["action"]  # [T, D]
 
     action = _denormalize_action(action, processor)[0]  # [T, D]
@@ -502,7 +598,7 @@ def _predict_action_chunk(
     action = invert_gripper_action(action)
     if bool(cfg.EVALUATION.get("binarize_gripper", False)):
         action[..., -1] = np.sign(action[..., -1])
-    return action, imgs, predicted_future_frames
+    return action, imgs, predicted_future_frames, route_record
 
 
 def _get_max_steps(task_suite_name: str) -> int:
@@ -531,7 +627,8 @@ def run_single_episode(
     input_w: int,
     input_h: int,
     model_device: str,
-) -> tuple[bool, list, list[dict[str, Any]], Optional[float]]:
+    gate_router: Optional[GateRouter] = None,
+) -> tuple[bool, list, list[dict[str, Any]], Optional[float], list[dict[str, Any]]]:
     max_steps = _get_max_steps(cfg.EVALUATION.task_suite_name)
     replan_steps = int(cfg.EVALUATION.get("replan_steps", 5))
     num_steps_wait = int(cfg.EVALUATION.get("num_steps_wait", 5))
@@ -552,6 +649,8 @@ def run_single_episode(
     current_predicted_future_clip: Optional[dict[str, Any]] = None
     current_replan_step = 0
     current_replan_idx = -1
+    action_replan_idx = -1
+    gate_route_trace: list[dict[str, Any]] = []
 
     t = 0
     done = False
@@ -564,7 +663,8 @@ def run_single_episode(
             continue
 
         if len(pending_actions) == 0:
-            action_chunk, imgs, predicted_future_frames = _predict_action_chunk(
+            action_replan_idx += 1
+            action_chunk, imgs, predicted_future_frames, route_record = _predict_action_chunk(
                 obs=obs,
                 task_description=task_description,
                 model=model,
@@ -574,7 +674,12 @@ def run_single_episode(
                 input_w=input_w,
                 input_h=input_h,
                 model_device=model_device,
+                episode_idx=episode_idx,
+                replan_idx=action_replan_idx,
+                gate_router=gate_router,
             )
+            if route_record is not None:
+                gate_route_trace.append(route_record)
             if predicted_future_frames is not None:
                 current_replan_idx += 1
                 current_predicted_future_clip = {
@@ -654,7 +759,7 @@ def run_single_episode(
     episode_mean_psnr = (
         float(np.mean(episode_future_clip_psnr)) if len(episode_future_clip_psnr) > 0 else None
     )
-    return bool(done), replay_images, predicted_future_video_clips, episode_mean_psnr
+    return bool(done), replay_images, predicted_future_video_clips, episode_mean_psnr, gate_route_trace
 
 
 def run_single_task(
@@ -677,14 +782,14 @@ def run_single_task(
     retry_invalid_episodes = bool(cfg.EVALUATION.get("retry_invalid_episodes", False))
     max_invalid_retries = int(cfg.EVALUATION.get("max_invalid_episode_retries", 20))
     inference_mode = str(cfg.EVALUATION.get("inference_mode", "wo")).lower()
-    num_inference_steps_cfg = cfg.EVALUATION.get("num_inference_steps", None)
-    if num_inference_steps_cfg is None:
-        num_inference_steps = int(cfg.get("eval_num_inference_steps", 20))
-    else:
-        num_inference_steps = int(num_inference_steps_cfg)
+    num_inference_steps = _get_num_inference_steps(cfg)
+    gate_router = _build_gate_router(cfg, num_inference_steps=num_inference_steps)
+    gate_enabled = gate_router is not None
     video_prefix_steps = int(cfg.EVALUATION.get("video_prefix_steps", 0))
     force_custom_prefix = inference_mode == "prefix"
-    if inference_mode == "prefix":
+    if gate_enabled:
+        video_steps_per_action = None
+    elif inference_mode == "prefix":
         video_steps_per_action = video_prefix_steps
     elif inference_mode == "w" or visualize_future_video:
         video_steps_per_action = num_inference_steps
@@ -700,10 +805,27 @@ def run_single_task(
         "task_description": task_description,
         "eval_inference_mode": inference_mode,
         "eval_num_inference_steps": num_inference_steps,
-        "eval_video_prefix_steps": video_prefix_steps if inference_mode == "prefix" else None,
+        "eval_video_prefix_steps": (
+            video_prefix_steps
+            if inference_mode == "prefix" and not gate_enabled
+            else None
+        ),
         "eval_force_custom_prefix": force_custom_prefix if inference_mode == "prefix" else None,
         "eval_video_steps_per_action": video_steps_per_action,
+        "gate_enabled": gate_enabled,
     }
+    if gate_enabled:
+        results.update(
+            {
+                "gate_mode": gate_router.mode,
+                "gate_full_probability": gate_router.full_probability,
+                "gate_seed": gate_router.seed,
+                "gate_route_trace": [],
+                "gate_episode_summaries": [],
+                "gate_actual_n_eff": None,
+                "gate_actual_full_fraction": None,
+            }
+        )
     if visualize_future_video:
         results["episode_future_video_psnr"] = []
         results["future_video_psnr_mean"] = None
@@ -715,7 +837,7 @@ def run_single_task(
 
     while valid_trial_idx < target_valid_trials:
         try:
-            success, replay_images, predicted_future_video_clips, episode_mean_psnr = run_single_episode(
+            success, replay_images, predicted_future_video_clips, episode_mean_psnr, gate_route_trace = run_single_episode(
                 env=env,
                 initial_state=initial_states[valid_trial_idx],
                 task_description=task_description,
@@ -727,6 +849,7 @@ def run_single_task(
                 input_w=input_w,
                 input_h=input_h,
                 model_device=model_device,
+                gate_router=gate_router,
             )
             invalid_reason = _invalid_episode_reason(replay_images, cfg)
         except Exception as exc:
@@ -742,6 +865,7 @@ def run_single_task(
             replay_images = []
             predicted_future_video_clips = []
             episode_mean_psnr = None
+            gate_route_trace = []
             invalid_reason = f"exception:{type(exc).__name__}"
 
         results["attempted_episodes"] += 1
@@ -783,6 +907,31 @@ def run_single_task(
             results["failure_episodes"].append(valid_trial_idx)
         if visualize_future_video:
             results["episode_future_video_psnr"].append(episode_mean_psnr)
+        if gate_enabled:
+            num_replans = len(gate_route_trace)
+            num_n0 = sum(int(item["selected_n"]) == 0 for item in gate_route_trace)
+            num_nfull = sum(
+                int(item["selected_n"]) == num_inference_steps for item in gate_route_trace
+            )
+            n_eff = (
+                float(sum(int(item["selected_n"]) for item in gate_route_trace) / num_replans)
+                if num_replans > 0
+                else 0.0
+            )
+            results["gate_route_trace"].extend(gate_route_trace)
+            results["gate_episode_summaries"].append(
+                {
+                    "episode_idx": int(valid_trial_idx),
+                    "success": bool(success),
+                    "num_replans": int(num_replans),
+                    "num_n0": int(num_n0),
+                    "num_nfull": int(num_nfull),
+                    "n_full_fraction": (
+                        float(num_nfull / num_replans) if num_replans > 0 else 0.0
+                    ),
+                    "n_eff": n_eff,
+                }
+            )
 
         if save_videos:
             save_rollout_video(
@@ -829,6 +978,12 @@ def run_single_task(
         valid_episode_psnr = [x for x in results["episode_future_video_psnr"] if x is not None]
         if len(valid_episode_psnr) > 0:
             results["future_video_psnr_mean"] = float(np.mean(valid_episode_psnr))
+    if gate_enabled and len(results["gate_route_trace"]) > 0:
+        selected_steps = [int(item["selected_n"]) for item in results["gate_route_trace"]]
+        results["gate_actual_n_eff"] = float(np.mean(selected_steps))
+        results["gate_actual_full_fraction"] = float(
+            np.mean([step == num_inference_steps for step in selected_steps])
+        )
     return results
 
 
@@ -844,6 +999,7 @@ def eval_single_process(cfg: DictConfig):
     if cfg.ckpt is None:
         raise ValueError("cfg.ckpt must not be None.")
     _validate_visualize_future_video_cfg(cfg)
+    _build_gate_router(cfg, num_inference_steps=_get_num_inference_steps(cfg))
 
     env_num = int(cfg.EVALUATION.get("env_num", 1))
     if env_num != 1:
