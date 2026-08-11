@@ -8,13 +8,13 @@ set -euo pipefail
 #   4,5: unified_two_action without video (wo)
 #   6,7: unified_two_action with video (w)
 
-REPO_DIR="${REPO_DIR:-/root/code/feihong/FAST_WAM_github}"
-FASTWAM_ENV="${FASTWAM_ENV:-/root/.venvs/fastwam-libero}"
+REPO_DIR="${REPO_DIR:-/root/feihong/FAST_WAM_github}"
+FASTWAM_ENV="${FASTWAM_ENV:-/root/.venvs/fastwam}"
 PYTHON_BIN="${PYTHON_BIN:-${FASTWAM_ENV}/bin/python}"
 RUN_ID="${RUN_ID:-$(date +%Y-%m-%d_%H-%M-%S)}"
 RUNS_ROOT="${RUNS_ROOT:-/root/feihong/FastWAM/formal_runs/FAST_WAM_github}"
-FASTWAM_LIBERO_ROOT="${FASTWAM_LIBERO_ROOT:-/root/nas/temp_nas/FastWAM/third_party/LIBERO}"
-FASTWAM_LIBERO_DATASETS="${FASTWAM_LIBERO_DATASETS:-/root/nas/temp_nas/FastWAM/datasets/libero_mujoco3.3.2}"
+FASTWAM_LIBERO_ROOT="${FASTWAM_LIBERO_ROOT:-/root/feihong/FastWAM/third_party/LIBERO}"
+FASTWAM_LIBERO_DATASETS="${FASTWAM_LIBERO_DATASETS:-/root/feihong/FastWAM/datasets/libero_mujoco3.3.2}"
 LIBERO_CONFIG_DIR="${LIBERO_CONFIG_DIR:-/root/feihong/FastWAM/libero_config_fastwam}"
 EVAL_OUTPUT_ROOT="${EVAL_OUTPUT_ROOT:-/root/feihong/FastWAM/evaluate_results/libero_incremental_4x2gpu/${RUN_ID}}"
 EVAL_LOG_ROOT="${EVAL_LOG_ROOT:-/root/feihong/FastWAM/evaluate_logs/libero_incremental_4x2gpu/${RUN_ID}}"
@@ -26,6 +26,7 @@ BLACK_SCREEN_MEAN_THRESHOLD="${BLACK_SCREEN_MEAN_THRESHOLD:-5.0}"
 BLACK_SCREEN_STD_THRESHOLD="${BLACK_SCREEN_STD_THRESHOLD:-2.0}"
 BLACK_SCREEN_MIN_FRAME_FRACTION="${BLACK_SCREEN_MIN_FRAME_FRACTION:-0.8}"
 FORCE_RERUN="${FORCE_RERUN:-1}"
+REDIRECT_COMMON_FILES="${REDIRECT_COMMON_FILES:-false}"
 
 mkdir -p "${EVAL_OUTPUT_ROOT}" "${EVAL_LOG_ROOT}"
 cd "${REPO_DIR}"
@@ -33,9 +34,9 @@ cd "${REPO_DIR}"
 export PATH="${FASTWAM_ENV}/bin:${PATH}"
 export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
 export HYDRA_FULL_ERROR="${HYDRA_FULL_ERROR:-1}"
-export DIFFSYNTH_MODEL_BASE_PATH="${DIFFSYNTH_MODEL_BASE_PATH:-/root/nas/temp_nas/FastWAM/checkpoints}"
+export DIFFSYNTH_MODEL_BASE_PATH="${DIFFSYNTH_MODEL_BASE_PATH:-/root/feihong/FastWAM/checkpoints}"
 export DIFFSYNTH_SKIP_DOWNLOAD="${DIFFSYNTH_SKIP_DOWNLOAD:-true}"
-export HF_HOME="${HF_HOME:-/root/nas/temp_nas/FastWAM/.cache/huggingface}"
+export HF_HOME="${HF_HOME:-/root/feihong/FastWAM/.cache/huggingface}"
 export PYTHON_BIN
 
 fail() { echo "[error] $*" >&2; exit 1; }
@@ -68,8 +69,17 @@ setup_fastwam_libero
 latest_run_dir() {
   local task="$1"
   local task_root="${RUNS_ROOT}/${task}"
+  local run_dir=""
+  local latest=""
   [[ -d "${task_root}" ]] || fail "Missing run root: ${task_root}"
-  find "${task_root}" -mindepth 1 -maxdepth 1 -type d | sort | tail -n 1
+  while IFS= read -r run_dir; do
+    if [[ -s "${run_dir}/checkpoints/weights/latest.pt" && -s "${run_dir}/dataset_stats.json" ]]; then
+      latest="${run_dir}"
+    fi
+  done < <(find "${task_root}" -mindepth 1 -maxdepth 1 -type d -print | sort)
+  [[ -n "${latest}" ]] || fail \
+    "No complete run found under ${task_root} (requires checkpoints/weights/latest.pt and dataset_stats.json)"
+  printf "%s\n" "${latest}"
 }
 
 summary_is_complete() {
@@ -129,6 +139,7 @@ run_eval_job() {
       "EVALUATION.black_screen_min_frame_fraction=${BLACK_SCREEN_MIN_FRAME_FRACTION}" \
       "MULTIRUN.num_gpus=2" \
       "MULTIRUN.max_tasks_per_gpu=${MAX_TASKS_PER_GPU}" \
+      "model.redirect_common_files=${REDIRECT_COMMON_FILES}" \
       "$@" >> "${log_file}" 2>&1
     local status="$?"
     set -e

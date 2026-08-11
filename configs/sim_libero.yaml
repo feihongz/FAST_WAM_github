@@ -36,6 +36,8 @@ EVALUATION:
 
   # Action inference
   inference_mode: wo
+  video_prefix_steps: 0
+  force_custom_prefix: true
   action_horizon: null
   num_inference_steps: ${eval_num_inference_steps}
   sigma_shift: null

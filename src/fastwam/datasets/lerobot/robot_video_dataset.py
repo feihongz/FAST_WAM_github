@@ -1,6 +1,6 @@
 import hashlib
 import os
-from typing import Optional
+from typing import Callable, Optional
 import time
 import numpy as np
 import traceback
@@ -42,6 +42,7 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         max_padding_retry: int = 3,
         concat_multi_camera: str = "horizontal", # "horizontal", "vertical", "robotwin", or None
         override_instruction: Optional[str] = None, # whether to hardcode a specific instruction for all samples, for debugging
+        episode_selector: Optional[Callable[[int], list[int]]] = None,
     ):
         self.lerobot_dataset = BaseLerobotDataset(
             dataset_dirs=dataset_dirs,
@@ -51,6 +52,7 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             val_set_proportion=val_set_proportion,
             is_training_set=is_training_set,
             global_sample_stride=global_sample_stride,
+            episode_selector=episode_selector,
         )
     
         self.num_frames = num_frames

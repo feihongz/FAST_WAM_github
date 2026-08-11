@@ -146,13 +146,23 @@ def main(cfg: DictConfig):
     if not robotwin_root.exists():
         raise FileNotFoundError(f"RoboTwin root not found: {robotwin_root}")
 
-    num_gpus = int(cfg.MULTIRUN.num_gpus)
-    if num_gpus <= 0:
-        raise ValueError("`MULTIRUN.num_gpus` must be > 0.")
+    gpu_ids_env = os.environ.get("ROBOTWIN_EVAL_GPU_IDS", "").strip()
+    if gpu_ids_env:
+        gpu_ids = [int(item.strip()) for item in gpu_ids_env.split(",") if item.strip()]
+        if len(gpu_ids) == 0:
+            raise ValueError("`ROBOTWIN_EVAL_GPU_IDS` must contain at least one GPU id.")
+        num_gpus = len(gpu_ids)
+    else:
+        num_gpus = int(cfg.MULTIRUN.num_gpus)
+        if num_gpus <= 0:
+            raise ValueError("`MULTIRUN.num_gpus` must be > 0.")
+        gpu_ids = list(range(num_gpus))
     max_tasks_per_gpu = int(cfg.MULTIRUN.max_tasks_per_gpu)
+    launch_delay_seconds = float(os.environ.get("ROBOTWIN_EVAL_LAUNCH_DELAY_SECONDS", "0"))
+    if launch_delay_seconds < 0:
+        raise ValueError("ROBOTWIN_EVAL_LAUNCH_DELAY_SECONDS must be non-negative")
     if max_tasks_per_gpu <= 0:
         raise ValueError("`MULTIRUN.max_tasks_per_gpu` must be > 0.")
-    gpu_ids = list(range(num_gpus))
 
     output_dir = _resolve_path(str(cfg.EVALUATION.output_dir), base=PROJECT_ROOT)
     run_ts = output_dir.name
@@ -207,12 +217,20 @@ def main(cfg: DictConfig):
         cmd.extend(extra_overrides)
         return cmd
 
+    last_launch_time = 0.0
+
     def launch_phase(task_name: str, gpu_id: int, phase: str) -> RunningState:
+        nonlocal last_launch_time
+        if launch_delay_seconds > 0 and last_launch_time > 0:
+            wait_seconds = launch_delay_seconds - (time.time() - last_launch_time)
+            if wait_seconds > 0:
+                time.sleep(wait_seconds)
         cmd = build_cmd(task_name=task_name, gpu_id=gpu_id, phase=phase)
         log(
             f"launch task={task_name} phase={phase} gpu={gpu_id} "
             f"cmd={' '.join(cmd)}"
         )
+        last_launch_time = time.time()
         process = subprocess.Popen(
             cmd,
             cwd=str(PROJECT_ROOT),

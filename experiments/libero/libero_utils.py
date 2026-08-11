@@ -14,7 +14,7 @@ import numpy as np
 def _prefer_fastwam_libero_package() -> None:
     fastwam_libero_root = os.environ.get("FASTWAM_LIBERO_ROOT")
     if fastwam_libero_root:
-        sys.path = [p for p in sys.path if p != "/root/code/feihong/LIBERO/libero"]
+        sys.path = [p for p in sys.path if p != "/root/feihong/LIBERO/libero"]
         if fastwam_libero_root not in sys.path:
             sys.path.insert(0, fastwam_libero_root)
 

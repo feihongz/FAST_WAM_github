@@ -1,0 +1,25 @@
+defaults:
+  - robotwin
+  - _self_
+
+# This configuration only selects episode indices. The source RoboTwin dataset
+# and its metadata/video/parquet files remain untouched.
+train:
+  episode_selector:
+    _target_: fastwam.datasets.lerobot.episode_selector.GroupedStratifiedEpisodeSelector
+    fraction: 0.2
+    group_size: 550
+    strata_sizes: [50, 500]
+    seed: 42
+    expected_total_episodes: 27500
+    expected_selected_episodes: 5500
+
+val:
+  episode_selector:
+    _target_: fastwam.datasets.lerobot.episode_selector.GroupedStratifiedEpisodeSelector
+    fraction: 0.2
+    group_size: 550
+    strata_sizes: [50, 500]
+    seed: 42
+    expected_total_episodes: 27500
+    expected_selected_episodes: 5500

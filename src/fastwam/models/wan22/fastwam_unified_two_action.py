@@ -281,6 +281,20 @@ class FastWAMUnifiedTwoAction(FastWAMUnifiedShared):
             self.mot = previous_mot
             self._unified_inference_mode = previous_mode
 
+    @torch.no_grad()
+    def infer_action_mode(self, *args, inference_mode: str = "wo", **kwargs):
+        mode = str(inference_mode).lower()
+        if mode == "wo":
+            return self.infer_action_without_video(*args, **kwargs)
+        if mode == "w":
+            return self.infer_action_with_video(*args, **kwargs)
+        if mode == "prefix":
+            raise NotImplementedError(
+                "`inference_mode=prefix` is currently implemented for FastWAMUnifiedShared only. "
+                "TwoAction needs an explicit head-switching prefix path."
+            )
+        raise ValueError(f"Unknown inference_mode: {inference_mode}")
+
     def save_checkpoint(self, path, optimizer=None, step=None):
         payload = {
             "dit": self.dit.state_dict(),

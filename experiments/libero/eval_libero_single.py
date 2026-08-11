@@ -29,7 +29,7 @@ if str(project_root) not in sys.path:
 def _prefer_fastwam_libero_package() -> None:
     fastwam_libero_root = os.environ.get("FASTWAM_LIBERO_ROOT")
     if fastwam_libero_root:
-        sys.path = [p for p in sys.path if p != "/root/code/feihong/LIBERO/libero"]
+        sys.path = [p for p in sys.path if p != "/root/feihong/LIBERO/libero"]
         if fastwam_libero_root not in sys.path:
             sys.path.insert(0, fastwam_libero_root)
 
@@ -472,7 +472,7 @@ def _predict_action_chunk(
     visualize_future_video = bool(cfg.EVALUATION.get("visualize_future_video", False))
     inference_mode = str(cfg.EVALUATION.get("inference_mode", "wo")).lower()
     predicted_future_frames = None
-    if visualize_future_video or inference_mode == "w":
+    if visualize_future_video or inference_mode in {"w", "prefix"}:
         infer_kwargs["num_video_frames"] = _get_num_video_frames(cfg)
     elif "num_video_frames" in inspect.signature(model.infer_action).parameters:
         infer_kwargs["num_video_frames"] = _get_num_video_frames(cfg)
@@ -482,6 +482,9 @@ def _predict_action_chunk(
             pred = model.infer_joint(**infer_kwargs)
             predicted_future_frames = _select_predicted_future_frames(pred["video"], cfg)
         elif hasattr(model, "infer_action_mode"):
+            if inference_mode == "prefix":
+                infer_kwargs["video_prefix_steps"] = int(cfg.EVALUATION.get("video_prefix_steps", 0))
+                infer_kwargs["force_custom_prefix"] = True
             pred = model.infer_action_mode(**infer_kwargs, inference_mode=inference_mode)
         else:
             if inference_mode != "wo":
@@ -673,6 +676,20 @@ def run_single_task(
     save_videos = bool(cfg.EVALUATION.get("save_videos", True))
     retry_invalid_episodes = bool(cfg.EVALUATION.get("retry_invalid_episodes", False))
     max_invalid_retries = int(cfg.EVALUATION.get("max_invalid_episode_retries", 20))
+    inference_mode = str(cfg.EVALUATION.get("inference_mode", "wo")).lower()
+    num_inference_steps_cfg = cfg.EVALUATION.get("num_inference_steps", None)
+    if num_inference_steps_cfg is None:
+        num_inference_steps = int(cfg.get("eval_num_inference_steps", 20))
+    else:
+        num_inference_steps = int(num_inference_steps_cfg)
+    video_prefix_steps = int(cfg.EVALUATION.get("video_prefix_steps", 0))
+    force_custom_prefix = inference_mode == "prefix"
+    if inference_mode == "prefix":
+        video_steps_per_action = video_prefix_steps
+    elif inference_mode == "w" or visualize_future_video:
+        video_steps_per_action = num_inference_steps
+    else:
+        video_steps_per_action = 0
     results = {
         "successes": 0,
         "failure_episodes": [],
@@ -681,6 +698,11 @@ def run_single_task(
         "invalid_episode_count": 0,
         "attempted_episodes": 0,
         "task_description": task_description,
+        "eval_inference_mode": inference_mode,
+        "eval_num_inference_steps": num_inference_steps,
+        "eval_video_prefix_steps": video_prefix_steps if inference_mode == "prefix" else None,
+        "eval_force_custom_prefix": force_custom_prefix if inference_mode == "prefix" else None,
+        "eval_video_steps_per_action": video_steps_per_action,
     }
     if visualize_future_video:
         results["episode_future_video_psnr"] = []

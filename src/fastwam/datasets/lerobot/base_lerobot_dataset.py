@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 from pathlib import Path
-from typing import List, Literal, Dict, Optional, Any, DefaultDict
+from typing import List, Literal, Dict, Optional, Any, DefaultDict, Callable
 from tqdm import tqdm
 from .lerobot.lerobot_dataset import LeRobotDatasetMetadata, MultiLeRobotDataset
 
@@ -33,6 +33,7 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
 
         # sampling
         global_sample_stride: int = 1,
+        episode_selector: Optional[Callable[[int], List[int]]] = None,
     ):
         assert len(dataset_dirs) > 0, "At least one dataset directory is required"
         assert past_action_size == 0
@@ -86,20 +87,61 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
             delta_timestamps[meta["lerobot_key"]] = [(t * global_sample_stride) / fps for t in range(-past_action_size, -past_action_size + action_size)]
 
         episodes = {}
-        if val_set_proportion < 1e-6:
-            for meta in metas:
-                episodes.update({meta.repo_id: list(range(meta.total_episodes))})
+        if episode_selector is None:
+            # Preserve the original full-data train/val path exactly.
+            if val_set_proportion < 1e-6:
+                for meta in metas:
+                    episodes.update({meta.repo_id: list(range(meta.total_episodes))})
+            else:
+                for meta in metas:
+                    split_idx = int(meta.total_episodes * (1 - val_set_proportion))
+                    # random shuffle episode indices before splitting
+                    episode_indices = list(range(meta.total_episodes))
+                    rng = np.random.default_rng(seed)
+                    rng.shuffle(episode_indices)
+                    if self.is_training_set:
+                        episodes.update({meta.repo_id: [episode_indices[i] for i in range(split_idx)]})
+                    else:
+                        episodes.update({meta.repo_id: [episode_indices[i] for i in range(split_idx, meta.total_episodes)]})
         else:
             for meta in metas:
-                split_idx = int(meta.total_episodes * (1 - val_set_proportion))
-                # random shuffle episode indices before splitting
-                episode_indices = list(range(meta.total_episodes))
-                rng = np.random.default_rng(seed)
-                rng.shuffle(episode_indices)
-                if self.is_training_set:
-                    episodes.update({meta.repo_id: [episode_indices[i] for i in range(split_idx)]})
-                else:
-                    episodes.update({meta.repo_id: [episode_indices[i] for i in range(split_idx, meta.total_episodes)]})
+                episode_indices = list(episode_selector(meta.total_episodes))
+                if not episode_indices:
+                    raise ValueError(f"Episode selector returned no episodes for {meta.repo_id}")
+                if len(episode_indices) != len(set(episode_indices)):
+                    raise ValueError(f"Episode selector returned duplicate indices for {meta.repo_id}")
+                invalid_indices = [
+                    index for index in episode_indices if index < 0 or index >= meta.total_episodes
+                ]
+                if invalid_indices:
+                    raise ValueError(
+                        f"Episode selector returned out-of-range indices for {meta.repo_id}: "
+                        f"{invalid_indices[:10]}"
+                    )
+                logger.info(
+                    "Episode selector chose %d/%d source episodes for %s",
+                    len(episode_indices),
+                    meta.total_episodes,
+                    meta.repo_id,
+                )
+
+                if val_set_proportion >= 1e-6:
+                    split_idx = int(len(episode_indices) * (1 - val_set_proportion))
+                    # Shuffle after subset selection so train and val partition the same subset.
+                    rng = np.random.default_rng(seed)
+                    rng.shuffle(episode_indices)
+                    if self.is_training_set:
+                        episode_indices = episode_indices[:split_idx]
+                    else:
+                        episode_indices = episode_indices[split_idx:]
+
+                episodes[meta.repo_id] = episode_indices
+                logger.info(
+                    "Using %d episodes for %s split of %s",
+                    len(episode_indices),
+                    "train" if self.is_training_set else "validation",
+                    meta.repo_id,
+                )
 
         self.multi_dataset = MultiLeRobotDataset(
             dataset_dirs=self.dataset_dirs,

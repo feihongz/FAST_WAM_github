@@ -85,6 +85,14 @@ run_libero_eval() {
     TASK_LOG_DIR="$OUTPUT_DIR/task_logs"
     FAILED_TASKS_FILE="$OUTPUT_DIR/failed_tasks.txt"
 
+    # Each single-task evaluator creates an Accelerate/Torch rendezvous
+    # listener, even though it runs with one visible GPU. The scheduler can
+    # start multiple evaluators at once, so sharing the default port (23456)
+    # causes EADDRINUSE failures. Allocate one port per launched task.
+    RENDEZVOUS_PORT_BASE=${RENDEZVOUS_PORT_BASE:-23456}
+    NEXT_RENDEZVOUS_PORT=$RENDEZVOUS_PORT_BASE
+    TASK_LAUNCH_DELAY_SECONDS=${TASK_LAUNCH_DELAY_SECONDS:-60}
+
     mkdir -p "$TASK_STATUS_DIR" "$TASK_LOG_DIR"
     : > "$FAILED_TASKS_FILE"
     
@@ -344,6 +352,8 @@ run_libero_eval() {
         local status_file="$TASK_STATUS_DIR/${suite}_task${task_id}.status"
         local result_file="$OUTPUT_DIR/$suite/gpu${gpu_id}_task${task_id}_results.json"
         local log_file="$TASK_LOG_DIR/${suite}_task${task_id}_gpu${gpu_id}.log"
+        local rendezvous_port=$NEXT_RENDEZVOUS_PORT
+        NEXT_RENDEZVOUS_PORT=$((NEXT_RENDEZVOUS_PORT + 1))
         
         rm -f "$status_file"
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] Launching task: $suite task_id=$task_id on GPU$gpu_id pane $pane_info"
@@ -357,7 +367,8 @@ run_libero_eval() {
                 if [ -n '${PYTHONPATH:-}' ]; then export PYTHONPATH='${PYTHONPATH:-}'; fi && \
                 if [ -n '${LIBERO_CONFIG_PATH:-}' ]; then export LIBERO_CONFIG_PATH='${LIBERO_CONFIG_PATH:-}'; fi && \
                 STATUS_FILE='$status_file' LOG_FILE='$log_file' RESULT_FILE='$result_file' && \
-                CUDA_VISIBLE_DEVICES=$gpu_id $PYTHON_BIN experiments/libero/eval_libero_single.py \
+                unset WORLD_SIZE RANK LOCAL_RANK LOCAL_WORLD_SIZE NODE_RANK GROUP_RANK ROLE_RANK && \
+                OMP_NUM_THREADS=${OMP_NUM_THREADS:-4} MKL_NUM_THREADS=${MKL_NUM_THREADS:-4} TOKENIZERS_PARALLELISM=false MASTER_ADDR=127.0.0.1 MASTER_PORT=$rendezvous_port CUDA_VISIBLE_DEVICES=$gpu_id $PYTHON_BIN experiments/libero/eval_libero_single.py \
                 task=$CONFIG ckpt=$CKPT \
                 EVALUATION.task_suite_name=$suite EVALUATION.task_id=$task_id gpu_id=$gpu_id \
                 EVALUATION.num_trials=$NUM_TRIALS EVALUATION.output_dir=$OUTPUT_DIR $EXTRA_ARGS > \"\$LOG_FILE\" 2>&1; \
@@ -374,8 +385,9 @@ run_libero_eval() {
                 export EXP_NAME="$EXP_NAME"
                 if [ -n "${PYTHONPATH:-}" ]; then export PYTHONPATH="${PYTHONPATH:-}"; fi
                 if [ -n "${LIBERO_CONFIG_PATH:-}" ]; then export LIBERO_CONFIG_PATH="${LIBERO_CONFIG_PATH:-}"; fi
+                unset WORLD_SIZE RANK LOCAL_RANK LOCAL_WORLD_SIZE NODE_RANK GROUP_RANK ROLE_RANK
                 STATUS_FILE="$status_file" LOG_FILE="$log_file" RESULT_FILE="$result_file" \
-                CUDA_VISIBLE_DEVICES="$gpu_id" "$PYTHON_BIN" experiments/libero/eval_libero_single.py \
+                OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}" MKL_NUM_THREADS="${MKL_NUM_THREADS:-4}" TOKENIZERS_PARALLELISM=false MASTER_ADDR=127.0.0.1 MASTER_PORT="$rendezvous_port" CUDA_VISIBLE_DEVICES="$gpu_id" "$PYTHON_BIN" experiments/libero/eval_libero_single.py \
                     task="$CONFIG" ckpt="$CKPT" \
                     EVALUATION.task_suite_name="$suite" EVALUATION.task_id="$task_id" gpu_id="$gpu_id" \
                     EVALUATION.num_trials="$NUM_TRIALS" EVALUATION.output_dir="$OUTPUT_DIR" $EXTRA_ARGS > "$log_file" 2>&1
@@ -534,7 +546,7 @@ run_libero_eval() {
         mv "$PENDING_TASKS_FILE.tmp" "$PENDING_TASKS_FILE"
         
         # Add a small delay to make sure the task starts cleanly
-        sleep 0.5
+        sleep "$TASK_LAUNCH_DELAY_SECONDS"
     done
     
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Initial launch completed, started $initial_launched tasks"
@@ -600,6 +612,7 @@ run_libero_eval() {
 
                 launch_task "$suite" "$task_id" "$gpu_id" "$pane_info"
                 ((launched_this_round++))
+                sleep "$TASK_LAUNCH_DELAY_SECONDS"
 
                 # Limit the number of launches per round to avoid overloading the system
                 if [ $launched_this_round -ge $max_launch_per_round ]; then

@@ -147,6 +147,7 @@ class WorldActionRobotWinPolicy:
         action_horizon: int,
         replan_steps: int,
         num_inference_steps: int,
+        video_prefix_steps: Optional[int],
         sigma_shift: Optional[float],
         seed: Optional[int],
         text_cfg_scale: float,
@@ -171,6 +172,7 @@ class WorldActionRobotWinPolicy:
         self.action_horizon = int(action_horizon)
         self.replan_steps = int(max(1, min(replan_steps, action_horizon)))
         self.num_inference_steps = int(num_inference_steps)
+        self.video_prefix_steps = None if video_prefix_steps is None else int(video_prefix_steps)
         self.sigma_shift = sigma_shift
         self.seed = seed
         self.text_cfg_scale = float(text_cfg_scale)
@@ -255,8 +257,12 @@ class WorldActionRobotWinPolicy:
             "rand_device": self.rand_device,
             "tiled": self.tiled,
         }
-        if self.inference_mode == "w" or "num_video_frames" in inspect.signature(self.model.infer_action).parameters:
+        if self.inference_mode in {"w", "prefix"} or "num_video_frames" in inspect.signature(self.model.infer_action).parameters:
             infer_kwargs["num_video_frames"] = int(self._num_video_frames)
+        if self.inference_mode == "prefix":
+            if self.video_prefix_steps is None:
+                raise ValueError("`video_prefix_steps` is required when inference_mode=prefix")
+            infer_kwargs["video_prefix_steps"] = self.video_prefix_steps
         infer_t0 = time.perf_counter() if self.timing_enabled else 0.0
         with torch.no_grad():
             if hasattr(self.model, "infer_action_mode"):
@@ -379,6 +385,16 @@ def get_model(usr_args: Dict[str, Any]):
     rand_device = str(usr_args.get("rand_device", cfg.EVALUATION.get("rand_device", "cpu")))
     tiled = _parse_bool(usr_args.get("tiled", cfg.EVALUATION.get("tiled", False)))
     inference_mode = str(usr_args.get("inference_mode", cfg.EVALUATION.get("inference_mode", "wo"))).lower()
+    video_prefix_steps = _parse_optional_int(
+        usr_args.get("video_prefix_steps", cfg.EVALUATION.get("video_prefix_steps"))
+    )
+    if inference_mode == "prefix":
+        if video_prefix_steps is None:
+            raise ValueError("`video_prefix_steps` is required when inference_mode=prefix")
+        if video_prefix_steps < 0 or video_prefix_steps > num_inference_steps:
+            raise ValueError(
+                f"`video_prefix_steps` must be in [0, {num_inference_steps}], got {video_prefix_steps}"
+            )
     timing_enabled = _parse_bool(
         usr_args.get("timing_enabled", cfg.EVALUATION.get("timing_enabled", False))
     )
@@ -393,6 +409,7 @@ def get_model(usr_args: Dict[str, Any]):
         action_horizon=action_horizon,
         replan_steps=replan_steps,
         num_inference_steps=num_inference_steps,
+        video_prefix_steps=video_prefix_steps,
         sigma_shift=sigma_shift,
         seed=seed,
         text_cfg_scale=text_cfg_scale,

@@ -21,7 +21,7 @@ CHECKPOINT_KEEP_LAST="${CHECKPOINT_KEEP_LAST:-5}"
 # W&B env file follows the StarVLA stage2 launch style. It may provide WANDB_API_KEY,
 # WANDB_MODE, WANDB_ENTITY, or WANDB_PROJECT. For FAST-WAM, shell overrides win,
 # and the default entity/project stay smap/fast-wam-formal even if the shared env file has StarVLA values.
-WANDB_ENV_FILE="${WANDB_ENV_FILE:-/root/nas/zian/.secrets/wandb.env}"
+WANDB_ENV_FILE="${WANDB_ENV_FILE:-/root/feihong/FastWAM/secrets/wandb.env}"
 USER_WANDB_MODE="${WANDB_MODE:-}"
 USER_WANDB_PROJECT="${WANDB_PROJECT:-}"
 USER_WANDB_ENTITY="${WANDB_ENTITY:-}"
@@ -36,7 +36,7 @@ WANDB_MODE="${USER_WANDB_MODE:-${WANDB_MODE:-online}}"
 WANDB_ENTITY="${USER_WANDB_ENTITY:-${FASTWAM_WANDB_ENTITY:-smap}}"
 WANDB_RUN_NAME="${USER_WANDB_RUN_NAME:-${WANDB_RUN_NAME:-${TASK_NAME}_${RUN_ID}}}"
 WANDB_GROUP="${USER_WANDB_GROUP:-${WANDB_GROUP:-${TASK_NAME}}}"
-WANDB_API_KEY_FILE="${WANDB_API_KEY_FILE:-/root/nas/temp_nas/FastWAM/secrets/wandb_api_key}"
+WANDB_API_KEY_FILE="${WANDB_API_KEY_FILE:-/root/feihong/FastWAM/secrets/wandb_api_key}"
 WANDB_API_KEY="${WANDB_API_KEY:-}"
 
 if [[ ! -d "${FASTWAM_STORAGE_ROOT}" ]]; then
@@ -50,7 +50,7 @@ if ! [[ "${storage_total_kb}" =~ ^[0-9]+$ ]] || (( storage_total_kb < 1000000000
   exit 1
 fi
 
-cd /root/code/feihong/FAST_WAM_github
+cd /root/feihong/FAST_WAM_github
 mkdir -p "${OUTPUT_DIR}" "${LOG_DIR}" "${OUTPUT_DIR}/wandb"
 exec > >(tee -a "${LOG_FILE}") 2>&1
 
@@ -59,9 +59,9 @@ export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
 export HYDRA_FULL_ERROR="${HYDRA_FULL_ERROR:-1}"
 export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-9.0}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
-export DIFFSYNTH_MODEL_BASE_PATH="${DIFFSYNTH_MODEL_BASE_PATH:-/root/nas/temp_nas/FastWAM/checkpoints}"
+export DIFFSYNTH_MODEL_BASE_PATH="${DIFFSYNTH_MODEL_BASE_PATH:-/root/feihong/FastWAM/checkpoints}"
 export DIFFSYNTH_SKIP_DOWNLOAD="${DIFFSYNTH_SKIP_DOWNLOAD:-true}"
-export HF_HOME="${HF_HOME:-/root/nas/temp_nas/FastWAM/.cache/huggingface}"
+export HF_HOME="${HF_HOME:-/root/feihong/FastWAM/.cache/huggingface}"
 export WANDB_DIR="${WANDB_DIR:-${OUTPUT_DIR}/wandb}"
 export WANDB_MODE
 
@@ -113,8 +113,8 @@ fi
 require_path "${DIFFSYNTH_MODEL_BASE_PATH}/Wan-AI/Wan2.2-TI2V-5B/diffusion_pytorch_model-00001-of-00003.safetensors"
 require_path "${DIFFSYNTH_MODEL_BASE_PATH}/Wan-AI/Wan2.2-TI2V-5B/diffusion_pytorch_model-00002-of-00003.safetensors"
 require_path "${DIFFSYNTH_MODEL_BASE_PATH}/Wan-AI/Wan2.2-TI2V-5B/diffusion_pytorch_model-00003-of-00003.safetensors"
-require_path "${DIFFSYNTH_MODEL_BASE_PATH}/DiffSynth-Studio/Wan-Series-Converted-Safetensors/models_t5_umt5-xxl-enc-bf16.safetensors"
-require_path "${DIFFSYNTH_MODEL_BASE_PATH}/DiffSynth-Studio/Wan-Series-Converted-Safetensors/Wan2.2_VAE.safetensors"
+require_path "${DIFFSYNTH_MODEL_BASE_PATH}/Wan-AI/Wan2.2-TI2V-5B/models_t5_umt5-xxl-enc-bf16.pth"
+require_path "${DIFFSYNTH_MODEL_BASE_PATH}/Wan-AI/Wan2.2-TI2V-5B/Wan2.2_VAE.pth"
 require_path "checkpoints/ActionDiT_linear_interp_Wan22_alphascale_1024hdim.pt"
 
 if [[ "${DATASET_FAMILY}" == "libero" ]]; then
