@@ -43,7 +43,16 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         concat_multi_camera: str = "horizontal", # "horizontal", "vertical", "robotwin", or None
         override_instruction: Optional[str] = None, # whether to hardcode a specific instruction for all samples, for debugging
         episode_selector: Optional[Callable[[int], list[int]]] = None,
+        strict_getitem: bool = False,
+        return_metadata: bool = False,
     ):
+        if strict_getitem and skip_padding_as_possible:
+            raise ValueError(
+                "strict_getitem=True is incompatible with skip_padding_as_possible=True "
+                "because padding retries can replace the requested sample"
+            )
+        self.strict_getitem = bool(strict_getitem)
+        self.return_metadata = bool(return_metadata)
         self.lerobot_dataset = BaseLerobotDataset(
             dataset_dirs=dataset_dirs,
             shape_meta=OmegaConf.to_container(shape_meta, resolve=True),
@@ -53,6 +62,8 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             is_training_set=is_training_set,
             global_sample_stride=global_sample_stride,
             episode_selector=episode_selector,
+            strict_getitem=self.strict_getitem,
+            return_metadata=self.return_metadata,
         )
     
         self.num_frames = num_frames
@@ -113,6 +124,14 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         
     def __len__(self):
         return len(self.lerobot_dataset)
+
+    def dataset_index_ranges(self):
+        """Delegate the source dataset's zero-I/O global index ranges."""
+        return self.lerobot_dataset.dataset_index_ranges()
+
+    def dataset_task_table(self, dataset_index: int):
+        """Return a copied local task-index table for one source dataset."""
+        return self.lerobot_dataset.dataset_task_table(dataset_index)
 
     def _get(self, idx):
         sample_idx = idx
@@ -233,6 +252,11 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             "action_is_pad": sample["action_is_pad"],
             "proprio_is_pad": sample["proprio_is_pad"],
         }
+        if self.return_metadata:
+            metadata = sample.get("metadata")
+            if not isinstance(metadata, dict):
+                raise TypeError("Expected BaseLerobotDataset to return dict metadata")
+            data["metadata"] = dict(metadata)
         return data
 
     def _get_cached_text_context(self, prompt: str):
@@ -270,12 +294,29 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         return context, context_mask
 
     def __getitem__(self, idx):
-        try:
+        if self.strict_getitem:
             data = self._get(idx)
-        except Exception as e:
-            print(f"Error processing sample idx {idx}: {e}. Returning a random sample instead.")
-            # trace back
-            print(traceback.format_exc())
-            random_idx = np.random.randint(len(self))
-            data = self._get(random_idx)
+        else:
+            try:
+                data = self._get(idx)
+            except Exception as e:
+                print(f"Error processing sample idx {idx}: {e}. Returning a random sample instead.")
+                # trace back
+                print(traceback.format_exc())
+                random_idx = np.random.randint(len(self))
+                data = self._get(random_idx)
+
+        if self.return_metadata:
+            metadata = data.get("metadata")
+            if not isinstance(metadata, dict):
+                raise TypeError("Expected RobotVideoDataset sample to contain dict metadata")
+            metadata["requested_sample_idx"] = BaseLerobotDataset._json_int(
+                idx, "requested_sample_idx"
+            )
+            if self.strict_getitem and metadata["requested_sample_idx"] != metadata["source_sample_idx"]:
+                raise AssertionError(
+                    "Strict RobotVideoDataset access changed the requested sample index: "
+                    f"requested={metadata['requested_sample_idx']}, "
+                    f"source={metadata['source_sample_idx']}"
+                )
         return data

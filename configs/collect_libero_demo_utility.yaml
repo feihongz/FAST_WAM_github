@@ -1,0 +1,46 @@
+# @package _global_
+
+defaults:
+  - train
+  - override /task: libero_unified_shared_2cam224_1e-4
+  - _self_
+
+# Frozen UniShare checkpoint. The collector refuses to run without it.
+ckpt: null
+
+# The collector consumes cached instruction embeddings, so no text encoder or
+# training-only pretrained ActionDiT bootstrap weights are needed.
+model:
+  load_text_encoder: false
+  skip_dit_load_from_pretrain: true
+  action_dit_pretrained_path: null
+
+COLLECTOR:
+  output_dir: ./runs/libero_demo_utility/${now:%Y-%m-%d}_${now:%H-%M-%S}
+  dataset_stats_path: null
+  device: cuda
+
+  # A first audit run should use 500--2000 states. Sampling is deterministic,
+  # suite-stratified, shuffled, without replacement, and resumable.
+  num_samples: 1000
+  seed: 42
+  resume: true
+  continue_on_error: true
+  max_errors: 20
+
+  # Phase 2 is deliberately an endpoint comparison only. full_prefix_steps
+  # must equal num_inference_steps; intermediate N is rejected.
+  num_inference_steps: ${eval_num_inference_steps}
+  full_prefix_steps: ${COLLECTOR.num_inference_steps}
+  num_video_frames: 9
+  rand_device: cpu
+  sigma_shift: null
+  tiled: false
+  force_custom_prefix: true
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null

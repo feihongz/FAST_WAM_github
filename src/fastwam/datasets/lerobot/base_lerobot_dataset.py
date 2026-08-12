@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import math
 from pathlib import Path
 from typing import List, Literal, Dict, Optional, Any, DefaultDict, Callable
 from tqdm import tqdm
@@ -34,6 +35,8 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
         # sampling
         global_sample_stride: int = 1,
         episode_selector: Optional[Callable[[int], List[int]]] = None,
+        strict_getitem: bool = False,
+        return_metadata: bool = False,
     ):
         assert len(dataset_dirs) > 0, "At least one dataset directory is required"
         assert past_action_size == 0
@@ -46,6 +49,8 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
         self.past_action_size = past_action_size
         self.obs_size = obs_size
         self.processor = None  # Will be set externally
+        self.strict_getitem = bool(strict_getitem)
+        self.return_metadata = bool(return_metadata)
         metas = []
         for ds_dir in dataset_dirs:
             ds_root = Path(ds_dir)
@@ -215,37 +220,258 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
     def __len__(self):
         return self.multi_dataset.num_frames
 
+    @staticmethod
+    def _json_scalar(value: Any, field_name: str, *, allow_none: bool = False) -> Any:
+        """Convert a scalar source value to a strict JSON primitive."""
+        if value is None:
+            if allow_none:
+                return None
+            raise ValueError(f"Required metadata field '{field_name}' is None")
+
+        if isinstance(value, torch.Tensor):
+            if value.numel() != 1:
+                raise ValueError(
+                    f"Metadata field '{field_name}' must be scalar, got tensor shape {tuple(value.shape)}"
+                )
+            value = value.detach().cpu().item()
+        elif isinstance(value, np.ndarray):
+            if value.size != 1:
+                raise ValueError(
+                    f"Metadata field '{field_name}' must be scalar, got array shape {value.shape}"
+                )
+            value = value.reshape(()).item()
+        elif isinstance(value, np.generic):
+            value = value.item()
+
+        if not isinstance(value, (str, bool, int, float)):
+            raise TypeError(
+                f"Metadata field '{field_name}' must be a JSON scalar, got {type(value).__name__}"
+            )
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(f"Metadata field '{field_name}' must be finite, got {value}")
+        return value
+
+    @classmethod
+    def _json_int(cls, value: Any, field_name: str, *, allow_none: bool = False) -> Optional[int]:
+        value = cls._json_scalar(value, field_name, allow_none=allow_none)
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(f"Metadata field '{field_name}' must be an integer, got {value!r}")
+        return value
+
+    @classmethod
+    def _json_string(cls, value: Any, field_name: str) -> str:
+        value = cls._json_scalar(value, field_name)
+        if not isinstance(value, str) or not value:
+            raise TypeError(f"Metadata field '{field_name}' must be a non-empty string, got {value!r}")
+        return value
+
+    def _dataset_identity(self, dataset_index: int) -> tuple[str, str]:
+        dataset_index = self._json_int(dataset_index, "dataset_index")
+        if dataset_index is None or dataset_index < 0:
+            raise IndexError(f"dataset_index must be non-negative, got {dataset_index}")
+
+        # MultiLeRobotDataset owns the ordered names used to build _datasets.
+        # Prefer that reliable structure: some bundled LeRobot versions have a
+        # broken repo_index_to_id property implementation.
+        ds_names = getattr(self.multi_dataset, "ds_names", None)
+        if ds_names is not None:
+            if not isinstance(ds_names, (list, tuple)):
+                raise TypeError(
+                    f"MultiLeRobotDataset.ds_names must be a sequence, got {type(ds_names).__name__}"
+                )
+            if len(ds_names) != len(self.multi_dataset._datasets):
+                raise ValueError(
+                    "MultiLeRobotDataset.ds_names/_datasets length mismatch: "
+                    f"{len(ds_names)} != {len(self.multi_dataset._datasets)}"
+                )
+            if dataset_index >= len(ds_names):
+                raise IndexError(
+                    f"dataset_index {dataset_index} is out of bounds for {len(ds_names)} datasets"
+                )
+            raw_dataset_id = ds_names[dataset_index]
+        else:
+            # Compatibility path for lightweight fakes and older implementations.
+            try:
+                repo_index_to_id = self.multi_dataset.repo_index_to_id
+            except Exception as exc:
+                raise RuntimeError(
+                    "Could not resolve dataset identity from ds_names or repo_index_to_id"
+                ) from exc
+            if dataset_index not in repo_index_to_id:
+                raise KeyError(
+                    f"dataset_index {dataset_index} is absent from repo_index_to_id"
+                )
+            raw_dataset_id = repo_index_to_id[dataset_index]
+
+        dataset_id = self._json_string(raw_dataset_id, "dataset_id")
+        dataset_name = Path(dataset_id).name
+        if not dataset_name:
+            raise ValueError(f"Could not derive dataset_name from dataset_id {dataset_id!r}")
+        return dataset_id, dataset_name
+
+    def dataset_index_ranges(self) -> List[Dict[str, Any]]:
+        """Return JSON-safe global index ranges without materializing any samples."""
+        ranges = []
+        start = 0
+        for dataset_index, dataset in enumerate(self.multi_dataset._datasets):
+            population = self._json_int(dataset.num_frames, "population")
+            if population is None or population < 0:
+                raise ValueError(f"Dataset population must be non-negative, got {population}")
+            dataset_id, dataset_name = self._dataset_identity(dataset_index)
+            stop = start + population
+            ranges.append(
+                {
+                    "dataset_index": dataset_index,
+                    "dataset_id": dataset_id,
+                    "dataset_name": dataset_name,
+                    "start": start,
+                    "stop": stop,
+                    "population": population,
+                }
+            )
+            start = stop
+        if start != len(self):
+            raise RuntimeError(
+                f"Dataset ranges cover {start} samples, but MultiLeRobotDataset reports {len(self)}"
+            )
+        return ranges
+
+    def dataset_task_table(self, dataset_index: int) -> Dict[int, str]:
+        """Return a copied local task-index table for one source dataset.
+
+        LeRobot task indices are local to each member of MultiLeRobotDataset,
+        so callers must select this table using the sample's dataset_index.
+        This reads in-memory metadata only and never materializes a sample.
+        """
+        dataset_index = self._json_int(dataset_index, "dataset_index")
+        if dataset_index is None or dataset_index < 0:
+            raise IndexError(f"dataset_index must be non-negative, got {dataset_index}")
+        datasets = self.multi_dataset._datasets
+        if dataset_index >= len(datasets):
+            raise IndexError(
+                f"dataset_index {dataset_index} is out of bounds for {len(datasets)} datasets"
+            )
+        source_tasks = getattr(getattr(datasets[dataset_index], "meta", None), "tasks", None)
+        if not isinstance(source_tasks, dict):
+            raise TypeError(
+                f"Source dataset {dataset_index} meta.tasks must be a dict, "
+                f"got {type(source_tasks).__name__}"
+            )
+
+        task_table: Dict[int, str] = {}
+        for raw_task_index, raw_task in source_tasks.items():
+            task_index = self._json_int(raw_task_index, "task_index")
+            if task_index is None or task_index < 0:
+                raise ValueError(f"task_index must be non-negative, got {task_index}")
+            task = self._json_string(raw_task, "task")
+            if task_index in task_table:
+                raise ValueError(f"Duplicate normalized task_index {task_index}")
+            task_table[task_index] = task
+        if not task_table:
+            raise ValueError(f"Source dataset {dataset_index} has an empty task table")
+        return task_table
+
+    def _build_metadata(
+        self,
+        requested_sample_idx: int,
+        source_sample_idx: int,
+        lerobot_sample: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        def required(field_name: str) -> Any:
+            if field_name not in lerobot_sample:
+                raise KeyError(f"Raw LeRobot sample is missing required metadata field '{field_name}'")
+            return lerobot_sample[field_name]
+
+        requested_sample_idx = self._json_int(requested_sample_idx, "requested_sample_idx")
+        source_sample_idx = self._json_int(source_sample_idx, "source_sample_idx")
+        dataset_index = self._json_int(required("dataset_index"), "dataset_index")
+        dataset_id, dataset_name = self._dataset_identity(dataset_index)
+        task = self._json_string(required("task"), "task")
+
+        timestamp = self._json_scalar(
+            lerobot_sample.get("timestamp"), "timestamp", allow_none=True
+        )
+        if timestamp is not None and (
+            isinstance(timestamp, bool) or not isinstance(timestamp, (int, float))
+        ):
+            raise TypeError(f"Metadata field 'timestamp' must be numeric, got {timestamp!r}")
+
+        metadata = {
+            "requested_sample_idx": requested_sample_idx,
+            "source_sample_idx": source_sample_idx,
+            "dataset_index": dataset_index,
+            "dataset_id": dataset_id,
+            "dataset_name": dataset_name,
+            "episode_index": self._json_int(required("episode_index"), "episode_index"),
+            "frame_index": self._json_int(required("frame_index"), "frame_index"),
+            "task_index": self._json_int(required("task_index"), "task_index"),
+            "task": task,
+            "timestamp": timestamp,
+            "source_index": self._json_int(
+                lerobot_sample.get("index"), "source_index", allow_none=True
+            ),
+        }
+        if self.strict_getitem and requested_sample_idx != source_sample_idx:
+            raise AssertionError(
+                "Strict dataset access changed the requested sample index: "
+                f"requested={requested_sample_idx}, source={source_sample_idx}"
+            )
+        return metadata
+
     def _get_additional_data(self, sample, lerobot_sample):
         return sample
 
     def __getitem__(self, idx):
         if idx >= len(self):
             raise IndexError(f"Index {idx} out of bounds {len(self)}.")
+        if self.strict_getitem and idx < 0:
+            raise IndexError(
+                f"Strict dataset access requires a non-negative index, got {idx}."
+            )
 
-        # Retry with random indices until we successfully load a frame.
-        sample_idx = idx
-        attempt = 0
-        last_exception: Optional[Exception] = None
-        while attempt < MAX_GETITEM_ATTEMPT:
-            try:
-                lerobot_sample = self.multi_dataset[sample_idx]
-                lerobot_sample = self._split_lerobot_sample(lerobot_sample)
-                break
-            except Exception as err:
-                attempt += 1
-                last_exception = err
-                logger.warning(
-                    f"Error loading sample {sample_idx} (attempt {attempt}). "
-                    "Retrying with a random index. "
-                    f"Error: {err}"
+        if self.strict_getitem:
+            # Collector mode: preserve the requested identity and original exception.
+            sample_idx = idx
+            lerobot_sample = self.multi_dataset[sample_idx]
+            lerobot_sample = self._split_lerobot_sample(lerobot_sample)
+            if sample_idx != idx:
+                raise AssertionError(
+                    "Strict dataset access changed the requested sample index: "
+                    f"requested={idx}, source={sample_idx}"
                 )
-                sample_idx = np.random.randint(len(self))
-                print(traceback.format_exc())
         else:
-            raise RuntimeError(
-                f"Failed to load a valid sample after {MAX_GETITEM_ATTEMPT} attempts "
-                f"for index {idx}."
-            ) from last_exception
+            # Preserve the legacy random-retry training behavior exactly.
+            sample_idx = idx
+            attempt = 0
+            last_exception: Optional[Exception] = None
+            while attempt < MAX_GETITEM_ATTEMPT:
+                try:
+                    lerobot_sample = self.multi_dataset[sample_idx]
+                    lerobot_sample = self._split_lerobot_sample(lerobot_sample)
+                    break
+                except Exception as err:
+                    attempt += 1
+                    last_exception = err
+                    logger.warning(
+                        f"Error loading sample {sample_idx} (attempt {attempt}). "
+                        "Retrying with a random index. "
+                        f"Error: {err}"
+                    )
+                    sample_idx = np.random.randint(len(self))
+                    print(traceback.format_exc())
+            else:
+                raise RuntimeError(
+                    f"Failed to load a valid sample after {MAX_GETITEM_ATTEMPT} attempts "
+                    f"for index {idx}."
+                ) from last_exception
+
+        metadata = None
+        if self.return_metadata:
+            # Capture provenance from the raw LeRobot record before any processor can
+            # drop or transform those source fields.
+            metadata = self._build_metadata(idx, sample_idx, lerobot_sample)
 
         # Get data from lerobot, organized in nested dict
         sample = {
@@ -278,6 +504,9 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
         # for quick data loading
         if self.processor is not None:
             sample = self.processor.preprocess(sample)
+
+        if metadata is not None:
+            sample["metadata"] = metadata
 
         return sample
 
