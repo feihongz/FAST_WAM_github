@@ -67,6 +67,19 @@ def load_utility_records(path: Path) -> list[dict[str, Any]]:
                 raise ValueError(f"Duplicate sample_id={sample_id!r} in {path}")
             sample_ids.add(sample_id)
 
+            if "collector_record_schema_version" in record:
+                from experiments.libero.gate.collect_demo_utility import (
+                    _validate_completed_record,
+                )
+
+                try:
+                    full_steps = int(record["num_inference_steps"])
+                    _validate_completed_record(record, full_steps=full_steps)
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"Invalid production collector record at {path}:{line_number}: {exc}"
+                    ) from exc
+
             if "utility" not in record:
                 raise ValueError(f"Missing utility at {path}:{line_number}")
             utility = float(record["utility"])
@@ -393,6 +406,20 @@ def analyze(
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             raise ValueError(f"Malformed manifest JSON: {manifest_path}") from exc
+        production_records = any(
+            "collector_record_schema_version" in record for record in records
+        )
+        if production_records:
+            from experiments.libero.gate.collect_demo_utility import (
+                _validate_manifest_integrity,
+            )
+
+            try:
+                _validate_manifest_integrity(manifest)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Invalid production collector manifest {manifest_path}: {exc}"
+                ) from exc
         completeness = validate_manifest_coverage(
             records,
             manifest,

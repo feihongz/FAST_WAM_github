@@ -846,7 +846,16 @@ def _build_manifest(
             "torch_version": str(torch.__version__),
             "cuda_version": None if torch.version.cuda is None else str(torch.version.cuda),
         },
-        "dataset_index_ranges": list(ranges),
+        "dataset_index_ranges": [
+            {
+                "dataset_index": int(item["dataset_index"]),
+                "dataset_name": str(item["dataset_name"]),
+                "start": int(item["start"]),
+                "stop": int(item["stop"]),
+                "population": int(item["population"]),
+            }
+            for item in ranges
+        ],
         "dataset_task_tables": normalized_task_tables,
         "selection_sha256": selection["ordered_selected_source_indices_sha256"],
         "collection_parameters": {

@@ -290,6 +290,22 @@ def test_resume_rejects_incomplete_or_tampered_completed_record(tmp_path, mutati
         )
 
 
+def test_analyzer_rejects_an_invalid_production_record(tmp_path):
+    path = tmp_path / "records.jsonl"
+    row = _valid_completed_record()
+    row.update(e0=-0.2, efull=-0.3, utility=0.1)
+    path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="MSE values.*non-negative"):
+        analyze(
+            path,
+            tmp_path / "analysis",
+            near_zero_epsilon=1e-4,
+            bins=5,
+            make_plot=False,
+        )
+
+
 def test_resume_accepts_a_complete_validated_record(tmp_path):
     path = tmp_path / "records.jsonl"
     row = _valid_completed_record()
@@ -461,6 +477,20 @@ def test_untracked_status_is_provenance_but_not_resume_compatibility(tmp_path):
     )
     assert relocated["compatibility_fingerprint"] == clean["compatibility_fingerprint"]
     assert relocated["resolved_config_sha256"] != clean["resolved_config_sha256"]
+
+    relocated_ranges = [
+        {**item, "dataset_id": f"/different/mount/{item['dataset_name']}"}
+        for item in common["ranges"]
+    ]
+    relocated_range_manifest = _build_manifest(
+        **{**common, "ranges": relocated_ranges},
+        git=clean_git,
+    )
+    assert (
+        relocated_range_manifest["compatibility_fingerprint"]
+        == clean["compatibility_fingerprint"]
+    )
+    assert relocated_range_manifest["dataset_index_ranges"] != clean["dataset_index_ranges"]
 
     changed_science_cfg = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
     changed_science_cfg.data.train.num_frames = 65
