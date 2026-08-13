@@ -1,0 +1,51 @@
+# @package _global_
+
+defaults:
+  - train
+  - override /task: libero_unified_shared_2cam224_1e-4
+  - _self_
+
+# The stability audit must use the same frozen UniShare endpoint as Pilot-500.
+# Both the file bytes and checkpoint load structure are rebound to the Pilot
+# manifest before any new inference is allowed.
+ckpt: null
+
+model:
+  load_text_encoder: false
+  skip_dit_load_from_pretrain: true
+  action_dit_pretrained_path: null
+
+COLLECTOR:
+  pilot_dir: null
+  output_dir: ./runs/libero_demo_utility_multiseed/${now:%Y-%m-%d}_${now:%H-%M-%S}
+  dataset_stats_path: null
+  device: cuda
+
+  # Phase 2.5 V1 is a preregistered 100-state x 5-seed audit.  The selector
+  # enforces 25 states per suite, the fixed five-bin allocation, 2--3 states
+  # per task, unique episodes, and exactly 16 partial action chunks.
+  num_states: 100
+  selection_seed: 42
+  expected_pilot_count: 500
+  expected_pilot_base_seed: 42
+  replicate_base_seeds: [42, 43, 44, 45, 46]
+  reuse_base_seed: 42
+
+  resume: true
+  continue_on_error: true
+  max_errors: 20
+
+  num_inference_steps: ${eval_num_inference_steps}
+  full_prefix_steps: ${COLLECTOR.num_inference_steps}
+  num_video_frames: 9
+  rand_device: cpu
+  sigma_shift: null
+  tiled: false
+  force_custom_prefix: true
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null
