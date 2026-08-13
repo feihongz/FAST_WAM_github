@@ -1,0 +1,69 @@
+# @package _global_
+
+defaults:
+  - train
+  - override /task: libero_unified_shared_2cam224_1e-4
+  - _self_
+
+# Frozen UniShare endpoint used by Pilot-500 and Phase 2.5.
+ckpt: null
+
+model:
+  load_text_encoder: false
+  skip_dit_load_from_pretrain: true
+  action_dit_pretrained_path: null
+
+# Formal collection must supply absolute locations explicitly. This prevents a
+# clean sibling worktree from resolving the base config's ./data paths against
+# a different or nonexistent tree.
+data:
+  train:
+    dataset_dirs: null
+    text_embedding_cache_dir: null
+
+COLLECTOR:
+  # All paths and external hashes are mandatory. Formal commands must bind the
+  # exact Pilot, Phase-2.5 source, and already validated 100-state Target V2.
+  pilot_dir: null
+  phase25_dir: null
+  existing_target_v2_dir: null
+  expected_pilot_manifest_sha256: null
+  expected_pilot_records_sha256: null
+  expected_phase25_manifest_sha256: null
+  expected_phase25_records_sha256: null
+  expected_phase25_selection_plan_sha256: null
+  expected_existing_target_v2_manifest_sha256: null
+  expected_existing_target_v2_targets_sha256: null
+
+  output_dir: ./runs/libero_demo_utility_target_v2_pilot500_remainder/${now:%Y-%m-%d}_${now:%H-%M-%S}
+  remainder_target_v2_dir: ./runs/libero_demo_utility_target_v2_pilot500_remainder_targets/${now:%Y-%m-%d}_${now:%H-%M-%S}
+  combined_target_v2_dir: ./runs/libero_demo_utility_target_v2_pilot500/${now:%Y-%m-%d}_${now:%H-%M-%S}
+  dataset_stats_path: null
+  device: cuda
+
+  num_states: 400
+  expected_pilot_count: 500
+  expected_phase25_count: 100
+  expected_pilot_base_seed: 42
+  replicate_base_seeds: [42, 43, 44, 45, 46]
+  reuse_base_seed: 42
+
+  resume: true
+  require_clean_tracked_diff: true
+  continue_on_error: false
+  max_errors: 1
+
+  num_inference_steps: ${eval_num_inference_steps}
+  full_prefix_steps: ${COLLECTOR.num_inference_steps}
+  num_video_frames: 9
+  rand_device: cpu
+  sigma_shift: null
+  tiled: false
+  force_custom_prefix: true
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null
