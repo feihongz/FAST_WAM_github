@@ -1,0 +1,54 @@
+# @package _global_
+
+defaults:
+  - train
+  - override /task: libero_unified_shared_2cam224_1e-4
+  - _self_
+
+# Phase-3 is feature extraction only.  The policy checkpoint is content-bound
+# to Target V2, but only its frozen Wan VAE is executed.
+ckpt: null
+
+model:
+  load_text_encoder: false
+  skip_dit_load_from_pretrain: true
+  action_dit_pretrained_path: null
+
+FEATURE_COLLECTOR:
+  target_v2_dir: null
+  expected_target_manifest_sha256: null
+  expected_target_records_sha256: null
+
+  # The Phase-2.5 manifest is required so current dataset/cache bytes can be
+  # checked against the exact bytes that produced Target V2.
+  phase25_manifest_path: null
+  expected_phase25_manifest_sha256: null
+
+  output_dir: ./runs/libero_gate_current_state_features/${now:%Y-%m-%d}_${now:%H-%M-%S}
+  dataset_stats_path: null
+  device: cuda
+  resume: true
+  expected_num_states: 100
+  # Operational smoke/debug limit. When set, publish only durable private row
+  # progress and return `complete: false`; resume later with null to seal all 100.
+  max_new_rows: null
+
+  visual:
+    latent_channels: 48
+    pooled_height: 2
+    pooled_width: 4
+    projection_dim: 64
+    projection_seed: 20260815
+  instruction:
+    context_dim: 4096
+    projection_dim: 32
+    mean_projection_seed: 20260816
+    rms_projection_seed: 20260817
+  proprio_dim: 8
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null

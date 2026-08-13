@@ -182,11 +182,14 @@ max_epochs:          1000
 min_epochs:          100
 early_stop_patience: 100
 initialization_seeds: [101, 202, 303, 404, 505]
+cpu_threads:         1
 ```
 
 early stopping 只看 inner-val 上未加权 Target5 Huber；outer fold、Validation4 和最终
 GO 指标均不得参与停止或 checkpoint 选择。uncertainty weights 在 clip 后再次归一化为
-train mean 1，避免不同 fold 的有效 loss scale 漂移。
+train mean 1，避免不同 fold 的有效 loss scale 漂移。`cpu_threads=1` 是冻结的执行设置，
+必须写入 run manifest；训练入口在运行后恢复调用前的 PyTorch CPU 线程数。它不改变模型、
+loss、fold 或任何 GO 判据。
 
 预注册 ablation：
 
