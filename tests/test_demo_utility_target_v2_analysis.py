@@ -23,6 +23,7 @@ from experiments.libero.gate.analyze_demo_utility_target_v2 import (
     _sha256_json,
     _stratified_bootstrap_indices,
     _validate_zero_error_log,
+    analyze,
     compute_target_v2_metrics,
     deadband_sign,
     decide_readiness,
@@ -46,6 +47,20 @@ def test_preregistration_timestamp_and_threshold_contract_are_frozen_utc():
     assert BOOTSTRAP_REPLICATES == 2000
     assert GO_THRESHOLDS["mean_spearman"] == 0.50
     assert GO_THRESHOLDS["all9_icc_1_9"] == 0.75
+
+
+def test_formal_analyze_rejects_non_preregistered_bootstrap_settings(tmp_path):
+    missing = tmp_path / "not-created"
+    with pytest.raises(ValueError, match="bootstrap_seed=20260813"):
+        analyze(missing, missing, missing, missing, bootstrap_seed=1)
+    with pytest.raises(ValueError, match="bootstrap_replicates=2000"):
+        analyze(
+            missing,
+            missing,
+            missing,
+            missing,
+            bootstrap_replicates=10,
+        )
 
 
 def test_deadband_high_confidence_and_boundaries_are_exact():

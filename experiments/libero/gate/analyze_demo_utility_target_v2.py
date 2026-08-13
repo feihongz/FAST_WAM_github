@@ -1680,6 +1680,15 @@ def analyze(
 ) -> dict[str, Any]:
     """Validate first, then analyze and emit the durable independent audit."""
 
+    if int(bootstrap_seed) != BOOTSTRAP_SEED:
+        raise ValueError(
+            f"Formal readiness analysis requires preregistered bootstrap_seed={BOOTSTRAP_SEED}"
+        )
+    if int(bootstrap_replicates) != BOOTSTRAP_REPLICATES:
+        raise ValueError(
+            "Formal readiness analysis requires preregistered "
+            f"bootstrap_replicates={BOOTSTRAP_REPLICATES}"
+        )
     target_dir = target_dir.resolve()
     validation_records_path = validation_records_path.resolve()
     validation_manifest_path = validation_manifest_path.resolve()
@@ -1821,8 +1830,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--validation-manifest", type=Path, default=None)
     parser.add_argument("--validation-errors", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
-    parser.add_argument("--bootstrap-seed", type=int, default=BOOTSTRAP_SEED)
-    parser.add_argument("--bootstrap-replicates", type=int, default=BOOTSTRAP_REPLICATES)
     parser.add_argument("--no-plots", action="store_true")
     return parser.parse_args()
 
@@ -1854,8 +1861,6 @@ def main() -> None:
         manifest,
         output,
         errors_path=errors,
-        bootstrap_seed=int(args.bootstrap_seed),
-        bootstrap_replicates=int(args.bootstrap_replicates),
         make_plots=not bool(args.no_plots),
     )
     LOGGER.info(

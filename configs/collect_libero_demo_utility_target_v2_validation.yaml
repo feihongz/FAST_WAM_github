@@ -35,7 +35,7 @@ COLLECTOR:
   global_seed_index_offset: 5
 
   resume: true
-  continue_on_error: true
+  continue_on_error: false
   max_errors: 20
 
   num_inference_steps: ${eval_num_inference_steps}
