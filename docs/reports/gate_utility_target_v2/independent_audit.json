@@ -1,0 +1,1520 @@
+{
+  "audit_schema_version": 1,
+  "audit_kind": "independent_target_v2_preregistered_analysis_audit",
+  "created_at_utc": "2026-08-13T14:39:20.528244+00:00",
+  "decision": "GO",
+  "authorized_scope": "start offline Tiny-MLP Gate feasibility only",
+  "not_established": [
+    "Gate calibration",
+    "compute savings",
+    "closed-loop LIBERO improvement",
+    "single-seed label reliability"
+  ],
+  "independence": {
+    "implementation": "standalone raw-JSONL recomputation; repository analyzer was not imported or called",
+    "raw_target_recomputed_from": "five utility_by_base_seed values per state",
+    "raw_validation_recomputed_from": "four independent validation utility values per state",
+    "bootstrap": "2000 state resamples, stratified by frozen selection_bin, numpy default_rng seed 20260813"
+  },
+  "input_hashes": {
+    "target_manifest": "bc00fdf913b5ae257deb57f6d7101ac66b95c73f179578f194a1b9b53ad2bfc3",
+    "targets": "918d33a324ffaf3103ff42e97771debb356a1c9af292bd87c92cea75cf70d023",
+    "validation_manifest": "fbad3bfb5ff153742f79ef0d9d7a9db3a38449fc22109c1c9943a82daa950834",
+    "validation_records": "da93bbcb7fbedcd4727f47c03a3f170a38b50935a0f5047b5c72989c9c617224",
+    "validation_errors": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "completion": "0ab09764b2847dadb428b7d14d8e79f7ce2a32e37d4acb4d5feace6db597b5b8",
+    "official_summary": "4a0fcec2740dfe6d2005c07ba54c18e4aa8dabdce7cb4e0ef0e47f049227f2e5"
+  },
+  "integrity_checks": [
+    {
+      "name": "target state count",
+      "passed": true,
+      "evidence": 100
+    },
+    {
+      "name": "validation record count",
+      "passed": true,
+      "evidence": 400
+    },
+    {
+      "name": "zero collection errors",
+      "passed": true,
+      "evidence": 0
+    },
+    {
+      "name": "completion records digest",
+      "passed": true,
+      "evidence": "da93bbcb7fbedcd4727f47c03a3f170a38b50935a0f5047b5c72989c9c617224"
+    },
+    {
+      "name": "completion errors digest",
+      "passed": true,
+      "evidence": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "completion manifest digest",
+      "passed": true,
+      "evidence": "fbad3bfb5ff153742f79ef0d9d7a9db3a38449fc22109c1c9943a82daa950834"
+    },
+    {
+      "name": "target digest bound by target manifest",
+      "passed": true,
+      "evidence": "918d33a324ffaf3103ff42e97771debb356a1c9af292bd87c92cea75cf70d023"
+    },
+    {
+      "name": "target manifest bound by validation",
+      "passed": true,
+      "evidence": "bc00fdf913b5ae257deb57f6d7101ac66b95c73f179578f194a1b9b53ad2bfc3"
+    },
+    {
+      "name": "target rows bound by validation",
+      "passed": true,
+      "evidence": "918d33a324ffaf3103ff42e97771debb356a1c9af292bd87c92cea75cf70d023"
+    },
+    {
+      "name": "target row hashes",
+      "passed": true,
+      "evidence": "100/100"
+    },
+    {
+      "name": "validation row hashes",
+      "passed": true,
+      "evidence": "400/400"
+    },
+    {
+      "name": "target IDs unique",
+      "passed": true,
+      "evidence": 100
+    },
+    {
+      "name": "validation references exact target panel",
+      "passed": true,
+      "evidence": 100
+    },
+    {
+      "name": "validation cell key unique",
+      "passed": true,
+      "evidence": 400
+    },
+    {
+      "name": "four exact new seeds per state",
+      "passed": true,
+      "evidence": "100/100"
+    },
+    {
+      "name": "all inference is new",
+      "passed": true,
+      "evidence": "400/400"
+    },
+    {
+      "name": "paired utility arithmetic",
+      "passed": true,
+      "evidence": "400/400"
+    },
+    {
+      "name": "route endpoints exact",
+      "passed": true,
+      "evidence": "400/400"
+    },
+    {
+      "name": "artifact hashes stable across grid",
+      "passed": true,
+      "evidence": "one triplet"
+    },
+    {
+      "name": "state inputs bound across target/validation",
+      "passed": true,
+      "evidence": "400/400"
+    },
+    {
+      "name": "target seed plan state 0",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 1",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 2",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 3",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 4",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 5",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 6",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 7",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 8",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 9",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 10",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 11",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 12",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 13",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 14",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 15",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 16",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 17",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 18",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 19",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 20",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 21",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 22",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 23",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 24",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 25",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 26",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 27",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 28",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 29",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 30",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 31",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 32",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 33",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 34",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 35",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 36",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 37",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 38",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 39",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 40",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 41",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 42",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 43",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 44",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 45",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 46",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 47",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 48",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 49",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 50",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 51",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 52",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 53",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 54",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 55",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 56",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 57",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 58",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 59",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 60",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 61",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 62",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 63",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 64",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 65",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 66",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 67",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 68",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 69",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 70",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 71",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 72",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 73",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 74",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 75",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 76",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 77",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 78",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 79",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 80",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 81",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 82",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 83",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 84",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 85",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 86",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 87",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 88",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 89",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 90",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 91",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 92",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 93",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 94",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 95",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 96",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 97",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 98",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "target seed plan state 99",
+      "passed": true,
+      "evidence": [
+        42,
+        43,
+        44,
+        45,
+        46
+      ]
+    },
+    {
+      "name": "stored target means recompute",
+      "passed": true,
+      "evidence": 3.469446951953614e-18
+    },
+    {
+      "name": "stored target medians recompute",
+      "passed": true,
+      "evidence": 0.0
+    },
+    {
+      "name": "stored high-confidence labels recompute",
+      "passed": true,
+      "evidence": 24
+    }
+  ],
+  "integrity_passed": true,
+  "recomputed_metrics": {
+    "mean_spearman": 0.707170717071707,
+    "mean_spearman_bootstrap_lower_95": 0.5546582016343363,
+    "mean_spearman_bootstrap_upper_95": 0.8436005740672149,
+    "mean_kendall": 0.5866666666666668,
+    "mean_kendall_bootstrap_lower_95": 0.45855089858037557,
+    "mean_kendall_bootstrap_upper_95": 0.7126485000877141,
+    "actionable_sign_retention": 0.8072289156626506,
+    "high_confidence_sign_retention": 0.875,
+    "high_confidence_positive_sign_retention": 1.0,
+    "high_confidence_negative_sign_retention": 0.75,
+    "high_confidence_min_count_per_direction_positive": 12,
+    "high_confidence_min_count_per_direction_negative": 12,
+    "top_recall": 0.7,
+    "top_jaccard": 0.5384615384615384,
+    "bottom_recall": 0.75,
+    "bottom_jaccard": 0.6,
+    "lin_ccc": 0.5871257576035043,
+    "absolute_agreement_icc_a1": 0.5895598985681914,
+    "all9_icc_1_9": 0.8280975153191474,
+    "all9_icc_1_1_guardrail": 0.34864036091230793,
+    "high_confidence_min_count": 24,
+    "high_confidence_weighted_coverage": 0.22656820512820508,
+    "median_spearman": 0.6636903690369036,
+    "median_kendall": 0.5216161616161618,
+    "median_actionable_sign_retention": 0.8082191780821918,
+    "median_actionable_count": 73
+  },
+  "go_threshold_comparison": [
+    {
+      "name": "mean_spearman",
+      "independent_observed": 0.707170717071707,
+      "official_observed": 0.707170717071707,
+      "absolute_delta": 0.0,
+      "threshold": 0.5,
+      "independent_passed": true,
+      "official_passed": true,
+      "pass_status_matches": true
+    },
+    {
+      "name": "mean_spearman_bootstrap_lower_95",
+      "independent_observed": 0.5546582016343363,
+      "official_observed": 0.5546582016343363,
+      "absolute_delta": 0.0,
+      "threshold": 0.3,
+      "independent_passed": true,
+      "official_passed": true,
+      "pass_status_matches": true
+    },
+    {
+      "name": "mean_kendall",
+      "independent_observed": 0.5866666666666668,
+      "official_observed": 0.5866666666666668,
+      "absolute_delta": 0.0,
+      "threshold": 0.35,
+      "independent_passed": true,
+      "official_passed": true,
+      "pass_status_matches": true
+    },
+    {
+      "name": "mean_kendall_bootstrap_lower_95",
+      "independent_observed": 0.45855089858037557,
+      "official_observed": 0.45855089858037557,
+      "absolute_delta": 0.0,
+      "threshold": 0.2,
+      "independent_passed": true,
+      "official_passed": true,
+      "pass_status_matches": true
+    },
+    {
+      "name": "actionable_sign_retention",
+      "independent_observed": 0.8072289156626506,
+      "official_observed": 0.8072289156626506,
+      "absolute_delta": 0.0,
+      "threshold": 0.75,
+      "independent_passed": true,
+      "official_passed": true,
+      "pass_status_matches": true
+    },
+    {
+      "name": "high_confidence_sign_retention",
+      "independent_observed": 0.875,
+      "official_observed": 0.875,
+      "absolute_delta": 0.0,
+      "threshold": 0.8,
+      "independent_passed": true,
+      "official_passed": true,
+      "pass_status_matches": true
+    },
+    {
+      "name": "high_confidence_positive_sign_retention",
+      "independent_observed": 1.0,
+      "official_observed": 1.0,
+      "absolute_delta": 0.0,
+      "threshold": 0.7,
+      "independent_passed": true,
+      "official_passed": true,
+      "pass_status_matches": true
+    },
+    {
+      "name": "high_confidence_negative_sign_retention",
+      "independent_observed": 0.75,
+      "official_observed": 0.75,
+      "absolute_delta": 0.0,
+      "threshold": 0.7,
+      "independent_passed": true,
+      "official_passed": true,
+      "pass_status_matches": true
+    },
+    {
+      "name": "high_confidence_min_count_per_direction_positive",
+      "independent_observed": 12,
+      "official_observed": 12,
+      "absolute_delta": 0.0,
+      "threshold": 10,
+      "independent_passed": true,
+      "official_passed": true,
+      "pass_status_matches": true
+    },
+    {
+      "name": "high_confidence_min_count_per_direction_negative",
+      "independent_observed": 12,
+      "official_observed": 12,
+      "absolute_delta": 0.0,
+      "threshold": 10,
+      "independent_passed": true,
+      "official_passed": true,
+      "pass_status_matches": true
+    },
+    {
+      "name": "top_recall",
+      "independent_observed": 0.7,
+      "official_observed": 0.7,
+      "absolute_delta": 0.0,
+      "threshold": 0.4,
+      "independent_passed": true,
+      "official_passed": true,
+      "pass_status_matches": true
+    },
+    {
+      "name": "top_jaccard",
+      "independent_observed": 0.5384615384615384,
+      "official_observed": 0.5384615384615384,
+      "absolute_delta": 0.0,
+      "threshold": 0.25,
+      "independent_passed": true,
+      "official_passed": true,
+      "pass_status_matches": true
+    },
+    {
+      "name": "bottom_recall",
+      "independent_observed": 0.75,
+      "official_observed": 0.75,
+      "absolute_delta": 0.0,
+      "threshold": 0.4,
+      "independent_passed": true,
+      "official_passed": true,
+      "pass_status_matches": true
+    },
+    {
+      "name": "bottom_jaccard",
+      "independent_observed": 0.6,
+      "official_observed": 0.6,
+      "absolute_delta": 0.0,
+      "threshold": 0.25,
+      "independent_passed": true,
+      "official_passed": true,
+      "pass_status_matches": true
+    },
+    {
+      "name": "lin_ccc",
+      "independent_observed": 0.5871257576035043,
+      "official_observed": 0.5871257576035043,
+      "absolute_delta": 0.0,
+      "threshold": 0.5,
+      "independent_passed": true,
+      "official_passed": true,
+      "pass_status_matches": true
+    },
+    {
+      "name": "absolute_agreement_icc_a1",
+      "independent_observed": 0.5895598985681914,
+      "official_observed": 0.5895598985681914,
+      "absolute_delta": 0.0,
+      "threshold": 0.5,
+      "independent_passed": true,
+      "official_passed": true,
+      "pass_status_matches": true
+    },
+    {
+      "name": "all9_icc_1_9",
+      "independent_observed": 0.8280975153191474,
+      "official_observed": 0.8280975153191474,
+      "absolute_delta": 0.0,
+      "threshold": 0.75,
+      "independent_passed": true,
+      "official_passed": true,
+      "pass_status_matches": true
+    },
+    {
+      "name": "high_confidence_min_count",
+      "independent_observed": 24,
+      "official_observed": 24,
+      "absolute_delta": 0.0,
+      "threshold": 20,
+      "independent_passed": true,
+      "official_passed": true,
+      "pass_status_matches": true
+    },
+    {
+      "name": "high_confidence_weighted_coverage",
+      "independent_observed": 0.22656820512820508,
+      "official_observed": 0.22656820512820514,
+      "absolute_delta": 5.551115123125783e-17,
+      "threshold": 0.2,
+      "independent_passed": true,
+      "official_passed": true,
+      "pass_status_matches": true
+    },
+    {
+      "name": "median_spearman",
+      "independent_observed": 0.6636903690369036,
+      "official_observed": 0.6636903690369036,
+      "absolute_delta": 0.0,
+      "threshold": 0.4,
+      "independent_passed": true,
+      "official_passed": true,
+      "pass_status_matches": true
+    },
+    {
+      "name": "median_actionable_sign_retention",
+      "independent_observed": 0.8082191780821918,
+      "official_observed": 0.8082191780821918,
+      "absolute_delta": 0.0,
+      "threshold": 0.7,
+      "independent_passed": true,
+      "official_passed": true,
+      "pass_status_matches": true
+    }
+  ],
+  "go_checks_passed": 21,
+  "go_checks_total": 21,
+  "official_pass_status_matches": 21,
+  "max_numeric_delta_vs_official": 5.551115123125783e-17,
+  "max_disagreement_state": {
+    "selection_order": 60,
+    "sample_id": "libero_spatial_no_noops_lerobot/episode_000260/frame_000081",
+    "suite": "libero_spatial",
+    "task": "pick up the black bowl on the ramekin and place it on the plate",
+    "target_mean": -0.03242541135834763,
+    "validation_mean": -0.11904605488293564,
+    "validation_minus_target": -0.08662064352458801,
+    "high_confidence_target": false,
+    "leave_max_disagreement_out": {
+      "mean_spearman": 0.6982065553494126,
+      "lin_ccc": 0.7068927412882448,
+      "absolute_agreement_icc_a1": 0.7089918388066447
+    }
+  },
+  "chart_qa": {
+    "reviewed_files": [
+      "target_vs_validation_mean.png",
+      "aggregate_bland_altman.png",
+      "all9_seed_heatmap.png",
+      "seed_group_rank_diagnostics.png",
+      "deadband_sensitivity.png"
+    ],
+    "all_files_present_nonempty": true,
+    "rendering": "PASS: all five PNGs render; titles, axes, legends, and plotted marks are legible; no clipped panels or corrupt output.",
+    "scientific_consistency": "PASS: visual patterns match numeric summary (positive aggregate rank agreement, near-zero mean bias, seed variability, and decreasing HC coverage at wider deadbands).",
+    "notable_finding": "Bland-Altman and scatter show one large non-HC state disagreement beyond the displayed limits; it is disclosed in max_disagreement_state and does not reverse preregistered GO.",
+    "cosmetic_note": "seed_group_rank_diagnostics legend slightly overlaps the lower-right plotting area; readable and non-material."
+  },
+  "assessment": "The sealed data and independently recomputed statistics support GO under every preregistered criterion. The conclusion is readiness for offline Tiny-MLP feasibility, not readiness to claim a successful dynamic Gate."
+}

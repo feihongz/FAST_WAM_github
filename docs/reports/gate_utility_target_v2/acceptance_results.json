@@ -1,0 +1,163 @@
+{
+  "schema_version": 1,
+  "generated_at_utc": "2026-08-13T14:39:34Z",
+  "decision": {
+    "status": "GO",
+    "passed_go_checks": 21,
+    "total_go_checks": 21,
+    "authorized_scope": "offline_tiny_mlp_feasibility_only",
+    "does_not_establish": [
+      "gate_predictability",
+      "gate_calibration",
+      "compute_savings",
+      "closed_loop_libero_improvement"
+    ]
+  },
+  "population": {
+    "state_count": 100,
+    "target_base_seeds": [42, 43, 44, 45, 46],
+    "validation_base_seeds": [47, 48, 49, 50],
+    "target_measurement_count": 500,
+    "validation_measurement_count": 400,
+    "all_measurement_count": 900,
+    "validation_error_count": 0,
+    "validation_grid_coverage": 1.0,
+    "selection_bins": {
+      "SP": 25,
+      "SN": 25,
+      "MP": 13,
+      "MN": 12,
+      "NZ": 25
+    }
+  },
+  "metric_definition": {
+    "E_N": "Per-element MSE in normalized action space over valid action steps and action dimensions.",
+    "U": "E0 - E10; positive means N=10 is closer to the demonstration action under this offline proxy.",
+    "primary_target": "Per-state arithmetic mean of seeds 42-46.",
+    "primary_validation": "Per-state arithmetic mean of independent seeds 47-50.",
+    "primary_deadband_epsilon": 0.0001,
+    "high_confidence": "Target mean outside +/- epsilon, at least 4/5 target seeds in that direction, and the two-sided 95% t interval wholly beyond the same deadband boundary."
+  },
+  "primary_metrics": {
+    "mean_spearman_rho": 0.707170717071707,
+    "mean_spearman_bootstrap_95": [0.5546582016343363, 0.8436005740672149],
+    "mean_kendall_tau": 0.5866666666666668,
+    "mean_kendall_bootstrap_95": [0.45855089858037557, 0.7126485000877141],
+    "actionable_sign_retention": {
+      "retained": 67,
+      "eligible": 83,
+      "rate": 0.8072289156626506,
+      "bootstrap_95": [0.7209302325581395, 0.8875]
+    },
+    "high_confidence_sign_retention": {
+      "retained": 21,
+      "eligible": 24,
+      "rate": 0.875,
+      "bootstrap_95": [0.7307692307692307, 1.0]
+    },
+    "high_confidence_positive": {
+      "retained": 12,
+      "eligible": 12,
+      "rate": 1.0
+    },
+    "high_confidence_negative": {
+      "retained": 9,
+      "eligible": 12,
+      "rate": 0.75
+    },
+    "lin_ccc": 0.5871257576035043,
+    "absolute_agreement_icc_a1": 0.5895598985681914,
+    "all9_icc_1_9": 0.8280975153191474,
+    "all9_icc_1_1": 0.34864036091230793,
+    "median_spearman_rho": 0.6636903690369036,
+    "median_actionable_sign_retention": 0.8082191780821918
+  },
+  "ranking_overlap": {
+    "tail_fraction": 0.2,
+    "k": 20,
+    "top_recall": 0.7,
+    "top_jaccard": 0.5384615384615384,
+    "bottom_recall": 0.75,
+    "bottom_jaccard": 0.6,
+    "random_expected_recall": 0.2,
+    "random_expected_jaccard": 0.11111111111111112
+  },
+  "coverage": {
+    "high_confidence_state_count": 24,
+    "unweighted_fraction": 0.24,
+    "pilot500_population_weighted_fraction": 0.22656820512820514,
+    "positive_state_count": 12,
+    "negative_state_count": 12
+  },
+  "suite_metrics": [
+    {"suite": "LIBERO-10", "state_count": 25, "actionable_count": 22, "sign_retention": 0.8636363636363636, "spearman_rho": 0.78},
+    {"suite": "LIBERO-Goal", "state_count": 25, "actionable_count": 22, "sign_retention": 0.7272727272727273, "spearman_rho": 0.48},
+    {"suite": "LIBERO-Object", "state_count": 25, "actionable_count": 20, "sign_retention": 0.9, "spearman_rho": 0.8146153846153847},
+    {"suite": "LIBERO-Spatial", "state_count": 25, "actionable_count": 19, "sign_retention": 0.7368421052631579, "spearman_rho": 0.7792307692307692}
+  ],
+  "seed_group_loso": [
+    {"omitted_seed": 42, "group": "target", "spearman_rho": 0.6412001200120011, "kendall_tau": 0.5232323232323233},
+    {"omitted_seed": 43, "group": "target", "spearman_rho": 0.6673387338733874, "kendall_tau": 0.5648484848484849},
+    {"omitted_seed": 44, "group": "target", "spearman_rho": 0.7173117311731173, "kendall_tau": 0.587878787878788},
+    {"omitted_seed": 45, "group": "target", "spearman_rho": 0.6836603660366036, "kendall_tau": 0.5551515151515152},
+    {"omitted_seed": 46, "group": "target", "spearman_rho": 0.6133333333333333, "kendall_tau": 0.5086868686868687},
+    {"omitted_seed": 47, "group": "validation", "spearman_rho": 0.6568976897689768, "kendall_tau": 0.5369696969696971},
+    {"omitted_seed": 48, "group": "validation", "spearman_rho": 0.631047104710471, "kendall_tau": 0.5183838383838385},
+    {"omitted_seed": 49, "group": "validation", "spearman_rho": 0.7000300030003, "kendall_tau": 0.5882828282828284},
+    {"omitted_seed": 50, "group": "validation", "spearman_rho": 0.6806360636063606, "kendall_tau": 0.5494949494949496}
+  ],
+  "deadband_sensitivity": [
+    {"epsilon": 0.00001, "epsilon_label": "1e-5", "actionable_count": 99, "actionable_sign_retention": 0.8282828282828283, "high_confidence_count": 30, "high_confidence_sign_retention": 0.9, "weighted_high_confidence_coverage": 0.3183630769230768},
+    {"epsilon": 0.0001, "epsilon_label": "1e-4", "actionable_count": 83, "actionable_sign_retention": 0.8072289156626506, "high_confidence_count": 24, "high_confidence_sign_retention": 0.875, "weighted_high_confidence_coverage": 0.22656820512820514},
+    {"epsilon": 0.001, "epsilon_label": "1e-3", "actionable_count": 58, "actionable_sign_retention": 0.7758620689655172, "high_confidence_count": 13, "high_confidence_sign_retention": 0.7692307692307693, "weighted_high_confidence_coverage": 0.09296}
+  ],
+  "go_checks": [
+    {"criterion": "Mean Spearman", "observed": 0.707170717071707, "threshold": 0.5, "ratio_to_threshold": 1.414341434143414, "passed": true},
+    {"criterion": "Spearman bootstrap lower", "observed": 0.5546582016343363, "threshold": 0.3, "ratio_to_threshold": 1.8488606721144543, "passed": true},
+    {"criterion": "Mean Kendall", "observed": 0.5866666666666668, "threshold": 0.35, "ratio_to_threshold": 1.6761904761904765, "passed": true},
+    {"criterion": "Kendall bootstrap lower", "observed": 0.45855089858037557, "threshold": 0.2, "ratio_to_threshold": 2.292754492901878, "passed": true},
+    {"criterion": "Actionable sign retention", "observed": 0.8072289156626506, "threshold": 0.75, "ratio_to_threshold": 1.0763052208835342, "passed": true},
+    {"criterion": "High-confidence sign retention", "observed": 0.875, "threshold": 0.8, "ratio_to_threshold": 1.09375, "passed": true},
+    {"criterion": "HC positive sign retention", "observed": 1.0, "threshold": 0.7, "ratio_to_threshold": 1.4285714285714286, "passed": true},
+    {"criterion": "HC negative sign retention", "observed": 0.75, "threshold": 0.7, "ratio_to_threshold": 1.0714285714285714, "passed": true},
+    {"criterion": "HC positive count", "observed": 12, "threshold": 10, "ratio_to_threshold": 1.2, "passed": true},
+    {"criterion": "HC negative count", "observed": 12, "threshold": 10, "ratio_to_threshold": 1.2, "passed": true},
+    {"criterion": "Top-20% recall", "observed": 0.7, "threshold": 0.4, "ratio_to_threshold": 1.75, "passed": true},
+    {"criterion": "Top-20% Jaccard", "observed": 0.5384615384615384, "threshold": 0.25, "ratio_to_threshold": 2.1538461538461537, "passed": true},
+    {"criterion": "Bottom-20% recall", "observed": 0.75, "threshold": 0.4, "ratio_to_threshold": 1.875, "passed": true},
+    {"criterion": "Bottom-20% Jaccard", "observed": 0.6, "threshold": 0.25, "ratio_to_threshold": 2.4, "passed": true},
+    {"criterion": "Lin CCC", "observed": 0.5871257576035043, "threshold": 0.5, "ratio_to_threshold": 1.1742515152070085, "passed": true},
+    {"criterion": "ICC(A,1)", "observed": 0.5895598985681914, "threshold": 0.5, "ratio_to_threshold": 1.1791197971363827, "passed": true},
+    {"criterion": "All-nine ICC(1,9)", "observed": 0.8280975153191474, "threshold": 0.75, "ratio_to_threshold": 1.1041300204255298, "passed": true},
+    {"criterion": "High-confidence count", "observed": 24, "threshold": 20, "ratio_to_threshold": 1.2, "passed": true},
+    {"criterion": "HC weighted coverage", "observed": 0.22656820512820514, "threshold": 0.2, "ratio_to_threshold": 1.1328410256410256, "passed": true},
+    {"criterion": "Median Spearman", "observed": 0.6636903690369036, "threshold": 0.4, "ratio_to_threshold": 1.659225922592259, "passed": true},
+    {"criterion": "Median actionable sign", "observed": 0.8082191780821918, "threshold": 0.7, "ratio_to_threshold": 1.154598825831717, "passed": true}
+  ],
+  "audit": {
+    "integrity_status": "PASS",
+    "independence_verified": true,
+    "pairing_verified": true,
+    "routes_verified": true,
+    "row_hashes_verified": true,
+    "scientific_analysis_audit_status": "PASS",
+    "scientific_analysis_audit_go_checks": "21/21",
+    "scientific_analysis_audit_max_numeric_delta": 5.551115123125783e-17
+  },
+  "source_hashes": {
+    "analysis_summary_sha256": "4a0fcec2740dfe6d2005c07ba54c18e4aa8dabdce7cb4e0ef0e47f049227f2e5",
+    "independent_integrity_audit_sha256": "9324a7299218580b15edd50c39c0c0f574e8af19c2b2aa376d010411ec44ed8b",
+    "independent_analysis_audit_sha256": "bca0e76757b3c61d3ffee26420fac5de17c80104067b8e2c545671b49c5f0a76",
+    "completion_canonical_seal_sha256": "5369de7828113eebdc6c0feb8f4475c3970fea69ca1fa8e06c0e74cb361f480d",
+    "completion_file_sha256": "0ab09764b2847dadb428b7d14d8e79f7ce2a32e37d4acb4d5feace6db597b5b8",
+    "target_manifest_sha256": "bc00fdf913b5ae257deb57f6d7101ac66b95c73f179578f194a1b9b53ad2bfc3",
+    "target_records_sha256": "918d33a324ffaf3103ff42e97771debb356a1c9af292bd87c92cea75cf70d023",
+    "validation_manifest_sha256": "fbad3bfb5ff153742f79ef0d9d7a9db3a38449fc22109c1c9943a82daa950834",
+    "validation_records_sha256": "da93bbcb7fbedcd4727f47c03a3f170a38b50935a0f5047b5c72989c9c617224"
+  },
+  "recommended_next_step": {
+    "immediate": "Run a small offline Tiny-MLP feasibility experiment using frozen features and the Target V2 mean plus uncertainty information.",
+    "parallel_data_work": "Expand the remaining Pilot-500 states to five-seed Target V2 labels before treating the dataset as a definitive training set.",
+    "required_before_closed_loop": "Demonstrate held-out ranking/sign prediction, rule out task-ID shortcut learning, then run tiny closed-loop smoke tests against fixed and random routing baselines."
+  }
+}

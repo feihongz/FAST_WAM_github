@@ -1,0 +1,621 @@
+{
+  "analysis_schema_version": 1,
+  "created_at_utc": "2026-08-13T14:31:00.106044+00:00",
+  "analysis_scope": "Independent seeds47-50 validation of LIBERO multi-seed Utility Target V2",
+  "preregistration": {
+    "locked_at_utc": "2026-08-13T12:46:00Z",
+    "locked_before_independent_results_inspection": true,
+    "go_thresholds": {
+      "mean_spearman": 0.5,
+      "mean_spearman_bootstrap_lower_95": 0.3,
+      "mean_kendall": 0.35,
+      "mean_kendall_bootstrap_lower_95": 0.2,
+      "actionable_sign_retention": 0.75,
+      "high_confidence_sign_retention": 0.8,
+      "high_confidence_positive_sign_retention": 0.7,
+      "high_confidence_negative_sign_retention": 0.7,
+      "high_confidence_min_count_per_direction": 10,
+      "top_recall": 0.4,
+      "top_jaccard": 0.25,
+      "bottom_recall": 0.4,
+      "bottom_jaccard": 0.25,
+      "lin_ccc": 0.5,
+      "absolute_agreement_icc_a1": 0.5,
+      "all9_icc_1_9": 0.75,
+      "high_confidence_min_count": 20,
+      "high_confidence_weighted_coverage": 0.2,
+      "median_spearman": 0.4,
+      "median_actionable_sign_retention": 0.7
+    },
+    "conditional_thresholds": {
+      "mean_spearman": 0.3,
+      "mean_kendall": 0.2,
+      "lin_ccc": 0.3,
+      "absolute_agreement_icc_a1": 0.35,
+      "actionable_sign_retention": 0.65,
+      "high_confidence_sign_retention": 0.7,
+      "top_recall": 0.35,
+      "bottom_recall": 0.35,
+      "all9_icc_1_9": 0.65,
+      "high_confidence_min_count": 10,
+      "high_confidence_weighted_coverage": 0.1,
+      "median_spearman": 0.3
+    },
+    "primary_target": "arithmetic mean of seeds42-46",
+    "primary_validation": "arithmetic mean of independent seeds47-50",
+    "high_confidence_definition": "target mean outside +/-epsilon, >=4/5 seeds in that epsilon direction, and two-sided 95% t-CI wholly beyond the same +/-epsilon boundary"
+  },
+  "inputs": {
+    "target_dir": "/root/feihong/FastWAM/utility_results/libero_demo_utility_target_v2_126c413_seed42_46",
+    "target_manifest_path": "/root/feihong/FastWAM/utility_results/libero_demo_utility_target_v2_126c413_seed42_46/manifest.json",
+    "target_manifest_sha256": "bc00fdf913b5ae257deb57f6d7101ac66b95c73f179578f194a1b9b53ad2bfc3",
+    "target_targets_path": "/root/feihong/FastWAM/utility_results/libero_demo_utility_target_v2_126c413_seed42_46/targets.jsonl",
+    "target_targets_sha256": "918d33a324ffaf3103ff42e97771debb356a1c9af292bd87c92cea75cf70d023",
+    "target_manifest_compatibility_fingerprint": "52262d03789113c2fadc50ff0f7ecca2840b27332b42ff7da13c4da368d5a109",
+    "validation_records_path": "/root/feihong/FastWAM/utility_results/libero_demo_utility_target_v2_validation100x4_126c413_seed47_50/records.jsonl",
+    "validation_records_sha256": "da93bbcb7fbedcd4727f47c03a3f170a38b50935a0f5047b5c72989c9c617224",
+    "validation_manifest_path": "/root/feihong/FastWAM/utility_results/libero_demo_utility_target_v2_validation100x4_126c413_seed47_50/manifest.json",
+    "validation_manifest_sha256": "fbad3bfb5ff153742f79ef0d9d7a9db3a38449fc22109c1c9943a82daa950834",
+    "validation_manifest_compatibility_fingerprint": "cbd633bf2af630d168c89310d8613d7973dd73b50da3b23641ff990190fdbdac",
+    "errors_path": "/root/feihong/FastWAM/utility_results/libero_demo_utility_target_v2_validation100x4_126c413_seed47_50/errors.jsonl",
+    "errors_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "validation": {
+    "status": "complete_and_verified",
+    "target_state_count": 100,
+    "target_seed_count": 5,
+    "target_measurement_count": 500,
+    "validation_state_count": 100,
+    "validation_seed_count": 4,
+    "validation_measurement_count": 400,
+    "all9_measurement_count": 900,
+    "error_count": 0,
+    "grid": {
+      "expected_count": 400,
+      "completed_count": 400,
+      "missing_count": 0,
+      "is_complete": true,
+      "coverage_fraction": 1.0,
+      "missing_key_examples": []
+    },
+    "manifest": {
+      "compatibility_fingerprint": "cbd633bf2af630d168c89310d8613d7973dd73b50da3b23641ff990190fdbdac",
+      "selection_sha256": "2e669b13ce61675fb87070c8a5d482e47c0e2f7636c74b1d328c8cb3e79d04d5",
+      "expected_record_count": 400
+    },
+    "completion": {
+      "path": "/root/feihong/FastWAM/utility_results/libero_demo_utility_target_v2_validation100x4_126c413_seed47_50/completion.json",
+      "completion_sha256": "5369de7828113eebdc6c0feb8f4475c3970fea69ca1fa8e06c0e74cb361f480d"
+    }
+  },
+  "settings": {
+    "target_base_seeds": [
+      42,
+      43,
+      44,
+      45,
+      46
+    ],
+    "validation_base_seeds": [
+      47,
+      48,
+      49,
+      50
+    ],
+    "primary_deadband_epsilon": 0.0001,
+    "sensitivity_deadband_epsilons": [
+      1e-05,
+      0.0001,
+      0.001
+    ],
+    "tail_fraction": 0.2,
+    "bootstrap_method": "state bootstrap stratified by frozen selection_bin",
+    "bootstrap_seed": 20260813,
+    "bootstrap_replicates": 2000,
+    "pilot_stratum_prevalence": {
+      "SP": 0.152,
+      "SN": 0.202,
+      "MP": 0.262,
+      "MN": 0.184,
+      "NZ": 0.2
+    }
+  },
+  "metrics": {
+    "primary_comparison": "target seeds42-46 mean vs independent seeds47-50 mean",
+    "primary_deadband_epsilon": 0.0001,
+    "rank_agreement": {
+      "mean_vs_mean": {
+        "spearman_rho": 0.707170717071707,
+        "kendall_tau": 0.5866666666666668
+      },
+      "median_vs_median": {
+        "spearman_rho": 0.6636903690369036,
+        "kendall_tau": 0.5216161616161618
+      },
+      "mean_vs_median": {
+        "spearman_rho": 0.6686588658865886,
+        "kendall_tau": 0.5337373737373738
+      },
+      "median_vs_mean": {
+        "spearman_rho": 0.6464326432643263,
+        "kendall_tau": 0.5010101010101011
+      }
+    },
+    "sign_retention": {
+      "actionable": {
+        "state_count": 83,
+        "retained_count": 67,
+        "retention": 0.8072289156626506,
+        "population_weighted_retention": 0.7816952247225855
+      },
+      "high_confidence": {
+        "state_count": 24,
+        "retained_count": 21,
+        "retention": 0.875,
+        "population_weighted_retention": 0.8930123492557853
+      },
+      "high_confidence_positive": {
+        "state_count": 12,
+        "retained_count": 12,
+        "retention": 1.0,
+        "population_weighted_retention": 1.0
+      },
+      "high_confidence_negative": {
+        "state_count": 12,
+        "retained_count": 9,
+        "retention": 0.75,
+        "population_weighted_retention": 0.7823796983480967
+      }
+    },
+    "ranking_overlap": {
+      "state_count": 100,
+      "fraction": 0.2,
+      "k": 20,
+      "top_intersection": 14,
+      "top_recall": 0.7,
+      "top_jaccard": 0.5384615384615384,
+      "bottom_intersection": 15,
+      "bottom_recall": 0.75,
+      "bottom_jaccard": 0.6,
+      "random_expected_recall": 0.2,
+      "random_expected_jaccard": 0.11111111111111112
+    },
+    "absolute_agreement": {
+      "lin_ccc": 0.5871257576035043,
+      "n_states": 100,
+      "n_measurements": 2,
+      "ms_rows": 0.00021274367641128377,
+      "ms_columns": 2.5223222287144924e-07,
+      "ms_error": 5.534116754383543e-05,
+      "icc_a_1": 0.5895598985681914,
+      "icc_a_k": 0.7417901006426271,
+      "mean_bias_validation_minus_target": 7.102566055609178e-05,
+      "median_absolute_difference": 0.00124625235162539,
+      "rmse": 0.010468073193346117,
+      "bland_altman_lower_95": -0.020549286133226183,
+      "bland_altman_upper_95": 0.020691337454338366
+    },
+    "target5_reliability": {
+      "n_states": 100,
+      "n_seeds": 5,
+      "ms_between_states": 0.0003807223979948781,
+      "ms_within_states": 0.00013016096667170984,
+      "icc_1_1": 0.2779795973522975,
+      "icc_1_k": 0.6581210683762795
+    },
+    "validation4_reliability": {
+      "n_states": 100,
+      "n_seeds": 4,
+      "ms_between_states": 0.0007677614574245746,
+      "ms_within_states": 0.0001590038358664389,
+      "icc_1_1": 0.4890511271237736,
+      "icc_1_k": 0.7928994294662681
+    },
+    "all9_reliability": {
+      "n_states": 100,
+      "n_seeds": 9,
+      "ms_between_states": 0.0009025231107801841,
+      "ms_within_states": 0.00015514596522500605,
+      "icc_1_1": 0.34864036091230793,
+      "icc_1_k": 0.8280975153191474
+    },
+    "single_seed_reliability_guardrail": {
+      "metric": "ICC(1,1) across all nine seeds",
+      "value": 0.34864036091230793,
+      "interpretation": "Reported alongside ICC(1,9); the nine-seed aggregate must not be used to imply that a single-seed label is reliable."
+    },
+    "median_guardrail": {
+      "rank": {
+        "spearman_rho": 0.6636903690369036,
+        "kendall_tau": 0.5216161616161618
+      },
+      "actionable_state_count": 73,
+      "actionable_sign_retention": 0.8082191780821918
+    },
+    "high_confidence_coverage": {
+      "state_count": 24,
+      "unweighted_fraction": 0.24,
+      "population_weighted_fraction": 0.22656820512820514,
+      "positive_state_count": 12,
+      "negative_state_count": 12
+    },
+    "leave_one_seed_out": {
+      "target_median_spearman_vs_other4": 0.38795079507950786,
+      "validation_median_spearman_vs_other3": 0.467002700270027,
+      "all9_median_spearman_vs_other8": 0.5127272727272726
+    },
+    "deadband_sensitivity": {
+      "eps_1em05": {
+        "epsilon": 1e-05,
+        "target_positive_count": 39,
+        "target_negative_count": 60,
+        "target_deadband_count": 1,
+        "validation_positive_count": 45,
+        "validation_negative_count": 53,
+        "validation_deadband_count": 2,
+        "actionable_state_count": 99,
+        "actionable_sign_retention": 0.8282828282828283,
+        "high_confidence_state_count": 30,
+        "high_confidence_weighted_coverage": 0.3183630769230768,
+        "high_confidence_sign_retention": 0.9
+      },
+      "eps_1em04": {
+        "epsilon": 0.0001,
+        "target_positive_count": 32,
+        "target_negative_count": 51,
+        "target_deadband_count": 17,
+        "validation_positive_count": 41,
+        "validation_negative_count": 48,
+        "validation_deadband_count": 11,
+        "actionable_state_count": 83,
+        "actionable_sign_retention": 0.8072289156626506,
+        "high_confidence_state_count": 24,
+        "high_confidence_weighted_coverage": 0.22656820512820514,
+        "high_confidence_sign_retention": 0.875
+      },
+      "eps_1em03": {
+        "epsilon": 0.001,
+        "target_positive_count": 22,
+        "target_negative_count": 36,
+        "target_deadband_count": 42,
+        "validation_positive_count": 27,
+        "validation_negative_count": 34,
+        "validation_deadband_count": 39,
+        "actionable_state_count": 58,
+        "actionable_sign_retention": 0.7758620689655172,
+        "high_confidence_state_count": 13,
+        "high_confidence_weighted_coverage": 0.09296,
+        "high_confidence_sign_retention": 0.7692307692307693
+      }
+    },
+    "bootstrap": {
+      "method": "state bootstrap stratified by frozen Pilot selection_bin",
+      "seed": 20260813,
+      "replicates": 2000,
+      "mean_spearman": {
+        "lower_95": 0.5546582016343363,
+        "upper_95": 0.8436005740672149,
+        "valid_replicates": 2000,
+        "requested_replicates": 2000
+      },
+      "mean_kendall": {
+        "lower_95": 0.45855089858037557,
+        "upper_95": 0.7126485000877141,
+        "valid_replicates": 2000,
+        "requested_replicates": 2000
+      },
+      "actionable_sign_retention": {
+        "lower_95": 0.7209302325581395,
+        "upper_95": 0.8875,
+        "valid_replicates": 2000,
+        "requested_replicates": 2000
+      },
+      "high_confidence_sign_retention": {
+        "lower_95": 0.7307692307692307,
+        "upper_95": 1.0,
+        "valid_replicates": 2000,
+        "requested_replicates": 2000
+      },
+      "lin_ccc": {
+        "lower_95": 0.4960492566783763,
+        "upper_95": 0.8063790424890912,
+        "valid_replicates": 2000,
+        "requested_replicates": 2000
+      },
+      "absolute_agreement_icc_a1": {
+        "lower_95": 0.49856176228489407,
+        "upper_95": 0.8079433901953331,
+        "valid_replicates": 2000,
+        "requested_replicates": 2000
+      },
+      "all9_icc_1_1": {
+        "lower_95": 0.17942550446516672,
+        "upper_95": 0.4490438738171775,
+        "valid_replicates": 2000,
+        "requested_replicates": 2000
+      },
+      "all9_icc_1_9": {
+        "lower_95": 0.663064299088631,
+        "upper_95": 0.8800274350122697,
+        "valid_replicates": 2000,
+        "requested_replicates": 2000
+      }
+    },
+    "population_weighting": {
+      "method": "post-stratification to Pilot-500 selection-bin prevalence",
+      "stratum_prevalence": {
+        "SP": 0.152,
+        "SN": 0.202,
+        "MP": 0.262,
+        "MN": 0.184,
+        "NZ": 0.2
+      },
+      "warning": "The 100-state panel over-samples utility tails; unweighted metrics describe the diagnostic panel, not Pilot-500 prevalence."
+    },
+    "decision": {
+      "decision": "GO",
+      "scope": "readiness_to_start_offline_tiny_mlp_only",
+      "conditional_scope": "high_confidence_small_scale_offline_feasibility_only",
+      "does_not_establish": [
+        "full_scale_gate_training_readiness_when_conditional",
+        "gate_calibration",
+        "compute_savings",
+        "closed_loop_gate_improvement"
+      ],
+      "preregistered_at_utc": "2026-08-13T12:46:00Z",
+      "go_checks": [
+        {
+          "name": "mean_spearman",
+          "observed": 0.707170717071707,
+          "operator": ">=",
+          "threshold": 0.5,
+          "passed": true
+        },
+        {
+          "name": "mean_spearman_bootstrap_lower_95",
+          "observed": 0.5546582016343363,
+          "operator": ">=",
+          "threshold": 0.3,
+          "passed": true
+        },
+        {
+          "name": "mean_kendall",
+          "observed": 0.5866666666666668,
+          "operator": ">=",
+          "threshold": 0.35,
+          "passed": true
+        },
+        {
+          "name": "mean_kendall_bootstrap_lower_95",
+          "observed": 0.45855089858037557,
+          "operator": ">=",
+          "threshold": 0.2,
+          "passed": true
+        },
+        {
+          "name": "actionable_sign_retention",
+          "observed": 0.8072289156626506,
+          "operator": ">=",
+          "threshold": 0.75,
+          "passed": true
+        },
+        {
+          "name": "high_confidence_sign_retention",
+          "observed": 0.875,
+          "operator": ">=",
+          "threshold": 0.8,
+          "passed": true
+        },
+        {
+          "name": "high_confidence_positive_sign_retention",
+          "observed": 1.0,
+          "operator": ">=",
+          "threshold": 0.7,
+          "passed": true
+        },
+        {
+          "name": "high_confidence_negative_sign_retention",
+          "observed": 0.75,
+          "operator": ">=",
+          "threshold": 0.7,
+          "passed": true
+        },
+        {
+          "name": "high_confidence_min_count_per_direction_positive",
+          "observed": 12,
+          "operator": ">=",
+          "threshold": 10,
+          "passed": true
+        },
+        {
+          "name": "high_confidence_min_count_per_direction_negative",
+          "observed": 12,
+          "operator": ">=",
+          "threshold": 10,
+          "passed": true
+        },
+        {
+          "name": "top_recall",
+          "observed": 0.7,
+          "operator": ">=",
+          "threshold": 0.4,
+          "passed": true
+        },
+        {
+          "name": "top_jaccard",
+          "observed": 0.5384615384615384,
+          "operator": ">=",
+          "threshold": 0.25,
+          "passed": true
+        },
+        {
+          "name": "bottom_recall",
+          "observed": 0.75,
+          "operator": ">=",
+          "threshold": 0.4,
+          "passed": true
+        },
+        {
+          "name": "bottom_jaccard",
+          "observed": 0.6,
+          "operator": ">=",
+          "threshold": 0.25,
+          "passed": true
+        },
+        {
+          "name": "lin_ccc",
+          "observed": 0.5871257576035043,
+          "operator": ">=",
+          "threshold": 0.5,
+          "passed": true
+        },
+        {
+          "name": "absolute_agreement_icc_a1",
+          "observed": 0.5895598985681914,
+          "operator": ">=",
+          "threshold": 0.5,
+          "passed": true
+        },
+        {
+          "name": "all9_icc_1_9",
+          "observed": 0.8280975153191474,
+          "operator": ">=",
+          "threshold": 0.75,
+          "passed": true
+        },
+        {
+          "name": "high_confidence_min_count",
+          "observed": 24,
+          "operator": ">=",
+          "threshold": 20,
+          "passed": true
+        },
+        {
+          "name": "high_confidence_weighted_coverage",
+          "observed": 0.22656820512820514,
+          "operator": ">=",
+          "threshold": 0.2,
+          "passed": true
+        },
+        {
+          "name": "median_spearman",
+          "observed": 0.6636903690369036,
+          "operator": ">=",
+          "threshold": 0.4,
+          "passed": true
+        },
+        {
+          "name": "median_actionable_sign_retention",
+          "observed": 0.8082191780821918,
+          "operator": ">=",
+          "threshold": 0.7,
+          "passed": true
+        }
+      ],
+      "failed_go_checks": [],
+      "conditional_checks": [
+        {
+          "name": "mean_spearman",
+          "observed": 0.707170717071707,
+          "operator": ">=",
+          "threshold": 0.3,
+          "passed": true
+        },
+        {
+          "name": "mean_kendall",
+          "observed": 0.5866666666666668,
+          "operator": ">=",
+          "threshold": 0.2,
+          "passed": true
+        },
+        {
+          "name": "lin_ccc",
+          "observed": 0.5871257576035043,
+          "operator": ">=",
+          "threshold": 0.3,
+          "passed": true
+        },
+        {
+          "name": "absolute_agreement_icc_a1",
+          "observed": 0.5895598985681914,
+          "operator": ">=",
+          "threshold": 0.35,
+          "passed": true
+        },
+        {
+          "name": "actionable_sign_retention",
+          "observed": 0.8072289156626506,
+          "operator": ">=",
+          "threshold": 0.65,
+          "passed": true
+        },
+        {
+          "name": "high_confidence_sign_retention",
+          "observed": 0.875,
+          "operator": ">=",
+          "threshold": 0.7,
+          "passed": true
+        },
+        {
+          "name": "top_recall",
+          "observed": 0.7,
+          "operator": ">=",
+          "threshold": 0.35,
+          "passed": true
+        },
+        {
+          "name": "bottom_recall",
+          "observed": 0.75,
+          "operator": ">=",
+          "threshold": 0.35,
+          "passed": true
+        },
+        {
+          "name": "all9_icc_1_9",
+          "observed": 0.8280975153191474,
+          "operator": ">=",
+          "threshold": 0.65,
+          "passed": true
+        },
+        {
+          "name": "high_confidence_min_count",
+          "observed": 24,
+          "operator": ">=",
+          "threshold": 10,
+          "passed": true
+        },
+        {
+          "name": "high_confidence_weighted_coverage",
+          "observed": 0.22656820512820514,
+          "operator": ">=",
+          "threshold": 0.1,
+          "passed": true
+        },
+        {
+          "name": "median_spearman",
+          "observed": 0.6636903690369036,
+          "operator": ">=",
+          "threshold": 0.3,
+          "passed": true
+        }
+      ],
+      "failed_conditional_checks": []
+    }
+  },
+  "outputs": {
+    "per_state_csv": "per_state.csv",
+    "seed_metrics_csv": "seed_metrics.csv",
+    "seed_pair_metrics_csv": "seed_pair_metrics.csv",
+    "seed_group_loso_csv": "seed_group_loso.csv",
+    "segment_metrics_csv": "segment_metrics.csv",
+    "deadband_sensitivity_csv": "deadband_sensitivity.csv",
+    "plot_files": [
+      "target_vs_validation_mean.png",
+      "all9_seed_heatmap.png",
+      "aggregate_bland_altman.png",
+      "seed_group_rank_diagnostics.png",
+      "deadband_sensitivity.png"
+    ]
+  },
+  "interpretation_guardrail": "GO only permits the next offline Tiny-MLP training stage. CONDITIONAL only permits a small high-confidence offline feasibility experiment. Neither establishes calibration, compute savings, or closed-loop LIBERO success."
+}

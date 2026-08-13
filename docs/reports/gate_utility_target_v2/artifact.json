@@ -1,0 +1,1096 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "LIBERO Gate Utility Target V2 独立验证",
+    "description": "预注册的 seeds42–46 聚合 target 与独立 seeds47–50 复验：判断是否可进入 offline Tiny-MLP feasibility。",
+    "generatedAt": "2026-08-13T14:39:34Z",
+    "cards": [
+      {
+        "id": "checks_card",
+        "description": "预注册 GO 检查全部通过。",
+        "dataset": "headline_metrics",
+        "sourceId": "acceptance_source",
+        "metrics": [
+          {
+            "label": "通过检查",
+            "field": "passed_checks",
+            "format": "number"
+          },
+          {
+            "label": "检查总数",
+            "field": "total_checks",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "rho_card",
+        "description": "五 seed target mean 与四个新 seed mean 的秩相关。",
+        "dataset": "headline_metrics",
+        "sourceId": "acceptance_source",
+        "metrics": [
+          {
+            "label": "Spearman ρ",
+            "field": "spearman",
+            "format": "number"
+          },
+          {
+            "label": "GO 门槛",
+            "field": "spearman_target",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "hc_card",
+        "description": "24 个 high-confidence target 的独立方向保持率。",
+        "dataset": "headline_metrics",
+        "sourceId": "acceptance_source",
+        "metrics": [
+          {
+            "label": "HC sign retention",
+            "field": "hc_sign",
+            "format": "percent"
+          },
+          {
+            "label": "GO 门槛",
+            "field": "hc_sign_target",
+            "format": "percent"
+          }
+        ]
+      },
+      {
+        "id": "agg_icc_card",
+        "description": "九 seed 聚合 utility 的可靠性。",
+        "dataset": "headline_metrics",
+        "sourceId": "acceptance_source",
+        "metrics": [
+          {
+            "label": "ICC(1,9)",
+            "field": "icc_1_9",
+            "format": "number"
+          },
+          {
+            "label": "GO 门槛",
+            "field": "icc_1_9_target",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "single_icc_card",
+        "description": "单次 utility 仍不可靠；这是训练设计 guardrail。",
+        "dataset": "headline_metrics",
+        "sourceId": "acceptance_source",
+        "metrics": [
+          {
+            "label": "单 seed ICC(1,1)",
+            "field": "single_icc",
+            "format": "number"
+          }
+        ]
+      }
+    ],
+    "charts": [
+      {
+        "id": "go_checks_chart",
+        "title": "预注册 GO 检查相对门槛",
+        "subtitle": "21 项全部达到 1；比值是观察值除以冻结门槛。",
+        "type": "bar",
+        "dataset": "go_checks",
+        "sourceId": "go_checks_source",
+        "valueFormat": "number",
+        "encodings": {
+          "x": {
+            "field": "criterion",
+            "type": "nominal",
+            "label": "检查项"
+          },
+          "y": {
+            "field": "ratio_to_threshold",
+            "type": "quantitative",
+            "label": "观察值 / 门槛"
+          },
+          "tooltip": [
+            {
+              "field": "observed",
+              "type": "quantitative",
+              "label": "观察值",
+              "format": "number"
+            },
+            {
+              "field": "threshold",
+              "type": "quantitative",
+              "label": "门槛",
+              "format": "number"
+            },
+            {
+              "field": "status",
+              "type": "nominal",
+              "label": "结果"
+            }
+          ]
+        },
+        "settings": {
+          "orientation": "horizontal",
+          "groupMode": "single",
+          "legend": false
+        }
+      },
+      {
+        "id": "suite_chart",
+        "title": "四个 LIBERO suite 的方向与排序复现",
+        "subtitle": "每 suite 25 states；Goal 的 Spearman 最低，但总体预注册门槛仍全部通过。",
+        "type": "bar",
+        "dataset": "suite_metrics",
+        "sourceId": "suite_source",
+        "valueFormat": "number",
+        "encodings": {
+          "x": {
+            "field": "suite",
+            "type": "nominal",
+            "label": "Suite"
+          },
+          "y": {
+            "fields": [
+              "sign_retention",
+              "spearman_rho"
+            ],
+            "type": "quantitative",
+            "label": "比例 / 相关系数"
+          },
+          "tooltip": [
+            {
+              "field": "state_count",
+              "type": "quantitative",
+              "label": "状态数",
+              "format": "number"
+            },
+            {
+              "field": "actionable_count",
+              "type": "quantitative",
+              "label": "Actionable 状态",
+              "format": "number"
+            }
+          ]
+        },
+        "settings": {
+          "orientation": "vertical",
+          "groupMode": "grouped",
+          "legend": true
+        }
+      },
+      {
+        "id": "overlap_chart",
+        "title": "Target 与独立验证的 Top/Bottom 20% overlap",
+        "subtitle": "四项显著高于随机集合的期望基线。",
+        "type": "bar",
+        "dataset": "overlap_metrics",
+        "sourceId": "rank_source",
+        "valueFormat": "percent",
+        "encodings": {
+          "x": {
+            "field": "metric",
+            "type": "nominal",
+            "label": "Tail metric"
+          },
+          "y": {
+            "fields": [
+              "observed",
+              "random_baseline"
+            ],
+            "type": "quantitative",
+            "label": "比例"
+          }
+        },
+        "settings": {
+          "orientation": "vertical",
+          "groupMode": "grouped",
+          "legend": true
+        }
+      },
+      {
+        "id": "loso_chart",
+        "title": "逐 seed 对另一组聚合值的秩相关",
+        "subtitle": "目标组 42–46 与独立组 47–50 的九次 Spearman 均为正。",
+        "type": "bar",
+        "dataset": "seed_group_loso",
+        "sourceId": "acceptance_source",
+        "valueFormat": "number",
+        "encodings": {
+          "x": {
+            "field": "seed_label",
+            "type": "nominal",
+            "label": "Seed"
+          },
+          "y": {
+            "fields": [
+              "spearman_rho",
+              "kendall_tau"
+            ],
+            "type": "quantitative",
+            "label": "相关系数"
+          },
+          "tooltip": [
+            {
+              "field": "group",
+              "type": "nominal",
+              "label": "Seed group"
+            }
+          ]
+        },
+        "settings": {
+          "orientation": "vertical",
+          "groupMode": "grouped",
+          "legend": true
+        }
+      },
+      {
+        "id": "deadband_chart",
+        "title": "Deadband 敏感性",
+        "subtitle": "更严格 deadband 降低 HC 覆盖，但 actionable sign retention 仍保持 77.6%–82.8%。",
+        "type": "bar",
+        "dataset": "deadband_metrics",
+        "sourceId": "deadband_source",
+        "valueFormat": "percent",
+        "encodings": {
+          "x": {
+            "field": "epsilon_label",
+            "type": "nominal",
+            "label": "Deadband ε"
+          },
+          "y": {
+            "fields": [
+              "actionable_sign_retention",
+              "high_confidence_sign_retention",
+              "weighted_high_confidence_coverage"
+            ],
+            "type": "quantitative",
+            "label": "比例"
+          },
+          "tooltip": [
+            {
+              "field": "actionable_count",
+              "type": "quantitative",
+              "label": "Actionable states",
+              "format": "number"
+            },
+            {
+              "field": "high_confidence_count",
+              "type": "quantitative",
+              "label": "HC states",
+              "format": "number"
+            }
+          ]
+        },
+        "settings": {
+          "orientation": "vertical",
+          "groupMode": "grouped",
+          "legend": true
+        }
+      }
+    ],
+    "tables": [
+      {
+        "id": "go_checks_table",
+        "title": "预注册 GO 判定明细",
+        "subtitle": "按观察值/门槛升序；最靠近门槛的检查最先显示。",
+        "dataset": "go_checks",
+        "sourceId": "go_checks_source",
+        "defaultSort": {
+          "field": "ratio_to_threshold",
+          "direction": "asc"
+        },
+        "columns": [
+          {
+            "field": "criterion",
+            "label": "检查项",
+            "type": "text"
+          },
+          {
+            "field": "observed",
+            "label": "观察值",
+            "format": "number"
+          },
+          {
+            "field": "threshold",
+            "label": "门槛",
+            "format": "number"
+          },
+          {
+            "field": "ratio_to_threshold",
+            "label": "观察值/门槛",
+            "format": "number"
+          },
+          {
+            "field": "status",
+            "label": "结果",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "reliability_table",
+        "title": "主指标、区间与 guardrail",
+        "subtitle": "Bootstrap 为按 frozen Pilot stratum 分层的 2,000 次 state resampling。",
+        "dataset": "reliability_metrics",
+        "sourceId": "acceptance_source",
+        "defaultSort": {
+          "field": "metric_order",
+          "direction": "asc"
+        },
+        "columns": [
+          {
+            "field": "metric_order",
+            "label": "顺序",
+            "format": "number"
+          },
+          {
+            "field": "metric",
+            "label": "指标",
+            "type": "text"
+          },
+          {
+            "field": "estimate",
+            "label": "估计",
+            "format": "number"
+          },
+          {
+            "field": "lower_95",
+            "label": "95% 下界",
+            "format": "number"
+          },
+          {
+            "field": "upper_95",
+            "label": "95% 上界",
+            "format": "number"
+          },
+          {
+            "field": "go_threshold",
+            "label": "GO 门槛",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "audit_table",
+        "title": "独立审计状态",
+        "subtitle": "完整性审计与科学复算相互独立；所有项完成后才解释 GO。",
+        "dataset": "audit_checks",
+        "sourceId": "independent_audit_source",
+        "defaultSort": {
+          "field": "check",
+          "direction": "asc"
+        },
+        "columns": [
+          {
+            "field": "check",
+            "label": "检查",
+            "type": "text"
+          },
+          {
+            "field": "result",
+            "label": "结果",
+            "type": "text"
+          },
+          {
+            "field": "evidence",
+            "label": "证据",
+            "type": "text"
+          }
+        ]
+      }
+    ],
+    "sources": [
+      {
+        "id": "acceptance_source",
+        "label": "正式 Target V2 acceptance evidence",
+        "path": "acceptance_results.json"
+      },
+      {
+        "id": "go_checks_source",
+        "label": "预注册 GO 检查快照",
+        "path": "acceptance_results.json"
+      },
+      {
+        "id": "suite_source",
+        "label": "LIBERO suite 分层结果",
+        "path": "acceptance_results.json"
+      },
+      {
+        "id": "rank_source",
+        "label": "Tail ranking overlap",
+        "path": "acceptance_results.json"
+      },
+      {
+        "id": "deadband_source",
+        "label": "Deadband sensitivity",
+        "path": "acceptance_results.json"
+      },
+      {
+        "id": "independent_audit_source",
+        "label": "独立科学复算审计",
+        "path": "independent_audit.json"
+      },
+      {
+        "id": "integrity_audit_source",
+        "label": "独立采集完整性审计",
+        "path": "independent_integrity_audit.json"
+      }
+    ],
+    "blocks": [
+      {
+        "id": "title",
+        "type": "markdown",
+        "body": "# LIBERO Gate Utility Target V2 独立验证"
+      },
+      {
+        "id": "technical_summary",
+        "type": "markdown",
+        "sourceId": "acceptance_source",
+        "body": "## 技术结论：通过预注册 Gate，允许开始离线 Tiny-MLP feasibility\n\n**正式结论为 `GO`：21/21 项预注册检查全部通过。** 五个 target seeds（42–46）的 state-level mean utility，在四个完全独立 seeds（47–50）上表现出可复现的排序、方向和聚合可靠性：Spearman **0.707**，actionable sign retention **80.7%**，high-confidence sign retention **87.5%**，九 seed 聚合 `ICC(1,9)` **0.828**。\n\n这个 GO 只授权验证“状态特征能否离线预测 multi-seed utility target”。它不证明 Gate 已经学得出来，更不证明 calibration、算力节省或 closed-loop LIBERO success 改善。"
+      },
+      {
+        "id": "headline_metrics",
+        "type": "metric-strip",
+        "cardIds": [
+          "checks_card",
+          "rho_card",
+          "hc_card",
+          "agg_icc_card",
+          "single_icc_card"
+        ]
+      },
+      {
+        "id": "decision_evidence",
+        "type": "markdown",
+        "sourceId": "go_checks_source",
+        "body": "## 21 项互补门槛同时通过，不是单指标擦线\n\n门槛覆盖 rank correlation、bootstrap 下界、actionable/HC 方向、正负 HC 子组样本量、Top/Bottom overlap、CCC、absolute-agreement ICC、聚合 ICC、coverage 与 median guardrail。最窄的方向门槛是 negative HC retention **75% vs 70%**；因此结论成立，但后续仍应持续监控负向标签。"
+      },
+      {
+        "id": "go_checks_chart_block",
+        "type": "chart",
+        "chartId": "go_checks_chart"
+      },
+      {
+        "id": "go_checks_table_block",
+        "type": "table",
+        "tableId": "go_checks_table"
+      },
+      {
+        "id": "direction_rank",
+        "type": "markdown",
+        "sourceId": "suite_source",
+        "body": "## 排序与方向信号跨 suite 存在，但强度不均\n\n四 suite 各包含 25 个固定 states。LIBERO-Object 的 actionable sign retention 为 **90.0%**、Spearman **0.815**；LIBERO-Goal 分别为 **72.7%** 与 **0.480**，是最弱分层。这不反转总体 GO，却要求 Tiny-MLP 使用 task/suite-held-out 评估，避免总体指标掩盖弱 suite 或 task-ID shortcut。"
+      },
+      {
+        "id": "suite_chart_block",
+        "type": "chart",
+        "chartId": "suite_chart"
+      },
+      {
+        "id": "tail_rank",
+        "type": "markdown",
+        "sourceId": "rank_source",
+        "body": "## 极端 utility 状态的集合复现显著高于随机\n\nTarget 与独立验证的 Top-20% recall 为 **70%**、Bottom-20% recall 为 **75%**；对应 Jaccard 为 **53.8%** 与 **60.0%**。随机集合期望只有 20% recall、11.1% Jaccard。这使 ranking / top-k objective 成为 Huber regression 的必要对照，而不是只优化连续数值误差。"
+      },
+      {
+        "id": "overlap_chart_block",
+        "type": "chart",
+        "chartId": "overlap_chart"
+      },
+      {
+        "id": "reliability",
+        "type": "markdown",
+        "sourceId": "acceptance_source",
+        "body": "## 聚合标签可用，单 seed 标签仍不可用\n\n九 seed 聚合 `ICC(1,9)=0.828` 达到 0.75 门槛；但单次标签 `ICC(1,1)=0.349` 仍低。训练数据必须保存 multi-seed mean、方差/SEM/区间和 high-confidence 标记，并使用不确定性加权或过滤。**不能为了省采集成本退回每 state 一个随机 seed 的 U。**"
+      },
+      {
+        "id": "reliability_table_block",
+        "type": "table",
+        "tableId": "reliability_table"
+      },
+      {
+        "id": "loso_note",
+        "type": "markdown",
+        "sourceId": "acceptance_source",
+        "body": "## 单 seed 到另一 seed 组的 LOSO 排名均保持正相关\n\n九次 leave-one-seed-out 对另一组聚合值的 Spearman 均为正，范围约 **0.613–0.717**。这与 aggregate GO 一致，但它仍不能替代多 seed target：聚合能显著降低单次 diffusion 随机波动。"
+      },
+      {
+        "id": "loso_chart_block",
+        "type": "chart",
+        "chartId": "loso_chart"
+      },
+      {
+        "id": "deadband_note",
+        "type": "markdown",
+        "sourceId": "deadband_source",
+        "body": "## Deadband 改变 coverage，不改变核心方向复现结论\n\n主定义使用 `ε=1e-4`，得到 24 个 HC states、Pilot-weighted coverage **22.7%**。把 ε 从 `1e-5` 调到 `1e-3` 时，actionable sign retention 仍在 **77.6%–82.8%**；主要变化是 HC coverage 从 31.8% 降至 9.3%。因此 ε 是训练覆盖与标签纯度的调节器，不应在看到验证结果后事后选择。"
+      },
+      {
+        "id": "deadband_chart_block",
+        "type": "chart",
+        "chartId": "deadband_chart"
+      },
+      {
+        "id": "scope_definitions",
+        "type": "markdown",
+        "sourceId": "acceptance_source",
+        "body": "## 数据范围与指标定义\n\n分析固定同一组 100 个 LIBERO demonstration states。Target 使用 seeds 42–46（500 measurements），独立验证使用从未参与 target 的 seeds 47–50（400 次全新 paired measurements），合计 900。两条 route 在每个 replicate 内共享 seed，并只改变 prefix endpoint：`N=0` 与 `N=10`。\n\n在 normalized action space 中，`E_N` 是 valid action step × action dimension 的 per-element MSE；`U=E0-E10`。`U>0` 只代表 N=10 在这个离线 action-MSE proxy 上更接近 demonstration action，不是 rollout return。100-state panel 有意过采 utility tails；coverage 的总体解释使用 Pilot-500 selection-bin prevalence post-stratification。"
+      },
+      {
+        "id": "methodology",
+        "type": "markdown",
+        "sourceId": "acceptance_source",
+        "body": "## 方法：在看 validation 结果前冻结定义与门槛\n\n1. 用 seeds 42–46 的 mean、median、sample standard deviation、SEM 与双侧 t interval 构造 Target V2。\n2. HC 同时要求 mean 越过 `±1e-4`、至少 4/5 seeds 同方向、95% t interval 完全越过同一 deadband。\n3. 独立采集 seeds 47–50；完整 100×4 grid 和零 error 后写 completion seal。\n4. 主比较 target-five mean 与 validation-four mean；median/median 是稳健性 guardrail。\n5. Bootstrap 固定 2,000 次、seed 20260813，并按 frozen Pilot selection bin 分层重采样 state。\n6. 只有 21 项预注册 GO 条件全部通过才授权 offline Tiny-MLP feasibility。"
+      },
+      {
+        "id": "audit",
+        "type": "markdown",
+        "sourceId": "independent_audit_source",
+        "body": "## 独立审计复算支持同一个 GO\n\n采集完整性审计验证 400/400 rows、0 errors、fresh seeds 47–50、逐行 SHA、completion seal、输入/route/checkpoint/stats/VAE/Git provenance。另一套不 import 正式 analyzer 的 raw-JSONL 复算得到 **21/21** 相同 pass/fail，关键数值最大差仅 **5.55e-17**。五张正式图均通过 QA。"
+      },
+      {
+        "id": "audit_table_block",
+        "type": "table",
+        "tableId": "audit_table"
+      },
+      {
+        "id": "limitations",
+        "type": "markdown",
+        "sourceId": "independent_audit_source",
+        "body": "## 局限、离群状态与不能声称的结果\n\n- 这是 demo action-MSE proxy 的独立 seed 复现，不是 Gate prediction、calibration、compute 或 closed-loop success 评估。\n- 单 seed ICC 仍低，GO 依赖 multi-seed aggregation。\n- 有 1 个非-HC state 出现较大 target/validation disagreement（target −0.0324，validation −0.1190）；leave-one-out 后 Spearman 0.698、CCC 0.707、ICC(A,1) 0.709，结论不反转。\n- 只覆盖当前 checkpoint、scheduler 与 N=0/10 endpoints，不能自动外推到中间 N 或别的 checkpoint。\n- LIBERO-Goal 分层较弱，训练评估必须显式报告 suite/task cuts。"
+      },
+      {
+        "id": "next_steps",
+        "type": "markdown",
+        "body": "## 下一步：开始小规模 offline feasibility，同时扩完整训练标签\n\n1. **先做小样本 Tiny-MLP。** 冻结视觉、文本和 proprio feature；预测连续 mean-U，主 loss 用 Huber，同时对比 pairwise ranking objective。\n2. **保留 uncertainty。** 对 interval 跨 deadband 的样本降权；报告全量、HC-only 和 uncertainty-weighted 三种方案。\n3. **防 shortcut。** 使用 task-held-out / suite-held-out split，并加入 task-only、constant、random-score baseline。\n4. **在并行数据链扩展至 Pilot-500。** 对剩余 400 states 采 seeds 42–46，采用同一 Target V2 schema；100-state panel 只用于 feasibility，不作为最终训练集。\n5. **先过 offline Gate。** 至少报告 Spearman、actionable/HC sign、Top/Bottom precision/recall 和 calibration；只有明显优于 task-only/random 后，才做极小 closed-loop smoke。\n6. **closed-loop 仍需 matched-compute random router。** 最终比较 learned vs random、fixed-0、fixed-10 的 success–latency / N_eff Pareto。"
+      },
+      {
+        "id": "further_questions",
+        "type": "markdown",
+        "body": "## 仍需回答的问题\n\n- 当前 state feature 是否真的能预测 multi-seed utility，而不是记住 task/suite？\n- 扩到 Pilot-500 后，22.7% 的 HC weighted coverage 是否保持？\n- Huber regression、ranking 和 uncertainty-weighted hybrid 哪个在 held-out task 上最稳？\n- Demo action-MSE utility 与 simulator rollout utility 的对应关系多强？\n- learned router 在相同 N_eff/latency 下是否优于 random mixture？"
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-08-13T14:39:34Z",
+    "status": "ready",
+    "datasets": {
+      "headline_metrics": [
+        {
+          "passed_checks": 21,
+          "total_checks": 21,
+          "spearman": 0.707170717071707,
+          "spearman_target": 0.5,
+          "hc_sign": 0.875,
+          "hc_sign_target": 0.8,
+          "icc_1_9": 0.8280975153191474,
+          "icc_1_9_target": 0.75,
+          "single_icc": 0.34864036091230793
+        }
+      ],
+      "go_checks": [
+        {
+          "criterion": "Mean Spearman",
+          "observed": 0.707170717071707,
+          "threshold": 0.5,
+          "ratio_to_threshold": 1.414341434143414,
+          "status": "PASS"
+        },
+        {
+          "criterion": "Spearman bootstrap lower",
+          "observed": 0.5546582016343363,
+          "threshold": 0.3,
+          "ratio_to_threshold": 1.8488606721144543,
+          "status": "PASS"
+        },
+        {
+          "criterion": "Mean Kendall",
+          "observed": 0.5866666666666668,
+          "threshold": 0.35,
+          "ratio_to_threshold": 1.6761904761904765,
+          "status": "PASS"
+        },
+        {
+          "criterion": "Kendall bootstrap lower",
+          "observed": 0.45855089858037557,
+          "threshold": 0.2,
+          "ratio_to_threshold": 2.292754492901878,
+          "status": "PASS"
+        },
+        {
+          "criterion": "Actionable sign retention",
+          "observed": 0.8072289156626506,
+          "threshold": 0.75,
+          "ratio_to_threshold": 1.0763052208835342,
+          "status": "PASS"
+        },
+        {
+          "criterion": "High-confidence sign retention",
+          "observed": 0.875,
+          "threshold": 0.8,
+          "ratio_to_threshold": 1.09375,
+          "status": "PASS"
+        },
+        {
+          "criterion": "HC positive sign retention",
+          "observed": 1.0,
+          "threshold": 0.7,
+          "ratio_to_threshold": 1.4285714285714286,
+          "status": "PASS"
+        },
+        {
+          "criterion": "HC negative sign retention",
+          "observed": 0.75,
+          "threshold": 0.7,
+          "ratio_to_threshold": 1.0714285714285714,
+          "status": "PASS"
+        },
+        {
+          "criterion": "HC positive count",
+          "observed": 12,
+          "threshold": 10,
+          "ratio_to_threshold": 1.2,
+          "status": "PASS"
+        },
+        {
+          "criterion": "HC negative count",
+          "observed": 12,
+          "threshold": 10,
+          "ratio_to_threshold": 1.2,
+          "status": "PASS"
+        },
+        {
+          "criterion": "Top-20% recall",
+          "observed": 0.7,
+          "threshold": 0.4,
+          "ratio_to_threshold": 1.75,
+          "status": "PASS"
+        },
+        {
+          "criterion": "Top-20% Jaccard",
+          "observed": 0.5384615384615384,
+          "threshold": 0.25,
+          "ratio_to_threshold": 2.1538461538461537,
+          "status": "PASS"
+        },
+        {
+          "criterion": "Bottom-20% recall",
+          "observed": 0.75,
+          "threshold": 0.4,
+          "ratio_to_threshold": 1.875,
+          "status": "PASS"
+        },
+        {
+          "criterion": "Bottom-20% Jaccard",
+          "observed": 0.6,
+          "threshold": 0.25,
+          "ratio_to_threshold": 2.4,
+          "status": "PASS"
+        },
+        {
+          "criterion": "Lin CCC",
+          "observed": 0.5871257576035043,
+          "threshold": 0.5,
+          "ratio_to_threshold": 1.1742515152070085,
+          "status": "PASS"
+        },
+        {
+          "criterion": "ICC(A,1)",
+          "observed": 0.5895598985681914,
+          "threshold": 0.5,
+          "ratio_to_threshold": 1.1791197971363827,
+          "status": "PASS"
+        },
+        {
+          "criterion": "All-nine ICC(1,9)",
+          "observed": 0.8280975153191474,
+          "threshold": 0.75,
+          "ratio_to_threshold": 1.1041300204255298,
+          "status": "PASS"
+        },
+        {
+          "criterion": "High-confidence count",
+          "observed": 24,
+          "threshold": 20,
+          "ratio_to_threshold": 1.2,
+          "status": "PASS"
+        },
+        {
+          "criterion": "HC weighted coverage",
+          "observed": 0.22656820512820514,
+          "threshold": 0.2,
+          "ratio_to_threshold": 1.1328410256410255,
+          "status": "PASS"
+        },
+        {
+          "criterion": "Median Spearman",
+          "observed": 0.6636903690369036,
+          "threshold": 0.4,
+          "ratio_to_threshold": 1.659225922592259,
+          "status": "PASS"
+        },
+        {
+          "criterion": "Median actionable sign",
+          "observed": 0.8082191780821918,
+          "threshold": 0.7,
+          "ratio_to_threshold": 1.154598825831717,
+          "status": "PASS"
+        }
+      ],
+      "suite_metrics": [
+        {
+          "suite": "LIBERO-10",
+          "state_count": 25,
+          "actionable_count": 22,
+          "sign_retention": 0.8636363636363636,
+          "spearman_rho": 0.78
+        },
+        {
+          "suite": "LIBERO-Goal",
+          "state_count": 25,
+          "actionable_count": 22,
+          "sign_retention": 0.7272727272727273,
+          "spearman_rho": 0.48
+        },
+        {
+          "suite": "LIBERO-Object",
+          "state_count": 25,
+          "actionable_count": 20,
+          "sign_retention": 0.9,
+          "spearman_rho": 0.8146153846153847
+        },
+        {
+          "suite": "LIBERO-Spatial",
+          "state_count": 25,
+          "actionable_count": 19,
+          "sign_retention": 0.7368421052631579,
+          "spearman_rho": 0.7792307692307692
+        }
+      ],
+      "overlap_metrics": [
+        {
+          "metric": "Top-20% recall",
+          "observed": 0.7,
+          "random_baseline": 0.2
+        },
+        {
+          "metric": "Bottom-20% recall",
+          "observed": 0.75,
+          "random_baseline": 0.2
+        },
+        {
+          "metric": "Top-20% Jaccard",
+          "observed": 0.5384615384615384,
+          "random_baseline": 0.11111111111111112
+        },
+        {
+          "metric": "Bottom-20% Jaccard",
+          "observed": 0.6,
+          "random_baseline": 0.11111111111111112
+        }
+      ],
+      "seed_group_loso": [
+        {
+          "seed_label": "seed 42",
+          "group": "target",
+          "spearman_rho": 0.6412001200120011,
+          "kendall_tau": 0.5232323232323233
+        },
+        {
+          "seed_label": "seed 43",
+          "group": "target",
+          "spearman_rho": 0.6673387338733874,
+          "kendall_tau": 0.5648484848484849
+        },
+        {
+          "seed_label": "seed 44",
+          "group": "target",
+          "spearman_rho": 0.7173117311731173,
+          "kendall_tau": 0.587878787878788
+        },
+        {
+          "seed_label": "seed 45",
+          "group": "target",
+          "spearman_rho": 0.6836603660366036,
+          "kendall_tau": 0.5551515151515152
+        },
+        {
+          "seed_label": "seed 46",
+          "group": "target",
+          "spearman_rho": 0.6133333333333333,
+          "kendall_tau": 0.5086868686868687
+        },
+        {
+          "seed_label": "seed 47",
+          "group": "validation",
+          "spearman_rho": 0.6568976897689768,
+          "kendall_tau": 0.5369696969696971
+        },
+        {
+          "seed_label": "seed 48",
+          "group": "validation",
+          "spearman_rho": 0.631047104710471,
+          "kendall_tau": 0.5183838383838385
+        },
+        {
+          "seed_label": "seed 49",
+          "group": "validation",
+          "spearman_rho": 0.7000300030003,
+          "kendall_tau": 0.5882828282828284
+        },
+        {
+          "seed_label": "seed 50",
+          "group": "validation",
+          "spearman_rho": 0.6806360636063606,
+          "kendall_tau": 0.5494949494949496
+        }
+      ],
+      "deadband_metrics": [
+        {
+          "epsilon_label": "1e-5",
+          "actionable_count": 99,
+          "actionable_sign_retention": 0.8282828282828283,
+          "high_confidence_count": 30,
+          "high_confidence_sign_retention": 0.9,
+          "weighted_high_confidence_coverage": 0.3183630769230768
+        },
+        {
+          "epsilon_label": "1e-4",
+          "actionable_count": 83,
+          "actionable_sign_retention": 0.8072289156626506,
+          "high_confidence_count": 24,
+          "high_confidence_sign_retention": 0.875,
+          "weighted_high_confidence_coverage": 0.22656820512820514
+        },
+        {
+          "epsilon_label": "1e-3",
+          "actionable_count": 58,
+          "actionable_sign_retention": 0.7758620689655172,
+          "high_confidence_count": 13,
+          "high_confidence_sign_retention": 0.7692307692307693,
+          "weighted_high_confidence_coverage": 0.09296
+        }
+      ],
+      "reliability_metrics": [
+        {
+          "metric_order": 1,
+          "metric": "Target mean vs validation mean Spearman",
+          "estimate": 0.707170717071707,
+          "lower_95": 0.5546582016343363,
+          "upper_95": 0.8436005740672149,
+          "go_threshold": 0.5
+        },
+        {
+          "metric_order": 2,
+          "metric": "Actionable sign retention",
+          "estimate": 0.8072289156626506,
+          "lower_95": 0.7209302325581395,
+          "upper_95": 0.8875,
+          "go_threshold": 0.75
+        },
+        {
+          "metric_order": 3,
+          "metric": "High-confidence sign retention",
+          "estimate": 0.875,
+          "lower_95": 0.7307692307692307,
+          "upper_95": 1.0,
+          "go_threshold": 0.8
+        },
+        {
+          "metric_order": 4,
+          "metric": "Lin CCC",
+          "estimate": 0.5871257576035043,
+          "lower_95": 0.4960492566783763,
+          "upper_95": 0.8063790424890912,
+          "go_threshold": 0.5
+        },
+        {
+          "metric_order": 5,
+          "metric": "Absolute-agreement ICC(A,1)",
+          "estimate": 0.5895598985681914,
+          "lower_95": 0.49856176228489407,
+          "upper_95": 0.8079433901953331,
+          "go_threshold": 0.5
+        },
+        {
+          "metric_order": 6,
+          "metric": "All-nine aggregate ICC(1,9)",
+          "estimate": 0.8280975153191474,
+          "lower_95": 0.663064299088631,
+          "upper_95": 0.8800274350122697,
+          "go_threshold": 0.75
+        },
+        {
+          "metric_order": 7,
+          "metric": "All-nine single-label ICC(1,1)",
+          "estimate": 0.34864036091230793,
+          "lower_95": 0.17942550446516672,
+          "upper_95": 0.4490438738171775,
+          "go_threshold": null
+        }
+      ],
+      "audit_checks": [
+        {
+          "check": "Validation grid",
+          "result": "PASS",
+          "evidence": "400/400 rows; 0 errors"
+        },
+        {
+          "check": "Independent integrity audit",
+          "result": "PASS",
+          "evidence": "row SHA, routes, seeds, inputs and artifacts verified"
+        },
+        {
+          "check": "Independent scientific recomputation",
+          "result": "PASS",
+          "evidence": "21/21 checks; max numeric delta 5.55e-17"
+        },
+        {
+          "check": "Chart QA",
+          "result": "PASS",
+          "evidence": "5/5 formal PNGs readable and scientifically consistent"
+        }
+      ]
+    }
+  },
+  "sources": [
+    {
+      "id": "acceptance_source",
+      "path": "acceptance_results.json",
+      "query": {
+        "engine": "portable-values-snapshot",
+        "language": "sql",
+        "id": "target-v2-headline-v1",
+        "executed_at": "2026-08-13T14:39:34Z",
+        "description": "Target V2 preregistered acceptance result and bounded headline metrics.",
+        "sql": "SELECT 21 AS passed_checks, 21 AS total_checks, 0.707170717071707 AS spearman_rho, 0.875 AS high_confidence_sign_retention, 0.8280975153191474 AS all9_icc_1_9, 0.34864036091230793 AS all9_icc_1_1",
+        "filters": [
+          "100 fixed LIBERO demonstration states",
+          "target seeds 42-46",
+          "independent validation seeds 47-50",
+          "primary deadband epsilon = 1e-4"
+        ],
+        "metric_definitions": {
+          "utility": "Valid-step and action-dimension per-element MSE at N=0 minus the same MSE at N=10.",
+          "GO": "All 21 preregistered checks must pass; authorization is offline Tiny-MLP feasibility only."
+        }
+      }
+    },
+    {
+      "id": "go_checks_source",
+      "path": "acceptance_results.json",
+      "query": {
+        "engine": "portable-values-snapshot",
+        "language": "sql",
+        "id": "target-v2-go-checks-v1",
+        "executed_at": "2026-08-13T14:39:34Z",
+        "description": "All 21 preregistered GO checks as a bounded VALUES snapshot.",
+        "sql": "WITH checks(criterion,observed,threshold,ratio_to_threshold,status) AS (VALUES ('Mean Spearman',0.707170717071707,0.5,1.414341434143414,'PASS'),('Spearman bootstrap lower',0.5546582016343363,0.3,1.8488606721144543,'PASS'),('Mean Kendall',0.5866666666666668,0.35,1.6761904761904765,'PASS'),('Kendall bootstrap lower',0.45855089858037557,0.2,2.292754492901878,'PASS'),('Actionable sign retention',0.8072289156626506,0.75,1.0763052208835342,'PASS'),('High-confidence sign retention',0.875,0.8,1.09375,'PASS'),('HC positive sign retention',1.0,0.7,1.4285714285714286,'PASS'),('HC negative sign retention',0.75,0.7,1.0714285714285714,'PASS'),('HC positive count',12,10,1.2,'PASS'),('HC negative count',12,10,1.2,'PASS'),('Top-20% recall',0.7,0.4,1.75,'PASS'),('Top-20% Jaccard',0.5384615384615384,0.25,2.1538461538461537,'PASS'),('Bottom-20% recall',0.75,0.4,1.875,'PASS'),('Bottom-20% Jaccard',0.6,0.25,2.4,'PASS'),('Lin CCC',0.5871257576035043,0.5,1.1742515152070085,'PASS'),('ICC(A,1)',0.5895598985681914,0.5,1.1791197971363827,'PASS'),('All-nine ICC(1,9)',0.8280975153191474,0.75,1.1041300204255298,'PASS'),('High-confidence count',24,20,1.2,'PASS'),('HC weighted coverage',0.22656820512820514,0.2,1.1328410256410255,'PASS'),('Median Spearman',0.6636903690369036,0.4,1.659225922592259,'PASS'),('Median actionable sign',0.8082191780821918,0.7,1.154598825831717,'PASS')) SELECT * FROM checks",
+        "filters": [
+          "preregistered GO checks only"
+        ],
+        "metric_definitions": {
+          "ratio_to_threshold": "Observed value divided by the preregistered threshold; values at least 1 pass."
+        }
+      }
+    },
+    {
+      "id": "suite_source",
+      "path": "acceptance_results.json",
+      "query": {
+        "engine": "portable-values-snapshot",
+        "language": "sql",
+        "id": "target-v2-suite-metrics-v1",
+        "executed_at": "2026-08-13T14:39:34Z",
+        "description": "Four-suite validation metrics on the fixed 100-state panel.",
+        "sql": "WITH suite_metrics(suite,state_count,actionable_count,sign_retention,spearman_rho) AS (VALUES ('LIBERO-10',25,22,0.8636363636363636,0.78),('LIBERO-Goal',25,22,0.7272727272727273,0.48),('LIBERO-Object',25,20,0.9,0.8146153846153847),('LIBERO-Spatial',25,19,0.7368421052631579,0.7792307692307692)) SELECT * FROM suite_metrics",
+        "filters": [
+          "25 states per LIBERO suite"
+        ],
+        "metric_definitions": {
+          "sign_retention": "Fraction of actionable target states whose independent validation mean retains target direction."
+        }
+      }
+    },
+    {
+      "id": "rank_source",
+      "path": "acceptance_results.json",
+      "query": {
+        "engine": "portable-values-snapshot",
+        "language": "sql",
+        "id": "target-v2-rank-overlap-v1",
+        "executed_at": "2026-08-13T14:39:34Z",
+        "description": "Top/bottom tail overlap and random expectations.",
+        "sql": "WITH overlap_metrics(metric,observed,random_baseline) AS (VALUES ('Top-20% recall',0.7,0.2),('Bottom-20% recall',0.75,0.2),('Top-20% Jaccard',0.5384615384615384,0.11111111111111112),('Bottom-20% Jaccard',0.6,0.11111111111111112)) SELECT * FROM overlap_metrics",
+        "filters": [
+          "top and bottom 20% of 100 fixed states"
+        ],
+        "metric_definitions": {
+          "recall": "Intersection divided by 20 selected states.",
+          "jaccard": "Intersection divided by union of the two 20-state sets."
+        }
+      }
+    },
+    {
+      "id": "deadband_source",
+      "path": "acceptance_results.json",
+      "query": {
+        "engine": "portable-values-snapshot",
+        "language": "sql",
+        "id": "target-v2-deadband-v1",
+        "executed_at": "2026-08-13T14:39:34Z",
+        "description": "Prespecified deadband sensitivity at 1e-5, 1e-4 and 1e-3.",
+        "sql": "WITH deadband_metrics(epsilon_label,actionable_count,actionable_sign_retention,high_confidence_count,high_confidence_sign_retention,weighted_high_confidence_coverage) AS (VALUES ('1e-5',99,0.8282828282828283,30,0.9,0.3183630769230768),('1e-4',83,0.8072289156626506,24,0.875,0.22656820512820514),('1e-3',58,0.7758620689655172,13,0.7692307692307693,0.09296)) SELECT * FROM deadband_metrics",
+        "filters": [
+          "same fixed 100-state panel"
+        ],
+        "metric_definitions": {
+          "weighted_high_confidence_coverage": "High-confidence coverage post-stratified to Pilot-500 selection-bin prevalence."
+        }
+      }
+    },
+    {
+      "id": "independent_audit_source",
+      "path": "independent_audit.json",
+      "query": {
+        "engine": "portable-values-snapshot",
+        "language": "sql",
+        "id": "target-v2-independent-audit-v1",
+        "executed_at": "2026-08-13T14:39:20.528244Z",
+        "description": "Standalone raw-JSONL scientific recomputation that did not import the repository analyzer.",
+        "sql": "SELECT 'GO' AS decision, 21 AS passed_checks, 21 AS total_checks, 5.551115123125783e-17 AS max_numeric_delta, 123 AS passed_integrity_checks",
+        "filters": [
+          "900 utility measurements",
+          "exact sealed 100-state panel"
+        ],
+        "metric_definitions": {
+          "max_numeric_delta": "Largest absolute difference between independent and official preregistered check values."
+        }
+      }
+    },
+    {
+      "id": "integrity_audit_source",
+      "path": "independent_integrity_audit.json",
+      "query": {
+        "engine": "portable-values-snapshot",
+        "language": "sql",
+        "id": "target-v2-integrity-audit-v1",
+        "executed_at": "2026-08-13T14:39:34Z",
+        "description": "Independent collection-integrity audit covering seal, row hashes, grid, seed freshness, routes and provenance.",
+        "sql": "SELECT 400 AS completed_records, 400 AS expected_records, 0 AS errors, TRUE AS seal_valid, TRUE AS independent_inference_verified",
+        "filters": [
+          "validation seeds 47-50",
+          "no target measurement reuse"
+        ],
+        "metric_definitions": {
+          "independent_inference_verified": "Every validation row is marked fresh inference and uses seeds disjoint from target seeds 42-46."
+        }
+      }
+    }
+  ]
+}

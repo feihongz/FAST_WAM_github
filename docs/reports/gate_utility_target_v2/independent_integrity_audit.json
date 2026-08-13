@@ -1,0 +1,74 @@
+{
+  "artifact_bindings": {
+    "checkpoint_sha256": "17a5588cc2b8d162219c9daf818614f614ee4a7921933a4a26c5d678111330e9",
+    "collection_git_commit": "126c413de85fd7169142ba2c01dae411c9a71a98",
+    "dataset_stats_sha256": "30f81ad7d5076e97323e3328bce003e01a04cb21327b5bacd21bb72846768638",
+    "scientific_source_file_count": 12,
+    "scientific_source_files_all_match": true,
+    "source_phase25": {
+      "manifest": "c7476d522f47f71df30fb96ebaba5d09f6dd7a0a83400456a79ab1146506d0b9",
+      "records": "57abaacb551b4d6094e09812212c2be8098c9d823e58fb1de71d4f40469d4fb8"
+    },
+    "target_v2": {
+      "manifest": "bc00fdf913b5ae257deb57f6d7101ac66b95c73f179578f194a1b9b53ad2bfc3",
+      "targets": "918d33a324ffaf3103ff42e97771debb356a1c9af292bd87c92cea75cf70d023"
+    },
+    "vae_sha256": "20eb789667fa5e60e7516bf509512f6cb61f01b0aa0695eadaea930c13892b36",
+    "validation": {
+      "errors": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "manifest": "fbad3bfb5ff153742f79ef0d9d7a9db3a38449fc22109c1c9943a82daa950834",
+      "records": "da93bbcb7fbedcd4727f47c03a3f170a38b50935a0f5047b5c72989c9c617224"
+    }
+  },
+  "audit_kind": "libero_demo_utility_target_v2_validation_independent_integrity_audit",
+  "audit_schema_version": 1,
+  "audited_at_utc": "2026-08-13T14:32:11Z",
+  "collector_process": {
+    "exit_code": 0,
+    "exited": true,
+    "pid": 322201
+  },
+  "completion": {
+    "completed_at_utc": "2026-08-13T14:26:41.565133+00:00",
+    "completion_sha256": "5369de7828113eebdc6c0feb8f4475c3970fea69ca1fa8e06c0e74cb361f480d",
+    "ordered_validation_record_sha256_sha256": "745ac32febf42b4b2e219c5b00850b915b4f8fb5d7d7401ad0bac6488c86aba4",
+    "validated": true
+  },
+  "grid": {
+    "completed_count": 400,
+    "coverage_fraction": 1.0,
+    "expected_count": 400,
+    "is_complete": true,
+    "missing_count": 0
+  },
+  "independence": {
+    "all_new_inference": true,
+    "base_seed_sets_disjoint": true,
+    "per_state_validation_seeds_unique": true,
+    "target_base_seeds": [42, 43, 44, 45, 46],
+    "validation_base_seeds": [47, 48, 49, 50]
+  },
+  "pairing": {
+    "cross_seed_fields_all_validated": true,
+    "same_state_input_hashes_across_four_validation_seeds": true,
+    "target_rebinding_all_validated": true,
+    "utility_equals_e0_minus_e10": true
+  },
+  "records": {
+    "canonical_plan_order": true,
+    "count": 400,
+    "errors_count": 0,
+    "row_sha256_all_validated": true,
+    "unique_row_sha256": 400,
+    "unique_validation_ids": 400
+  },
+  "routes": {
+    "all_n0_exact": true,
+    "all_n10_exact": true,
+    "force_custom_prefix": true,
+    "num_inference_steps": 10
+  },
+  "scope": "Integrity and provenance only; no scientific outcome metrics were computed.",
+  "status": "PASS",
+  "validation_dir": "/root/feihong/FastWAM/utility_results/libero_demo_utility_target_v2_validation100x4_126c413_seed47_50"
+}
