@@ -68,6 +68,20 @@ SCIENTIFIC_SOURCE_FILES = (
 )
 
 
+def _scientific_dataset_ranges(ranges: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Project ranges to path-independent scientific identity fields."""
+    return [
+        {
+            "dataset_index": int(item["dataset_index"]),
+            "dataset_name": str(item["dataset_name"]),
+            "start": int(item["start"]),
+            "stop": int(item["stop"]),
+            "population": int(item["population"]),
+        }
+        for item in ranges
+    ]
+
+
 def _load_json(path: Path, *, label: str) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -787,7 +801,9 @@ def collect(cfg: DictConfig) -> dict[str, int]:
             skip_padding_as_possible=False,
         )
         ranges = single._normalize_ranges(dataset.dataset_index_ranges())
-        if ranges != pilot_manifest["compatibility"]["dataset_index_ranges"]:
+        if _scientific_dataset_ranges(ranges) != _scientific_dataset_ranges(
+            pilot_manifest["compatibility"]["dataset_index_ranges"]
+        ):
             raise ValueError("Instantiated dataset ranges differ from Pilot")
         task_tables: dict[int, dict[int, str]] = {}
         for item in ranges:

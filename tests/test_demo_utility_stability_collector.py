@@ -4,12 +4,27 @@ import copy
 
 import pytest
 
+from experiments.libero.gate.collect_demo_utility import _sha256_json
 from experiments.libero.gate.collect_demo_utility_multiseed import (
     AUDIT_KIND,
+    _scientific_dataset_ranges,
     _validate_manifest_integrity,
     collect_replicate_grid,
 )
-from experiments.libero.gate.collect_demo_utility import _sha256_json
+
+
+def test_scientific_dataset_ranges_ignore_mount_identity_but_bind_boundaries():
+    pilot = [{
+        "dataset_index": 0,
+        "dataset_name": "libero_spatial_no_noops_lerobot",
+        "start": 0,
+        "stop": 10,
+        "population": 10,
+    }]
+    current = [{**pilot[0], "dataset_id": "/different/mount/libero_spatial"}]
+    assert _scientific_dataset_ranges(current) == _scientific_dataset_ranges(pilot)
+    current[0]["stop"] = 11
+    assert _scientific_dataset_ranges(current) != _scientific_dataset_ranges(pilot)
 
 
 class CountingDataset:
