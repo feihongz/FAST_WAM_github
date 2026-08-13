@@ -1,0 +1,406 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "Demo Video-Utility 多随机种子稳定性审计",
+    "description": "面向 FAST-WAM Gate 标签设计的技术审计：判断单随机种子 Demo utility 是否足以进入离线 Tiny MLP。",
+    "generatedAt": "2026-08-13T11:49:31.463800Z",
+    "cards": [
+      {
+        "id": "passed_checks_card",
+        "description": "15 项预注册 GO 检查中的通过数量。",
+        "dataset": "headline_metrics",
+        "sourceId": "analysis_summary_source",
+        "metrics": [
+          {"label": "通过检查", "field": "passed_checks", "format": "number"},
+          {"label": "检查总数", "field": "total_checks", "format": "number"}
+        ]
+      },
+      {
+        "id": "strong_agreement_card",
+        "description": "Pilot strong states 在新四个 seed 上保持原方向的多数一致率。",
+        "dataset": "headline_metrics",
+        "sourceId": "analysis_summary_source",
+        "metrics": [
+          {"label": "Strong majority", "field": "strong_majority", "format": "percent"},
+          {"label": "GO 门槛", "field": "strong_majority_target", "format": "percent"}
+        ]
+      },
+      {
+        "id": "rank_stability_card",
+        "description": "seed 42 Pilot utility 与独立 seed 43–46 平均 utility 的秩相关。",
+        "dataset": "headline_metrics",
+        "sourceId": "analysis_summary_source",
+        "metrics": [
+          {"label": "Spearman ρ", "field": "spearman", "format": "number"},
+          {"label": "GO 门槛", "field": "spearman_target", "format": "number"}
+        ]
+      },
+      {
+        "id": "icc_card",
+        "description": "五个 seed 平均 utility 的绝对可靠性。",
+        "dataset": "headline_metrics",
+        "sourceId": "analysis_summary_source",
+        "metrics": [
+          {"label": "ICC(1,5)", "field": "icc_1_5", "format": "number"},
+          {"label": "GO 门槛", "field": "icc_1_5_target", "format": "number"}
+        ]
+      }
+    ],
+    "charts": [
+      {
+        "id": "go_checks_chart",
+        "title": "预注册 GO 检查：观察值相对门槛",
+        "subtitle": "15 项检查；比值达到 1 才通过，本轮仅 5 项通过。",
+        "type": "bar",
+        "dataset": "go_checks",
+        "sourceId": "go_checks_source",
+        "valueFormat": "number",
+        "encodings": {
+          "x": {"field": "criterion", "type": "nominal", "label": "检查项"},
+          "y": {"field": "ratio_to_threshold", "type": "quantitative", "label": "观察值 / 门槛"},
+          "tooltip": [
+            {"field": "observed", "type": "quantitative", "label": "观察值", "format": "number"},
+            {"field": "threshold", "type": "quantitative", "label": "门槛", "format": "number"},
+            {"field": "status", "type": "nominal", "label": "结果"}
+          ]
+        },
+        "settings": {"orientation": "horizontal", "groupMode": "single", "legend": false}
+      },
+      {
+        "id": "strata_agreement_chart",
+        "title": "各 Pilot utility strata 的跨 seed 方向表现",
+        "subtitle": "100-state 尾部过采样诊断 panel；SP、SN 是预注册 strong-state 核心检查。",
+        "type": "bar",
+        "dataset": "strata_metrics",
+        "sourceId": "stratum_metrics_source",
+        "valueFormat": "percent",
+        "encodings": {
+          "x": {"field": "stratum", "type": "nominal", "label": "Pilot stratum"},
+          "y": {"fields": ["five_seed_sign_agreement", "new4_matches_pilot_direction"], "type": "quantitative", "label": "比例"},
+          "tooltip": [
+            {"field": "state_count", "type": "quantitative", "label": "状态数", "format": "number"},
+            {"field": "population_prevalence", "type": "quantitative", "label": "Pilot 总体占比", "format": "percent"}
+          ]
+        },
+        "settings": {"orientation": "vertical", "groupMode": "grouped", "legend": true}
+      },
+      {
+        "id": "seed_rank_chart",
+        "title": "逐 seed 对其余四 seed 平均值的秩相关",
+        "subtitle": "五个 LOSO Spearman 均为正，但中位数 0.388 略低于 0.400 门槛。",
+        "type": "bar",
+        "dataset": "seed_metrics",
+        "sourceId": "seed_metrics_source",
+        "valueFormat": "number",
+        "encodings": {
+          "x": {"field": "seed_label", "type": "nominal", "label": "留出 seed"},
+          "y": {"field": "spearman_vs_other4_mean", "type": "quantitative", "label": "Spearman ρ"},
+          "tooltip": [
+            {"field": "utility_mean", "type": "quantitative", "label": "该 seed utility 均值", "format": "number"},
+            {"field": "kendall_vs_other4_mean", "type": "quantitative", "label": "Kendall τ", "format": "number"}
+          ]
+        },
+        "settings": {"orientation": "vertical", "groupMode": "single", "legend": false}
+      },
+      {
+        "id": "deadband_chart",
+        "title": "Deadband 敏感性：≥4/5 seed 同 mean 方向",
+        "subtitle": "未加权诊断 panel 与 Pilot prevalence 加权结果；三种 ε 均未形成强稳定证据。",
+        "type": "bar",
+        "dataset": "deadband_metrics",
+        "sourceId": "deadband_source",
+        "valueFormat": "percent",
+        "encodings": {
+          "x": {"field": "epsilon_label", "type": "nominal", "label": "Deadband ε"},
+          "y": {"fields": ["unweighted_four_of_five", "population_weighted_four_of_five"], "type": "quantitative", "label": "状态比例"},
+          "tooltip": [
+            {"field": "positive_count", "type": "quantitative", "label": "正向状态", "format": "number"},
+            {"field": "negative_count", "type": "quantitative", "label": "负向状态", "format": "number"},
+            {"field": "nearzero_count", "type": "quantitative", "label": "近零状态", "format": "number"}
+          ]
+        },
+        "settings": {"orientation": "vertical", "groupMode": "grouped", "legend": true}
+      }
+    ],
+    "tables": [
+      {
+        "id": "go_checks_table",
+        "title": "预注册判定明细",
+        "subtitle": "按观察值/门槛从低到高排列；通过要求观察值不低于门槛。",
+        "dataset": "go_checks",
+        "sourceId": "go_checks_source",
+        "defaultSort": {"field": "ratio_to_threshold", "direction": "asc"},
+        "columns": [
+          {"field": "criterion", "label": "检查项", "type": "text"},
+          {"field": "observed", "label": "观察值", "format": "number"},
+          {"field": "threshold", "label": "门槛", "format": "number"},
+          {"field": "ratio_to_threshold", "label": "观察值/门槛", "format": "number"},
+          {"field": "status", "label": "结果", "type": "text"}
+        ]
+      },
+      {
+        "id": "reliability_table",
+        "title": "可靠性与不确定性",
+        "subtitle": "主分析指标及 2,000 次 bootstrap 95% 区间。",
+        "dataset": "reliability_metrics",
+        "sourceId": "analysis_summary_source",
+        "defaultSort": {"field": "metric_order", "direction": "asc"},
+        "columns": [
+          {"field": "metric_order", "label": "顺序", "format": "number"},
+          {"field": "metric", "label": "指标", "type": "text"},
+          {"field": "estimate", "label": "估计", "format": "number"},
+          {"field": "lower_95", "label": "95% 下界", "format": "number"},
+          {"field": "upper_95", "label": "95% 上界", "format": "number"},
+          {"field": "threshold", "label": "GO 门槛", "format": "number"}
+        ]
+      }
+    ],
+    "sources": [
+      {"id": "analysis_summary_source", "label": "正式稳定性分析摘要", "path": "analysis_summary.json"},
+      {"id": "go_checks_source", "label": "预注册 GO 检查快照", "path": "analysis_summary.json"},
+      {"id": "seed_metrics_source", "label": "逐 seed 排名指标", "path": "seed_metrics.csv"},
+      {"id": "stratum_metrics_source", "label": "分层稳定性指标", "path": "stratum_metrics.csv"},
+      {"id": "deadband_source", "label": "Deadband 敏感性指标", "path": "analysis_summary.json"},
+      {"id": "independent_audit_source", "label": "独立复算与 post-hoc 诊断", "path": "independent_audit.json"}
+    ],
+    "blocks": [
+      {
+        "id": "title",
+        "type": "markdown",
+        "body": "# Demo Video-Utility 多随机种子稳定性审计"
+      },
+      {
+        "id": "technical_summary",
+        "type": "markdown",
+        "sourceId": "analysis_summary_source",
+        "body": "## 技术结论：当前单 seed 标签不应进入 Tiny MLP\n\n**预注册判定为 `NO_GO`。** 100 个 demonstration state × 5 个 seed 的 500 条配对记录完整且无错误，但 15 项 GO 检查仅通过 5 项。Strong-state 新四 seed 多数方向一致率为 **62%**，不仅低于 GO 门槛 80%，也低于 Conditional GO 的 65% 下限。\n\n这个结论只针对**现有单随机种子 Demo utility 标签是否可以开始离线 Tiny MLP**；它不证明 video 无用，也不预测 closed-loop Gate 的成败。当前应先重定义并聚合标签，再用同一门槛复审。"
+      },
+      {
+        "id": "headline_metrics_block",
+        "type": "metric-strip",
+        "cardIds": ["passed_checks_card", "strong_agreement_card", "rank_stability_card", "icc_card"]
+      },
+      {
+        "id": "decision_section",
+        "type": "markdown",
+        "sourceId": "go_checks_source",
+        "body": "## 10 项门槛失败，NO_GO 不是由单一指标触发\n\n失败同时出现在**方向保持、全局排序、bootstrap 下界、LOSO 中位数、单次可靠性、五 seed 平均可靠性和总体加权稳定性**。下图把每项观察值除以其预注册门槛：达到 1 才算通过。它说明结论不是某个阈值的偶然擦边，而是多个互补维度共同不足。"
+      },
+      {"id": "go_checks_chart_block", "type": "chart", "chartId": "go_checks_chart"},
+      {"id": "go_checks_table_block", "type": "table", "tableId": "go_checks_table"},
+      {
+        "id": "strong_states_section",
+        "type": "markdown",
+        "sourceId": "stratum_metrics_source",
+        "body": "## Strong positive 状态尤其难以复现\n\nPilot 的 SP 状态在新四 seed 上只有 **52%** 保持预期多数方向，SN 为 **72%**；两者都未达到 75% 门槛。全五 seed 的一般符号一致率看起来更高，但它回答的是“seed 彼此是否形成多数”，不是“Pilot 选出的方向是否能在独立 seed 上复现”。因此不能用前者替代预注册 strong-state 检查。"
+      },
+      {"id": "strata_agreement_chart_block", "type": "chart", "chartId": "strata_agreement_chart"},
+      {
+        "id": "rank_section",
+        "type": "markdown",
+        "sourceId": "seed_metrics_source",
+        "body": "## 尾部集合有信号，但连续排序仍不稳\n\n五个 leave-one-seed-out Spearman 都为正，说明 utility 并非纯噪声；但中位数只有 **0.388**，略低于 0.400 门槛。seed 42 对独立 new4 mean 的 Spearman 为 **0.438**，其 bootstrap 95% 下界只有 **0.231**。另一方面，top/bottom 20% overlap 四项都通过，支持的更像是**粗粒度极端状态筛选**，而不是稳定的逐状态连续回归 target。"
+      },
+      {"id": "seed_rank_chart_block", "type": "chart", "chartId": "seed_rank_chart"},
+      {
+        "id": "reliability_section",
+        "type": "markdown",
+        "sourceId": "analysis_summary_source",
+        "body": "## 多 seed 平均能改善可靠性，但改善幅度仍不够\n\n单次 utility 的 ICC(1,1) 为 **0.278**，5-seed 均值的 ICC(1,5) 提升到 **0.658**，仍低于 0.750 的 GO 门槛；后者的 bootstrap 95% 区间为 **[0.327, 0.820]**。这支持继续采用多 seed 聚合和不确定性建模，也说明当前 5-seed mean 尚不能被当作已验证的稳定标签。"
+      },
+      {"id": "reliability_table_block", "type": "table", "tableId": "reliability_table"},
+      {
+        "id": "posthoc_diagnosis",
+        "type": "markdown",
+        "sourceId": "independent_audit_source",
+        "body": "## Post-hoc 诊断：差分操作暴露了未抵消的随机波动\n\n独立从 500 条 records 重算后，`E0` 的 ICC(1,1) 为 **0.950**，`E10` 为 **0.790**，但差分 `U=E0-E10` 只有 **0.278**；同一 state 内两端 seed 残差相关仅 **0.200**。这支持一个诊断性解释：两个端点各自可重复，但 paired randomness 尚未让其随机残差充分同向变化，因此相减后保留了较多噪声。\n\n不稳定性还有方向非对称：SP 中 13/25 保持正多数、4/25 明确反向、8/25 无确定多数；SN 中 18/25 保持负多数、0/25 明确反向、7/25 无确定多数。以上均为**探索性 post-hoc 结果**，用于设计下一轮标签与配对机制，不用于改变预注册 NO_GO。"
+      },
+      {
+        "id": "deadband_section",
+        "type": "markdown",
+        "sourceId": "deadband_source",
+        "body": "## 改变 near-zero deadband 不会反转结论\n\n从 `1e-5` 到 `1e-3`，mean-U 的正/负/近零构成明显变化；但未加权和 Pilot prevalence 加权的 ≥4/5 同方向比例都没有形成足够强的稳定证据。更大的 deadband 只是把更多状态归入近零，并不能修复差分标签的跨 seed 波动。"
+      },
+      {"id": "deadband_chart_block", "type": "chart", "chartId": "deadband_chart"},
+      {
+        "id": "scope_definitions",
+        "type": "markdown",
+        "sourceId": "analysis_summary_source",
+        "body": "## 数据范围与指标定义\n\n审计使用 frozen UniShare，在同一 LIBERO demonstration state 上配对运行 `N=0` 与 `N=10`。每个 state 使用 base seed 42–46；seed 42 的 100 条记录严格复用 Pilot，seed 43–46 产生 400 条新推理，合计 500/500 完整、0 errors。\n\n在 normalized action space 中，`E_N = sum_{t∈valid,d}(a_hat_N[t,d]-a_GT[t,d])²/(#valid×D)`，即 valid-step × action-dimension 上的 per-element MSE；再定义 `U = E0 - E10`。`U>0` 只表示 N=10 在这个离线 action-MSE 代理上更接近 demonstration action；它不是 rollout return、success rate 或真实计算收益。主 deadband 为 `1e-4`。\n\n100-state panel 每个 LIBERO suite 25 个状态，并有意按 Pilot utility 过采样尾部：SP/SN/MP/MN/NZ = 25/25/13/12/25。未加权结果描述这个诊断 panel；总体解释使用 Pilot-500 prevalence post-stratification。"
+      },
+      {
+        "id": "methodology",
+        "type": "markdown",
+        "sourceId": "analysis_summary_source",
+        "body": "## 方法：独立 seed 复现、排序与绝对可靠性共同把关\n\n1. 对每个 state 计算五 seed 的 mean、median、标准差、SEM、t 区间与 deadband 符号。\n2. 以 seed 42 Pilot utility 对比独立 seed 43–46 平均值，计算 Spearman、Kendall 和 top/bottom 20% overlap。\n3. 做五次 leave-one-seed-out 排名复现。\n4. 计算 ICC(1,1)、ICC(1,5) 与 between/within-state variance。\n5. 用 2,000 次 bootstrap（seed 20260812）估计关键 95% 区间。\n6. 按 Pilot-500 strata prevalence 做 post-stratification。\n7. 严格套用预注册 GO 与 Conditional GO 门槛，不根据观察结果回调标准。"
+      },
+      {
+        "id": "limitations",
+        "type": "markdown",
+        "body": "## 局限与解释边界\n\n- 这是离线 action-MSE 标签稳定性审计，不验证 Gate calibration、算力节省或 closed-loop LIBERO success。\n- Panel 由 seed 42 Pilot utility 分层选择，存在 selection-on-noise；独立 seed 复现正是对此做压力测试。\n- 只覆盖一个 checkpoint、当前 scheduler 与两个 endpoint，不能外推到中间 N 或 checkpoint variation。\n- 五个 seed 足以暴露明显不稳定，但 per-state 不确定性仍然较宽。\n- Utility 是两个误差估计的差；随机残差若不能通过配对充分抵消，差分标签的信噪比会显著下降。"
+      },
+      {
+        "id": "recommendations",
+        "type": "markdown",
+        "body": "## 下一步：先修标签，再重新过 Gate\n\n1. **改成多 seed target。** 使用多 seed mean 或稳健均值，并保存 per-state 标准差、SEM 与区间。\n2. **做 uncertainty weighting。** 对置信区间跨 0 或方向不确定的 state 降权/剔除，不强行二值化。\n3. **强化 shared random path。** 审计并共享 N=0/N=10 的 initial noise、solver 随机量和 route 分叉前路径，以 common random numbers 提高两端残差相关、降低 `E0-E10` 方差。\n4. **原门槛复审。** 在同一 100-state panel 上做前后对照；若扩大样本，预先固定抽样与停止规则。\n5. **只有复审 GO 后才训练 Tiny MLP。** 当前不要用 seed42 单次 U 开训，更不要跳过 offline validation 直接进入 closed-loop threshold sweep。"
+      },
+      {
+        "id": "further_questions",
+        "type": "markdown",
+        "body": "## 仍需回答的问题\n\n- Shared-random-path 能把两条 route 的 seed 残差相关提高多少？\n- 3、5 或更多 seed 中，最小多少个可以让 ICC(1,k) 稳定超过 0.75？\n- 不稳定性是否集中在 task、episode phase、valid action length 或特定动作维度？\n- 若改做极端状态筛选器，当前 top/bottom overlap 是否足以支撑一个重新预注册的分类目标？\n- Demo action-MSE 与真正 rollout utility 的对应关系有多强？"
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-08-13T11:49:31.463800Z",
+    "status": "ready",
+    "datasets": {
+      "headline_metrics": [
+        {
+          "passed_checks": 5,
+          "total_checks": 15,
+          "strong_majority": 0.62,
+          "strong_majority_target": 0.8,
+          "spearman": 0.4375757575757575,
+          "spearman_target": 0.5,
+          "icc_1_5": 0.6581210683762795,
+          "icc_1_5_target": 0.75
+        }
+      ],
+      "go_checks": [
+        {"criterion": "Strong overall majority", "observed": 0.62, "threshold": 0.8, "ratio_to_threshold": 0.775, "status": "失败"},
+        {"criterion": "SP majority", "observed": 0.52, "threshold": 0.75, "ratio_to_threshold": 0.6933333333, "status": "失败"},
+        {"criterion": "SN majority", "observed": 0.72, "threshold": 0.75, "ratio_to_threshold": 0.96, "status": "失败"},
+        {"criterion": "Strong states ≥4/5", "observed": 0.62, "threshold": 0.7, "ratio_to_threshold": 0.8857142857, "status": "失败"},
+        {"criterion": "seed42 vs new4 Spearman", "observed": 0.4375757576, "threshold": 0.5, "ratio_to_threshold": 0.8751515152, "status": "失败"},
+        {"criterion": "Spearman bootstrap lower", "observed": 0.2312044621, "threshold": 0.3, "ratio_to_threshold": 0.7706815402, "status": "失败"},
+        {"criterion": "LOSO median Spearman", "observed": 0.3879507951, "threshold": 0.4, "ratio_to_threshold": 0.9698769877, "status": "失败"},
+        {"criterion": "LOSO positive seeds", "observed": 5, "threshold": 4, "ratio_to_threshold": 1.25, "status": "通过"},
+        {"criterion": "Top-20% recall", "observed": 0.45, "threshold": 0.4, "ratio_to_threshold": 1.125, "status": "通过"},
+        {"criterion": "Top-20% Jaccard", "observed": 0.2903225806, "threshold": 0.25, "ratio_to_threshold": 1.1612903224, "status": "通过"},
+        {"criterion": "Bottom-20% recall", "observed": 0.55, "threshold": 0.4, "ratio_to_threshold": 1.375, "status": "通过"},
+        {"criterion": "Bottom-20% Jaccard", "observed": 0.3793103448, "threshold": 0.25, "ratio_to_threshold": 1.5172413792, "status": "通过"},
+        {"criterion": "ICC(1,5)", "observed": 0.6581210684, "threshold": 0.75, "ratio_to_threshold": 0.8774947579, "status": "失败"},
+        {"criterion": "ICC(1,1)", "observed": 0.2779795974, "threshold": 0.35, "ratio_to_threshold": 0.7942274211, "status": "失败"},
+        {"criterion": "Population-weighted strong", "observed": 0.5047910802, "threshold": 0.6, "ratio_to_threshold": 0.8413184671, "status": "失败"}
+      ],
+      "seed_metrics": [
+        {"seed_label": "seed 42", "utility_mean": -0.0015173197, "spearman_vs_other4_mean": 0.4375757576, "kendall_vs_other4_mean": 0.3393939394},
+        {"seed_label": "seed 43", "utility_mean": -0.0009350852, "spearman_vs_other4_mean": 0.3146714671, "kendall_vs_other4_mean": 0.2533333333},
+        {"seed_label": "seed 44", "utility_mean": -0.0026645797, "spearman_vs_other4_mean": 0.4655265527, "kendall_vs_other4_mean": 0.3636363636},
+        {"seed_label": "seed 45", "utility_mean": -0.0020270442, "spearman_vs_other4_mean": 0.3879507951, "kendall_vs_other4_mean": 0.3078787879},
+        {"seed_label": "seed 46", "utility_mean": -0.0019865364, "spearman_vs_other4_mean": 0.3417701770, "kendall_vs_other4_mean": 0.2731313131}
+      ],
+      "strata_metrics": [
+        {"stratum": "SP", "state_count": 25, "population_prevalence": 0.152, "five_seed_sign_agreement": 0.792, "new4_matches_pilot_direction": 0.52},
+        {"stratum": "SN", "state_count": 25, "population_prevalence": 0.202, "five_seed_sign_agreement": 0.832, "new4_matches_pilot_direction": 0.72},
+        {"stratum": "MP", "state_count": 13, "population_prevalence": 0.262, "five_seed_sign_agreement": 0.7846153846, "new4_matches_pilot_direction": 0.6923076923},
+        {"stratum": "MN", "state_count": 12, "population_prevalence": 0.184, "five_seed_sign_agreement": 0.7666666667, "new4_matches_pilot_direction": 0.5833333333},
+        {"stratum": "NZ", "state_count": 25, "population_prevalence": 0.2, "five_seed_sign_agreement": 0.656, "new4_matches_pilot_direction": 0.8}
+      ],
+      "deadband_metrics": [
+        {"epsilon_label": "1e-5", "positive_count": 39, "negative_count": 60, "nearzero_count": 1, "unweighted_four_of_five": 0.59, "population_weighted_four_of_five": 0.5743897436},
+        {"epsilon_label": "1e-4", "positive_count": 32, "negative_count": 51, "nearzero_count": 17, "unweighted_four_of_five": 0.47, "population_weighted_four_of_five": 0.4747364103},
+        {"epsilon_label": "1e-3", "positive_count": 22, "negative_count": 36, "nearzero_count": 42, "unweighted_four_of_five": 0.26, "population_weighted_four_of_five": 0.18792}
+      ],
+      "reliability_metrics": [
+        {"metric_order": 1, "metric": "Strong new4 majority", "estimate": 0.62, "lower_95": 0.48, "upper_95": 0.74, "threshold": 0.8},
+        {"metric_order": 2, "metric": "seed42 vs new4 Spearman", "estimate": 0.4375757576, "lower_95": 0.2312044621, "upper_95": 0.6186920383, "threshold": 0.5},
+        {"metric_order": 3, "metric": "ICC(1,5)", "estimate": 0.6581210684, "lower_95": 0.3274610581, "upper_95": 0.8197807018, "threshold": 0.75},
+        {"metric_order": 4, "metric": "ICC(1,1)", "estimate": 0.2779795974, "lower_95": null, "upper_95": null, "threshold": 0.35}
+      ]
+    }
+  },
+  "sources": [
+    {
+      "id": "analysis_summary_source",
+      "path": "analysis_summary.json",
+      "query": {
+        "engine": "portable-values-snapshot",
+        "language": "sql",
+        "id": "formal-stability-headline-v1",
+        "executed_at": "2026-08-13T11:49:31.463800Z",
+        "description": "从正式 analysis_summary.json 审核并转录的 headline、reliability 和完整性指标。",
+        "sql": "SELECT 5 AS passed_checks, 15 AS total_checks, 0.62 AS strong_majority, 0.80 AS strong_majority_target, 0.4375757575757575 AS spearman, 0.50 AS spearman_target, 0.6581210683762795 AS icc_1_5, 0.75 AS icc_1_5_target",
+        "filters": ["100 states", "5 base seeds: 42-46", "primary deadband epsilon = 1e-4"],
+        "metric_definitions": {
+          "utility": "Per-element MSE over valid action steps and action dimensions at N=0 minus the same per-element MSE at N=10.",
+          "passed_checks": "Count of preregistered GO checks with observed value greater than or equal to threshold."
+        }
+      }
+    },
+    {
+      "id": "go_checks_source",
+      "path": "analysis_summary.json",
+      "query": {
+        "engine": "portable-values-snapshot",
+        "language": "sql",
+        "id": "formal-go-checks-v1",
+        "executed_at": "2026-08-13T11:49:31.463800Z",
+        "description": "正式 analysis_summary.json 中 15 项预注册 GO 检查的有界 SQL VALUES 快照。",
+        "sql": "WITH checks(criterion, observed, threshold) AS (VALUES ('Strong overall majority',0.62,0.80),('SP majority',0.52,0.75),('SN majority',0.72,0.75),('Strong states >=4/5',0.62,0.70),('seed42 vs new4 Spearman',0.4375757576,0.50),('Spearman bootstrap lower',0.2312044621,0.30),('LOSO median Spearman',0.3879507951,0.40),('LOSO positive seeds',5.0,4.0),('Top-20% recall',0.45,0.40),('Top-20% Jaccard',0.2903225806,0.25),('Bottom-20% recall',0.55,0.40),('Bottom-20% Jaccard',0.3793103448,0.25),('ICC(1,5)',0.6581210684,0.75),('ICC(1,1)',0.2779795974,0.35),('Population-weighted strong',0.5047910802,0.60)) SELECT criterion, observed, threshold, observed/threshold AS ratio_to_threshold, CASE WHEN observed >= threshold THEN 'PASS' ELSE 'FAIL' END AS status FROM checks",
+        "filters": ["Preregistered GO checks only"],
+        "metric_definitions": {"ratio_to_threshold": "Observed check value divided by its preregistered threshold; values at least 1 pass."}
+      }
+    },
+    {
+      "id": "seed_metrics_source",
+      "path": "seed_metrics.csv",
+      "query": {
+        "engine": "portable-values-snapshot",
+        "language": "sql",
+        "id": "formal-seed-metrics-v1",
+        "executed_at": "2026-08-13T11:49:30.216690Z",
+        "description": "正式 seed_metrics.csv 五行结果的有界 SQL VALUES 快照。",
+        "sql": "WITH seed_metrics(seed_label,utility_mean,spearman_vs_other4_mean,kendall_vs_other4_mean) AS (VALUES ('seed 42',-0.0015173197,0.4375757576,0.3393939394),('seed 43',-0.0009350852,0.3146714671,0.2533333333),('seed 44',-0.0026645797,0.4655265527,0.3636363636),('seed 45',-0.0020270442,0.3879507951,0.3078787879),('seed 46',-0.0019865364,0.3417701770,0.2731313131)) SELECT * FROM seed_metrics",
+        "filters": ["base seeds 42-46", "100 states per seed"],
+        "metric_definitions": {"spearman_vs_other4_mean": "Spearman rank correlation between one held-out seed and the per-state mean of the other four seeds."}
+      }
+    },
+    {
+      "id": "stratum_metrics_source",
+      "path": "stratum_metrics.csv",
+      "query": {
+        "engine": "portable-values-snapshot",
+        "language": "sql",
+        "id": "formal-stratum-metrics-v1",
+        "executed_at": "2026-08-13T11:49:30.216690Z",
+        "description": "正式 stratum_metrics.csv 五个 Pilot utility strata 的有界 SQL VALUES 快照。",
+        "sql": "WITH strata(stratum,state_count,population_prevalence,five_seed_sign_agreement,new4_matches_pilot_direction) AS (VALUES ('SP',25,0.152,0.792,0.52),('SN',25,0.202,0.832,0.72),('MP',13,0.262,0.7846153846,0.6923076923),('MN',12,0.184,0.7666666667,0.5833333333),('NZ',25,0.200,0.656,0.80)) SELECT * FROM strata",
+        "filters": ["100-state stratified diagnostic panel", "primary deadband epsilon = 1e-4"],
+        "metric_definitions": {"new4_matches_pilot_direction": "Fraction whose independent-seed majority matches the direction implied by the Pilot stratum."}
+      }
+    },
+    {
+      "id": "deadband_source",
+      "path": "analysis_summary.json",
+      "query": {
+        "engine": "portable-values-snapshot",
+        "language": "sql",
+        "id": "formal-deadband-sensitivity-v1",
+        "executed_at": "2026-08-13T11:49:31.463800Z",
+        "description": "正式 analysis_summary.json 中三个 deadband 的敏感性结果快照。",
+        "sql": "WITH sensitivity(epsilon_label,positive_count,negative_count,nearzero_count,unweighted_four_of_five,population_weighted_four_of_five) AS (VALUES ('1e-5',39,60,1,0.59,0.5743897436),('1e-4',32,51,17,0.47,0.4747364103),('1e-3',22,36,42,0.26,0.18792)) SELECT * FROM sensitivity",
+        "filters": ["100 states", "deadband sensitivity only"],
+        "metric_definitions": {"population_weighted_four_of_five": "Post-stratified Pilot-500 population mass with at least four of five seed utilities matching the mean-utility direction."}
+      }
+    },
+    {
+      "id": "independent_audit_source",
+      "path": "independent_audit.json",
+      "query": {
+        "engine": "portable-values-snapshot",
+        "language": "sql",
+        "id": "independent-posthoc-diagnosis-v1",
+        "executed_at": "2026-08-13T12:13:56Z",
+        "description": "独立从 records.jsonl 重算的 E0/E10/U ICC、within-state 残差相关与 strong-strata 分解；明确标记为 post-hoc。",
+        "sql": "SELECT 0.9500022189 AS e0_icc_1_1, 0.7900283378 AS e10_icc_1_1, 0.2779795974 AS utility_icc_1_1, 0.1996603831 AS within_state_residual_correlation, 13 AS sp_expected, 4 AS sp_opposite, 8 AS sp_indeterminate, 18 AS sn_expected, 0 AS sn_opposite, 7 AS sn_indeterminate",
+        "filters": ["500 complete paired records", "100 states", "5 seeds per state", "post-hoc diagnostic"],
+        "metric_definitions": {"within_state_residual_correlation": "E0/E10 correlation after subtracting each state's across-seed mean."}
+      }
+    }
+  ]
+}

@@ -1284,7 +1284,7 @@ def _plot_outputs(
     matrix: np.ndarray,
     per_state: Sequence[Mapping[str, Any]],
     stratum_rows: Sequence[Mapping[str, Any]],
-    reliability: Mapping[str, Any],
+    metrics: Mapping[str, Any],
 ) -> list[str]:
     try:
         import matplotlib
@@ -1304,6 +1304,26 @@ def _plot_outputs(
     grid = "#D9DEE5"
     written: list[str] = []
 
+    def finish_layout(
+        fig: Any,
+        *,
+        title: str,
+        subtitle: str,
+        bottom: float = 0.0,
+    ) -> None:
+        """Reserve separate figure-level bands for title and subtitle."""
+        fig.suptitle(title, y=0.985, va="top", fontsize=13, color=ink)
+        fig.text(
+            0.5,
+            0.94,
+            subtitle,
+            ha="center",
+            va="top",
+            fontsize=9,
+            color=ink,
+        )
+        fig.tight_layout(rect=(0.0, bottom, 1.0, 0.90))
+
     order = np.argsort(matrix[:, 0])[::-1]
     heat_values = matrix[order]
     limit = float(np.quantile(np.abs(heat_values), 0.98))
@@ -1320,18 +1340,16 @@ def _plot_outputs(
     ax.set_xticks(range(EXPECTED_REPLICATE_COUNT), [str(seed) for seed in EXPECTED_BASE_SEEDS])
     ax.set_xlabel("Inference base seed")
     ax.set_ylabel("100 states, sorted by seed-42 utility")
-    ax.set_title("Multi-seed utility matrix")
-    ax.text(
-        0.0,
-        1.01,
-        "U = E0 − E10 in normalized action space; color clipped at the 98th |U| percentile",
-        transform=ax.transAxes,
-        fontsize=9,
-        color=ink,
-    )
     colorbar = fig.colorbar(image, ax=ax, pad=0.02)
     colorbar.set_label("Utility U")
-    fig.tight_layout()
+    finish_layout(
+        fig,
+        title="Multi-seed utility matrix",
+        subtitle=(
+            "U = E0 − E10 in normalized action space; "
+            "color clipped at the 98th |U| percentile"
+        ),
+    )
     path = output_dir / "utility_seed_heatmap.png"
     fig.savefig(path, dpi=180, facecolor="white")
     plt.close(fig)
@@ -1350,40 +1368,110 @@ def _plot_outputs(
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlabel("Seed 42 / Pilot utility")
     ax.set_ylabel("Mean utility, new seeds 43–46")
-    ax.set_title("Pilot label vs independent-seed mean")
-    ax.text(0.0, 1.01, "Each point is one demonstration state (n=100)", transform=ax.transAxes, fontsize=9, color=ink)
-    ax.legend(frameon=False)
+    rank = metrics["rank_stability"]["seed42_vs_new4_mean"]
+    rank_ci = metrics["bootstrap"]["seed42_vs_new4_mean_spearman"]
+    ax.text(
+        0.03,
+        0.97,
+        (
+            f"Spearman ρ = {float(rank['spearman_rho']):.3f}\n"
+            f"95% bootstrap CI "
+            f"[{float(rank_ci['lower_95']):.3f}, {float(rank_ci['upper_95']):.3f}]"
+        ),
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=8.5,
+        color=ink,
+        bbox={
+            "boxstyle": "round,pad=0.35",
+            "facecolor": "white",
+            "edgecolor": grid,
+            "alpha": 0.92,
+        },
+    )
+    ax.legend(frameon=False, loc="lower right")
     ax.grid(color=grid, linewidth=0.6, alpha=0.6)
-    fig.tight_layout()
+    finish_layout(
+        fig,
+        title="Pilot label vs independent-seed mean",
+        subtitle="Each point is one demonstration state (n=100)",
+    )
     path = output_dir / "seed42_vs_new4_mean_scatter.png"
     fig.savefig(path, dpi=180, facecolor="white")
     plt.close(fig)
     written.append(path.name)
 
-    labels = [str(row["selection_bin"]) for row in stratum_rows]
+    labels = [
+        "NZ\n(near-zero)" if str(row["selection_bin"]) == "NZ" else str(row["selection_bin"])
+        for row in stratum_rows
+    ]
     majority = [float(row["new4_majority_matches_pilot_stratum_direction"]) for row in stratum_rows]
     four = [float(row["four_of_five_match_pilot_stratum_direction"]) for row in stratum_rows]
     positions = np.arange(len(labels))
     width = 0.36
-    fig, ax = plt.subplots(figsize=(8.2, 5.1))
-    ax.bar(positions - width / 2, majority, width, color=blue, edgecolor=blue_dark, label="new-4 majority retains Pilot direction")
-    ax.bar(positions + width / 2, four, width, color=gold_light, edgecolor=gold, label=">=4/5 retain Pilot direction")
-    ax.axhline(0.8, color=ink, linestyle="--", linewidth=1.0, label="0.80 reference")
+    fig, ax = plt.subplots(figsize=(8.6, 5.8))
+    majority_bars = ax.bar(
+        positions - width / 2,
+        majority,
+        width,
+        color=blue,
+        edgecolor=blue_dark,
+        label="Seeds 43–46: majority matches Pilot stratum",
+    )
+    four_bars = ax.bar(
+        positions + width / 2,
+        four,
+        width,
+        color=gold_light,
+        edgecolor=gold,
+        label="Seeds 42–46: ≥4/5 match Pilot stratum",
+    )
     ax.set_xticks(positions, labels)
     ax.set_ylim(0.0, 1.05)
     ax.set_ylabel("Fraction of states")
     ax.set_xlabel("Pilot utility stratum")
-    ax.set_title("Sign retention by Pilot utility stratum")
-    ax.text(0.0, 1.01, "Primary deadband |U| ≤ 1e−4; panel is deliberately tail-oversampled", transform=ax.transAxes, fontsize=9, color=ink)
-    ax.legend(frameon=False, fontsize=8, ncol=2, loc="lower center")
+    ax.bar_label(majority_bars, fmt="%.2f", padding=3, fontsize=8, color=ink)
+    ax.bar_label(four_bars, fmt="%.2f", padding=3, fontsize=8, color=ink)
+    ax.legend(
+        frameon=True,
+        facecolor="white",
+        edgecolor=grid,
+        framealpha=0.92,
+        fontsize=7.5,
+        loc="upper right",
+    )
     ax.grid(axis="y", color=grid, linewidth=0.6)
-    fig.tight_layout()
+    fig.text(
+        0.5,
+        0.018,
+        (
+            "Pre-registered GO checks apply only to strong SP/SN states: new-4 pooled ≥0.80, "
+            "SP and SN each ≥0.75, and pooled ≥4/5 ≥0.70.\n"
+            "NZ has no GO threshold; its bars measure retention of the near-zero class, "
+            "not positive/negative sign."
+        ),
+        ha="center",
+        va="bottom",
+        fontsize=7.5,
+        color=ink,
+    )
+    finish_layout(
+        fig,
+        title="Stratum-class retention across inference seeds",
+        subtitle=(
+            "Primary deadband ε=1e−4; expected class is + for SP/MP, "
+            "− for SN/MN, and near-zero for NZ"
+        ),
+        bottom=0.13,
+    )
     path = output_dir / "stratum_sign_agreement.png"
     fig.savefig(path, dpi=180, facecolor="white")
     plt.close(fig)
     written.append(path.name)
 
     variance_names = ["Between-state\ncomponent", "Within-state\n(seed noise)"]
+    reliability = metrics["reliability"]
     variance_values = [
         float(reliability["between_state_variance_component"]),
         float(reliability["within_state_variance"]),
@@ -1392,12 +1480,33 @@ def _plot_outputs(
     bars = ax.bar(variance_names, variance_values, color=[blue, gold_light], edgecolor=[blue_dark, gold])
     ax.axhline(0.0, color=ink, linewidth=0.9)
     ax.set_ylabel("Variance in utility U")
-    ax.set_title("One-way random-effects variance components")
-    ax.text(0.0, 1.01, "100 states × 5 inference seeds; raw method-of-moments estimates", transform=ax.transAxes, fontsize=9, color=ink)
+    ax.text(
+        0.02,
+        0.96,
+        (
+            f"ICC(1,1) = {float(reliability['icc_1_1']):.3f}\n"
+            f"ICC(1,5) = {float(reliability['icc_1_k']):.3f}"
+        ),
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=8.5,
+        color=ink,
+        bbox={
+            "boxstyle": "round,pad=0.35",
+            "facecolor": "white",
+            "edgecolor": grid,
+            "alpha": 0.92,
+        },
+    )
     ax.grid(axis="y", color=grid, linewidth=0.6)
     for bar, value in zip(bars, variance_values, strict=True):
         ax.annotate(f"{value:.3g}", (bar.get_x() + bar.get_width() / 2, value), xytext=(0, 4 if value >= 0 else -12), textcoords="offset points", ha="center", fontsize=9)
-    fig.tight_layout()
+    finish_layout(
+        fig,
+        title="One-way random-effects variance components",
+        subtitle="100 states × 5 inference seeds; raw method-of-moments estimates",
+    )
     path = output_dir / "variance_components.png"
     fig.savefig(path, dpi=180, facecolor="white")
     plt.close(fig)
@@ -1438,7 +1547,7 @@ def analyze(
     _write_csv(output_dir / "seed_metrics.csv", seed_rows)
     _write_csv(output_dir / "stratum_metrics.csv", stratum_rows)
     plot_files = (
-        _plot_outputs(output_dir, matrix, per_state, stratum_rows, metrics["reliability"])
+        _plot_outputs(output_dir, matrix, per_state, stratum_rows, metrics)
         if make_plots
         else []
     )

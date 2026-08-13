@@ -1,0 +1,328 @@
+{
+  "analysis_schema_version": 1,
+  "created_at_utc": "2026-08-13T12:10:37.713557+00:00",
+  "analysis_scope": "Phase-2.5 stochastic stability of demo-level utility labels",
+  "input": {
+    "records_path": "/root/feihong/FastWAM/utility_results/libero_demo_utility_multiseed100x5_730f27b_seed42_46/records.jsonl",
+    "records_sha256": "57abaacb551b4d6094e09812212c2be8098c9d823e58fb1de71d4f40469d4fb8",
+    "manifest_path": "/root/feihong/FastWAM/utility_results/libero_demo_utility_multiseed100x5_730f27b_seed42_46/manifest.json",
+    "manifest_sha256": "c7476d522f47f71df30fb96ebaba5d09f6dd7a0a83400456a79ab1146506d0b9",
+    "errors_path": "/root/feihong/FastWAM/utility_results/libero_demo_utility_multiseed100x5_730f27b_seed42_46/errors.jsonl"
+  },
+  "validation": {
+    "status": "complete_and_verified",
+    "core_complete_grid": {
+      "expected_count": 500,
+      "completed_count": 500,
+      "missing_count": 0,
+      "is_complete": true,
+      "coverage_fraction": 1.0,
+      "missing_key_examples": [],
+      "reused_from_pilot_count": 100,
+      "new_inference_count": 400
+    },
+    "state_count": 100,
+    "replicate_count": 5,
+    "record_count": 500,
+    "expected_record_count": 500,
+    "reused_record_count": 100,
+    "new_inference_record_count": 400,
+    "error_record_count": 0,
+    "base_seeds": [
+      42,
+      43,
+      44,
+      45,
+      46
+    ],
+    "selection_plan_sha256": "59f13375c815a556073f72cdff5243b73a19fc9dbec7bd58c4d419b4d72e90db",
+    "stability_manifest_compatibility_fingerprint": "4dbd7d940021b5e678bdd89d8904098fc6f071d3bc99d092ecaf5fdbca70dfe4",
+    "pilot_manifest_compatibility_fingerprint": "969207a63296e824ad3a81eaf75984e5092fadffce89d056de64660c9f4fc7f1"
+  },
+  "settings": {
+    "primary_deadband_epsilon": 0.0001,
+    "sensitivity_deadband_epsilons": [
+      1e-05,
+      0.0001,
+      0.001
+    ],
+    "bootstrap_seed": 20260812,
+    "bootstrap_replicates": 2000,
+    "pilot_stratum_prevalence": {
+      "SP": 0.152,
+      "SN": 0.202,
+      "MP": 0.262,
+      "MN": 0.184,
+      "NZ": 0.2
+    }
+  },
+  "metrics": {
+    "primary_deadband_epsilon": 0.0001,
+    "rank_stability": {
+      "reference": "seed42 Pilot utility",
+      "comparison": "mean utility of independent seeds 43-46",
+      "seed42_vs_new4_mean": {
+        "spearman_rho": 0.4375757575757575,
+        "kendall_tau": 0.3393939393939394
+      },
+      "seed42_vs_all5_mean": {
+        "spearman_rho": 0.6273627362736274,
+        "kendall_tau": 0.4917171717171718
+      }
+    },
+    "leave_one_seed_out": {
+      "median_spearman_rho": 0.38795079507950786,
+      "minimum_spearman_rho": 0.3146714671467146,
+      "positive_spearman_count": 5,
+      "finite_spearman_count": 5
+    },
+    "ranking_overlap": {
+      "state_count": 100,
+      "fraction": 0.2,
+      "k": 20,
+      "top_intersection": 9,
+      "top_recall": 0.45,
+      "top_jaccard": 0.2903225806451613,
+      "bottom_intersection": 11,
+      "bottom_recall": 0.55,
+      "bottom_jaccard": 0.3793103448275862,
+      "random_expected_recall": 0.2,
+      "random_expected_jaccard": 0.11111111111111112
+    },
+    "strong_pilot_stability": {
+      "overall_state_count": 50,
+      "overall_new4_majority_agreement": 0.62,
+      "overall_four_of_five_expected_direction": 0.62,
+      "overall_seed42_matches_new4_majority": 0.62,
+      "SP_state_count": 25,
+      "SP_new4_majority_agreement": 0.52,
+      "SP_four_of_five_expected_direction": 0.52,
+      "SP_seed42_matches_new4_majority": 0.52,
+      "SN_state_count": 25,
+      "SN_new4_majority_agreement": 0.72,
+      "SN_four_of_five_expected_direction": 0.72,
+      "SN_seed42_matches_new4_majority": 0.72
+    },
+    "reliability": {
+      "icc_1_1": 0.2779795973522975,
+      "icc_1_k": 0.6581210683762795,
+      "k": 5,
+      "ms_between": 0.0003807223979948781,
+      "ms_within": 0.00013016096667170984,
+      "between_state_variance_component": 5.011228626463365e-05,
+      "between_state_variance_component_nonnegative": 5.011228626463365e-05,
+      "within_state_variance": 0.00013016096667170984,
+      "grand_mean": -0.0018261130334769724
+    },
+    "population_weighted": {
+      "method": "post-stratification to Pilot-500 prevalence; audit sample is tail-oversampled",
+      "stratum_prevalence": {
+        "SP": 0.152,
+        "SN": 0.202,
+        "MP": 0.262,
+        "MN": 0.184,
+        "NZ": 0.2
+      },
+      "mean_utility": -0.0020344074599879937,
+      "positive_mean_fraction_at_primary_deadband": 0.3212635897435897,
+      "negative_mean_fraction_at_primary_deadband": 0.5056020512820513,
+      "nearzero_mean_fraction_at_primary_deadband": 0.17313435897435897,
+      "strong_mean_state_count_unweighted": 58,
+      "strong_mean_population_mass": 0.48680205128205106,
+      "strong_mean_four_of_five_same_direction": 0.5047910802474339
+    },
+    "deadband_sensitivity": {
+      "eps_1em05": {
+        "epsilon": 1e-05,
+        "positive_mean_count": 39,
+        "negative_mean_count": 60,
+        "nearzero_mean_count": 1,
+        "unweighted_mean_sign_agreement": 0.7979999999999999,
+        "unweighted_four_of_five_same_mean_direction": 0.59,
+        "population_weighted_four_of_five_same_mean_direction": 0.5743897435897435
+      },
+      "eps_1em04": {
+        "epsilon": 0.0001,
+        "positive_mean_count": 32,
+        "negative_mean_count": 51,
+        "nearzero_mean_count": 17,
+        "unweighted_mean_sign_agreement": 0.7639999999999999,
+        "unweighted_four_of_five_same_mean_direction": 0.47,
+        "population_weighted_four_of_five_same_mean_direction": 0.47473641025641017
+      },
+      "eps_1em03": {
+        "epsilon": 0.001,
+        "positive_mean_count": 22,
+        "negative_mean_count": 36,
+        "nearzero_mean_count": 42,
+        "unweighted_mean_sign_agreement": 0.7819999999999999,
+        "unweighted_four_of_five_same_mean_direction": 0.26,
+        "population_weighted_four_of_five_same_mean_direction": 0.18792000000000003
+      }
+    },
+    "bootstrap": {
+      "seed": 20260812,
+      "replicates": 2000,
+      "seed42_vs_new4_mean_spearman": {
+        "lower_95": 0.23120446206819703,
+        "upper_95": 0.6186920383264713,
+        "valid_replicates": 2000,
+        "requested_replicates": 2000
+      },
+      "strong_new4_majority_agreement": {
+        "lower_95": 0.48,
+        "upper_95": 0.74,
+        "valid_replicates": 2000,
+        "requested_replicates": 2000
+      },
+      "icc_1_5": {
+        "lower_95": 0.3274610581244517,
+        "upper_95": 0.8197807017727826,
+        "valid_replicates": 2000,
+        "requested_replicates": 2000
+      }
+    },
+    "unweighted_diagnostic_warning": "The 100-state audit deliberately over-samples utility tails. Unweighted metrics describe this diagnostic panel, not the Pilot-500 population.",
+    "decision": {
+      "decision": "NO_GO",
+      "scope": "readiness_to_start_offline_tiny_mlp_only",
+      "does_not_establish": "closed_loop_gate_improvement",
+      "go_checks": [
+        {
+          "name": "strong overall new-seed majority agreement",
+          "observed": 0.62,
+          "operator": ">=",
+          "threshold": 0.8,
+          "passed": false
+        },
+        {
+          "name": "SP new-seed majority agreement",
+          "observed": 0.52,
+          "operator": ">=",
+          "threshold": 0.75,
+          "passed": false
+        },
+        {
+          "name": "SN new-seed majority agreement",
+          "observed": 0.72,
+          "operator": ">=",
+          "threshold": 0.75,
+          "passed": false
+        },
+        {
+          "name": "strong states with >=4/5 expected-direction seeds",
+          "observed": 0.62,
+          "operator": ">=",
+          "threshold": 0.7,
+          "passed": false
+        },
+        {
+          "name": "seed42 vs new4-mean Spearman rho",
+          "observed": 0.4375757575757575,
+          "operator": ">=",
+          "threshold": 0.5,
+          "passed": false
+        },
+        {
+          "name": "Spearman bootstrap 95% lower bound",
+          "observed": 0.23120446206819703,
+          "operator": ">=",
+          "threshold": 0.3,
+          "passed": false
+        },
+        {
+          "name": "LOSO median Spearman",
+          "observed": 0.38795079507950786,
+          "operator": ">=",
+          "threshold": 0.4,
+          "passed": false
+        },
+        {
+          "name": "LOSO positive-rho seeds",
+          "observed": 5.0,
+          "operator": ">=",
+          "threshold": 4.0,
+          "passed": true
+        },
+        {
+          "name": "top-20% recall",
+          "observed": 0.45,
+          "operator": ">=",
+          "threshold": 0.4,
+          "passed": true
+        },
+        {
+          "name": "top-20% Jaccard",
+          "observed": 0.2903225806451613,
+          "operator": ">=",
+          "threshold": 0.25,
+          "passed": true
+        },
+        {
+          "name": "bottom-20% recall",
+          "observed": 0.55,
+          "operator": ">=",
+          "threshold": 0.4,
+          "passed": true
+        },
+        {
+          "name": "bottom-20% Jaccard",
+          "observed": 0.3793103448275862,
+          "operator": ">=",
+          "threshold": 0.25,
+          "passed": true
+        },
+        {
+          "name": "ICC(1,5)",
+          "observed": 0.6581210683762795,
+          "operator": ">=",
+          "threshold": 0.75,
+          "passed": false
+        },
+        {
+          "name": "ICC(1,1)",
+          "observed": 0.2779795973522975,
+          "operator": ">=",
+          "threshold": 0.35,
+          "passed": false
+        },
+        {
+          "name": "population-weighted strong-mean states with >=4/5 same-direction seeds",
+          "observed": 0.5047910802474339,
+          "operator": ">=",
+          "threshold": 0.6,
+          "passed": false
+        }
+      ],
+      "failed_go_checks": [
+        "strong overall new-seed majority agreement",
+        "SP new-seed majority agreement",
+        "SN new-seed majority agreement",
+        "strong states with >=4/5 expected-direction seeds",
+        "seed42 vs new4-mean Spearman rho",
+        "Spearman bootstrap 95% lower bound",
+        "LOSO median Spearman",
+        "ICC(1,5)",
+        "ICC(1,1)",
+        "population-weighted strong-mean states with >=4/5 same-direction seeds"
+      ],
+      "conditional_rule": {
+        "strong_majority_min": 0.65,
+        "spearman_min": 0.3,
+        "icc_1_5_min": 0.5
+      }
+    }
+  },
+  "outputs": {
+    "per_state_csv": "per_state.csv",
+    "seed_metrics_csv": "seed_metrics.csv",
+    "stratum_metrics_csv": "stratum_metrics.csv",
+    "plot_files": [
+      "utility_seed_heatmap.png",
+      "seed42_vs_new4_mean_scatter.png",
+      "stratum_sign_agreement.png",
+      "variance_components.png"
+    ]
+  },
+  "interpretation_guardrail": "The automatic decision concerns whether labels are stable enough to begin offline Tiny MLP work. It does not validate Gate calibration, compute savings, or closed-loop LIBERO success."
+}

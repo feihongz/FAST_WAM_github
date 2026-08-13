@@ -361,6 +361,7 @@ def test_complete_grid_validation_rejects_input_drift_and_duplicates():
 
 
 def test_analyze_writes_required_tables_and_summary(tmp_path: Path):
+    pytest.importorskip("matplotlib")
     manifest, records = _synthetic_bundle()
     records_path = tmp_path / "records.jsonl"
     manifest_path = tmp_path / "manifest.json"
@@ -376,7 +377,7 @@ def test_analyze_writes_required_tables_and_summary(tmp_path: Path):
         output_dir,
         bootstrap_seed=123,
         bootstrap_replicates=30,
-        make_plots=False,
+        make_plots=True,
     )
     assert summary["validation"]["status"] == "complete_and_verified"
     assert summary["metrics"]["decision"]["decision"] in {"GO", "CONDITIONAL", "NO_GO"}
@@ -387,3 +388,15 @@ def test_analyze_writes_required_tables_and_summary(tmp_path: Path):
         "stratum_metrics.csv",
     ):
         assert (output_dir / filename).is_file()
+    expected_plots = [
+        "utility_seed_heatmap.png",
+        "seed42_vs_new4_mean_scatter.png",
+        "stratum_sign_agreement.png",
+        "variance_components.png",
+    ]
+    assert summary["outputs"]["plot_files"] == expected_plots
+    for filename in expected_plots:
+        plot_path = output_dir / filename
+        assert plot_path.is_file()
+        assert plot_path.stat().st_size > 1_000
+        assert plot_path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
