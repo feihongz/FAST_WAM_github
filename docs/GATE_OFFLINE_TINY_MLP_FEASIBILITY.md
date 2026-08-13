@@ -9,7 +9,8 @@ Phase 2.6 已证明，seeds 42–46 聚合得到的 Target V2 能在独立 seeds
 > multi-seed video utility？
 
 本协议在任何 Gate feature extraction、模型训练或 OOF 预测产生前，于
-`2026-08-13T15:28:39Z` 冻结。Phase 3 不修改 UniShare training/inference，不接
+`2026-08-13T15:33:59Z` 经独立终审后最终冻结。Phase 3 不修改 UniShare
+training/inference，不接
 LIBERO closed-loop，也不使用 future observation 或 GT action 作为 Gate 输入。
 
 ## 2. Train label 与独立考试严格隔离
@@ -26,6 +27,9 @@ seeds 42–46                           seeds 47–50
 - trainer 只能读取 seeds 42–46 的 `utility_mean/std/SEM/t95`；
 - trainer、early stopping、feature normalization、模型选择和 checkpoint 选择都不能
   读取 seeds 47–50；
+- feature collector/trainer 的 CLI、config 和 imports 都不得接受 Validation4 path 或
+  loader；trainer 必须先原子封存 `fold_plan.json`、`oof_predictions.jsonl` 和
+  `run_manifest.json`，三者 SHA 互绑后退出；
 - predictions bundle 完整封存后，独立 analyzer 才加载 seeds 47–50；
 - 主科学指标比较 OOF prediction 与 Validation4 mean；
 - 与 Target5 mean 的指标只作为拟合诊断，不能替代独立考试结果；
@@ -46,7 +50,7 @@ seeds 42–46                           seeds 47–50
 
 最终 full feature 为 `64 + 65 + 8 = 137` 维。random projection 的算法、seed、
 matrix bytes SHA-256 和 extractor source SHA 都写入 manifest。模型训练中的 z-score
-只在当前 fold 的 inner-train states 上拟合。
+只在当前 fold 的 inner-train states 上拟合；常数列标准化后固定为0。
 
 三份 projection 均由 CPU `torch.Generator` 生成 row-major `float32` Rademacher
 矩阵，元素为 `{-1, +1} / sqrt(input_dim)`；不拟合数据，也不参与模型选择。固定 seed：
@@ -214,6 +218,13 @@ SHA salts 的 random scores。random namespace 固定为 `libero_gate_random_v1`
 Bootstrap 固定2,000次，seed `20260813`，按 suite 内 task group重采样。Permutation
 固定5,000次，seed `20260814`。Primary deadband 固定 `1e-4`。
 
+所有 GO 中的相关性、tail、selected utility、within-task pair 和误差 outcome 都取
+Validation4 mean。sign cohort eligibility 由训练前冻结的 Target5-HC 决定，但预测是否
+正确及正负真值取 Validation4 mean 相对 `±1e-4` 的方向；Target5 direction 版本仅作
+secondary diagnostic。within-task pair 预先枚举同 task 的无序 state pairs，并排除
+`|ΔU_validation| <= 1e-4`；必须报告 evaluable pair 数和40-task cluster bootstrap，少于
+30个 evaluable pairs 时不得判 GO。
+
 ## 8. 预注册判定
 
 ### GO：允许扩展到 Pilot-500 offline Gate training
@@ -263,3 +274,8 @@ target 组合，优先研究更强视觉表征、ranking-only target 或 rollout
 
 这些问题必须在 Pilot-500 offline复验后，再通过小规模 closed-loop smoke 与正式
 threshold sweep逐级回答。
+
+另一个明确的部署工程边界是：当前 evaluator 在调用模型之前执行 Router，而本协议的
+visual feature 来自模型内部已计算的 VAE latent。即使 offline GO，也不能在 evaluator
+外额外重复一次 VAE encode；后续必须新增 prepared-conditioning/feature hook，让 Gate
+与 N=0/N=10 两条 prefix endpoint 复用同一份 first-frame latent。
