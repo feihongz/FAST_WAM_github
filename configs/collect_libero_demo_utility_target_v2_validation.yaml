@@ -1,0 +1,54 @@
+# @package _global_
+
+defaults:
+  - train
+  - override /task: libero_unified_shared_2cam224_1e-4
+  - _self_
+
+# Independent validation uses the same frozen UniShare endpoint as Phase 2.5.
+# Checkpoint structure and every scientific artifact are rebound to the
+# immutable Phase-2.5 manifest before inference starts.
+ckpt: null
+
+model:
+  load_text_encoder: false
+  skip_dit_load_from_pretrain: true
+  action_dit_pretrained_path: null
+
+COLLECTOR:
+  # Completed Phase-2.5 100x5 source bundle (manifest.json + records.jsonl).
+  phase25_dir: null
+  expected_phase25_manifest_sha256: null
+  expected_phase25_records_sha256: null
+  # Completed Target-V2 bundle (manifest.json + targets.jsonl).
+  target_v2_dir: null
+  expected_target_v2_manifest_sha256: null
+  expected_target_v2_targets_sha256: null
+  output_dir: ./runs/libero_demo_utility_target_v2_validation/${now:%Y-%m-%d}_${now:%H-%M-%S}
+  dataset_stats_path: null
+  device: cuda
+
+  # These four seeds are independent of Target V2's construction seeds 42--46.
+  # Local indices 0--3 correspond to global seed indices 5--8.
+  num_states: 100
+  validation_base_seeds: [47, 48, 49, 50]
+  global_seed_index_offset: 5
+
+  resume: true
+  continue_on_error: true
+  max_errors: 20
+
+  num_inference_steps: ${eval_num_inference_steps}
+  full_prefix_steps: ${COLLECTOR.num_inference_steps}
+  num_video_frames: 9
+  rand_device: cpu
+  sigma_shift: null
+  tiled: false
+  force_custom_prefix: true
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null

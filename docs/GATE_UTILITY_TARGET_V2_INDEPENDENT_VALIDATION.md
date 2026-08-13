@@ -101,6 +101,11 @@ base seeds = [47, 48, 49, 50]
   bundle 一致；
 - immutable manifest、selection plan、source records 和 target bundle 的 SHA-256
   均匹配。
+- 每条 validation record 保存并校验排除自身字段后的 canonical SHA-256；
+- 400 条完整且 error 为 0 后原子写入 `completion.json`，封存 manifest、records、
+  errors、source/target bundle 与有序行摘要的最终 SHA-256；
+- 正式分析必须先验证 completion seal；seal 后任何截断、追加、重排或自洽数值改写
+  都必须 fail closed。
 
 任一完整性检查失败都 fail closed，不输出科学结论。
 
