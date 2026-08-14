@@ -1,0 +1,67 @@
+# @package _global_
+
+defaults:
+  - train
+  - override /task: libero_unified_shared_2cam224_1e-4
+  - _self_
+
+# Phase 3b extracts the exact-V1 current-state representation only. The
+# checkpoint is content-bound to the utility labels; only its frozen Wan VAE is
+# executed by this job.
+ckpt: null
+
+model:
+  load_text_encoder: false
+  skip_dit_load_from_pretrain: true
+  action_dit_pretrained_path: null
+
+FEATURE_COLLECTOR:
+  # The standalone remainder Target-V2 bundle has no completion file. It is
+  # sealed by both external file digests and its exact component binding inside
+  # the independently completed combined Target-500 bundle below.
+  remainder_target_v2_dir: null
+  expected_remainder_manifest_sha256: null
+  expected_remainder_records_sha256: null
+
+  combined_target_v2_dir: null
+  expected_combined_manifest_sha256: null
+  expected_combined_records_sha256: null
+  expected_combined_completion_file_sha256: null
+
+  # Fixed repository path: docs/GATE_OFFLINE_REMAINDER400_FOLLOWUP.md
+  expected_followup_protocol_sha256: null
+
+  # Reuse the exact audited runtime artifact contract from Phase 2.5. The
+  # remainder source separately binds the same checkpoint/stats/VAE bytes.
+  phase25_manifest_path: null
+  expected_phase25_manifest_sha256: null
+
+  output_dir: ./runs/libero_gate_remainder400_current_state_features/${now:%Y-%m-%d}_${now:%H-%M-%S}
+  dataset_stats_path: null
+  device: cuda
+  resume: true
+  require_clean_tracked_diff: true
+  expected_num_states: 400
+  # Operational smoke/debug limit. A limited run writes only private atomic row
+  # progress and cannot publish completion.json until all 400 rows validate.
+  max_new_rows: null
+
+  visual:
+    latent_channels: 48
+    pooled_height: 2
+    pooled_width: 4
+    projection_dim: 64
+    projection_seed: 20260815
+  instruction:
+    context_dim: 4096
+    projection_dim: 32
+    mean_projection_seed: 20260816
+    rms_projection_seed: 20260817
+  proprio_dim: 8
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null
