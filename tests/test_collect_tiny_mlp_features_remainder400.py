@@ -600,6 +600,9 @@ def test_cpu_fake_collection_is_atomic_resumable_and_rechecks_all_live_states(
         {
             "ckpt": str(checkpoint),
             "mixed_precision": "bf16",
+            # Mirrors the inherited train config's time-varying `${now}` run
+            # directory. It is operational only and may change on resume.
+            "output_dir": "./runs/train/smoke",
             "model": {},
             "data": {
                 "train": {
@@ -766,6 +769,7 @@ def test_cpu_fake_collection_is_atomic_resumable_and_rechecks_all_live_states(
     _, orphan_tensor = base._progress_paths(output / ".rows", 13)
     orphan_tensor.write_bytes(b"crashed-progress-tensor")
     cfg.FEATURE_COLLECTOR.max_new_rows = None
+    cfg.output_dir = "./runs/train/resume"
     with pytest.raises(ValueError, match="post-seal input mutation"):
         r400.collect(cfg)
     assert live_checks["count"] == 800

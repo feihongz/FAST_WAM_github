@@ -770,6 +770,10 @@ def _build_manifest(
     scientific_collector.pop("resume", None)
     scientific_collector.pop("max_new_rows", None)
     scientific_collector.pop("output_dir", None)
+    # The inherited training config also resolves a top-level run directory
+    # from `${now:...}`. It is unused by the feature collector and therefore
+    # must not make a one-row smoke incompatible with its later resume.
+    scientific_cfg.pop("output_dir", None)
     target_projection = [
         {
             "selection_order": int(row["selection_order"]),
