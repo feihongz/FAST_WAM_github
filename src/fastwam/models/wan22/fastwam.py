@@ -568,6 +568,25 @@ class FastWAM(torch.nn.Module):
         return loss_total, loss_dict
 
     @torch.no_grad()
+    def _apply_action_velocity_hook(
+        self,
+        base_action_velocity: torch.Tensor,
+        *,
+        action_tokens: torch.Tensor,
+        video_tokens: torch.Tensor,
+        action_pre: dict[str, Any],
+        video_pre: dict[str, Any],
+    ) -> torch.Tensor:
+        """Return the action velocity after optional model extensions.
+
+        The base model is deliberately an identity implementation. Aligned
+        subclasses override this hook so inference and future differentiable
+        training share the same action-velocity seam.
+        """
+        del action_tokens, video_tokens, action_pre, video_pre
+        return base_action_velocity
+
+    @torch.no_grad()
     def _predict_joint_noise(
         self,
         latents_video: torch.Tensor,
@@ -628,7 +647,14 @@ class FastWAM(torch.nn.Module):
         )
 
         pred_video = self.video_expert.post_dit(tokens_out["video"], video_pre)
-        pred_action = self.action_expert.post_dit(tokens_out["action"], action_pre)
+        pred_action_base = self.action_expert.post_dit(tokens_out["action"], action_pre)
+        pred_action = self._apply_action_velocity_hook(
+            pred_action_base,
+            action_tokens=tokens_out["action"],
+            video_tokens=tokens_out["video"],
+            action_pre=action_pre,
+            video_pre=video_pre,
+        )
         return pred_video, pred_action
 
     @torch.no_grad()
