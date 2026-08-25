@@ -17,7 +17,7 @@ def test_perturb_matches_flow_matching_scheduler_for_nonzero_latent():
     )
 
 def test_solver_panel_and_cache_step_contract():
-    validate_solver_panel(torch.arange(10, dtype=torch.float32))
+    validate_solver_panel(torch.linspace(1.0, 0.0, 10))
     assert RolloutStep("sample-1", 9, 0.25, 3, "basehash").k == 9
 
 def test_solver_contract_rejects_bad_inputs():

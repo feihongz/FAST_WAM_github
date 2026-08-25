@@ -77,3 +77,18 @@ def test_stage3_rejects_bad_action_weight():
         assert "action_weight" in str(exc)
     else:
         raise AssertionError("expected action_weight shape validation")
+
+
+def test_stage3_loss_accumulates_bfloat16_errors_in_float32():
+    z = torch.zeros(1, 2, 1, dtype=torch.bfloat16)
+    vself = torch.ones_like(z, requires_grad=True)
+
+    out = stage3_alignment_loss(z, z, vself, z)
+
+    assert out.loss.dtype == torch.float32
+    assert out.alignment_loss.dtype == torch.float32
+    assert out.loss.requires_grad is True
+    assert out.action_loss.requires_grad is False
+    assert out.alignment_loss.requires_grad is False
+    out.loss.backward()
+    assert vself.grad is not None

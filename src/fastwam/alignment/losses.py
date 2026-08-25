@@ -20,6 +20,20 @@ class Stage3LossOutput:
     egt: torch.Tensor
     eself: torch.Tensor
 
+    def detached(self) -> "Stage3LossOutput":
+        """Return a logging-safe copy that does not retain an autograd graph."""
+
+        return Stage3LossOutput(
+            loss=self.loss.detach(),
+            action_loss=self.action_loss.detach(),
+            alignment_loss=self.alignment_loss.detach(),
+            safe_loss=self.safe_loss.detach(),
+            helpful_fraction=self.helpful_fraction.detach(),
+            e0=self.e0.detach(),
+            egt=self.egt.detach(),
+            eself=self.eself.detach(),
+        )
+
 
 def _valid_mask(action_is_pad: torch.Tensor | None, shape: tuple[int, int], device: torch.device) -> torch.Tensor:
     if action_is_pad is None:
@@ -34,7 +48,9 @@ def _per_sample_mse(pred: torch.Tensor, target: torch.Tensor, valid: torch.Tenso
         raise ValueError("velocity tensors must have identical shape [B,T,D]")
     if valid.shape != pred.shape[:2]:
         raise ValueError("padding mask must match the first two velocity dimensions")
-    err = (pred - target).square().mean(dim=-1)
+    # Match the base trainer: accumulate velocity error in FP32 even when the
+    # frozen experts and Adapter run in BF16.
+    err = (pred.float() - target.float()).square().mean(dim=-1)
     weights = valid.to(dtype=err.dtype)
     return (err * weights).sum(dim=1) / weights.sum(dim=1).clamp_min(1.0)
 
@@ -80,10 +96,21 @@ def stage3_alignment_loss(
         if not torch.isfinite(action_weight).all() or (action_weight < 0).any():
             raise ValueError("action_weight must be finite and non-negative")
     helpful = egt < ((1.0 - helpful_relative_margin) * e0).detach()
-    target_delta = helpful.to(dtype=v_self.dtype).view(-1, 1, 1) * (v_gt.detach() - v0.detach())
-    delta = v_self - v0.detach()
+    target_delta = helpful.float().view(-1, 1, 1) * (
+        v_gt.detach().float() - v0.detach().float()
+    )
+    delta = v_self.float() - v0.detach().float()
     alignment_loss = _per_sample_mse(delta, target_delta, valid).mean()
     safe_loss = torch.relu(eself - e0.detach()).mean()
     action_loss = (eself * action_weight).mean()
     loss = lambda_action * action_loss + lambda_align * alignment_loss + lambda_safe * safe_loss
-    return Stage3LossOutput(loss, action_loss, alignment_loss, safe_loss, helpful.float().mean(), e0, egt, eself)
+    return Stage3LossOutput(
+        loss=loss,
+        action_loss=action_loss.detach(),
+        alignment_loss=alignment_loss.detach(),
+        safe_loss=safe_loss.detach(),
+        helpful_fraction=helpful.float().mean().detach(),
+        e0=e0.detach(),
+        egt=egt.detach(),
+        eself=eself.detach(),
+    )

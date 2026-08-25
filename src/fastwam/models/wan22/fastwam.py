@@ -762,6 +762,50 @@ class FastWAM(torch.nn.Module):
         return pred_action
 
     @torch.no_grad()
+    def _prepare_action_video_cache(
+        self,
+        first_frame_latents: torch.Tensor,
+        *,
+        action_seq_len: int,
+        context: torch.Tensor,
+        context_mask: torch.Tensor,
+        fuse_vae_embedding_in_latents: bool,
+    ) -> tuple[list[dict[str, torch.Tensor]], torch.Tensor, int]:
+        """Prepare the exact first-frame K/V cache used by deployed wo inference."""
+
+        timestep_video = torch.zeros(
+            (first_frame_latents.shape[0],),
+            dtype=first_frame_latents.dtype,
+            device=first_frame_latents.device,
+        )
+        video_pre = self.video_expert.pre_dit(
+            x=first_frame_latents,
+            timestep=timestep_video,
+            context=context,
+            context_mask=context_mask,
+            action=None,
+            fuse_vae_embedding_in_latents=fuse_vae_embedding_in_latents,
+        )
+        video_seq_len = int(video_pre["tokens"].shape[1])
+        attention_mask = self._build_mot_attention_mask(
+            video_seq_len=video_seq_len,
+            action_seq_len=int(action_seq_len),
+            video_tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
+            device=video_pre["tokens"].device,
+        )
+        video_kv_cache = self.mot.prefill_video_cache(
+            video_tokens=video_pre["tokens"],
+            video_freqs=video_pre["freqs"],
+            video_t_mod=video_pre["t_mod"],
+            video_context_payload={
+                "context": video_pre["context"],
+                "mask": video_pre["context_mask"],
+            },
+            video_attention_mask=attention_mask[:video_seq_len, :video_seq_len],
+        )
+        return video_kv_cache, attention_mask, video_seq_len
+
+    @torch.no_grad()
     def _predict_action_noise_with_cache(
         self,
         latents_action: torch.Tensor,
@@ -791,6 +835,37 @@ class FastWAM(torch.nn.Module):
             video_seq_len=video_seq_len,
         )
         return self.action_expert.post_dit(action_tokens, action_pre)
+
+    @torch.no_grad()
+    def _predict_wo_action_noise(
+        self,
+        first_frame_latents: torch.Tensor,
+        latents_action: torch.Tensor,
+        timestep_action: torch.Tensor,
+        context: torch.Tensor,
+        context_mask: torch.Tensor,
+        fuse_vae_embedding_in_latents: bool,
+    ) -> torch.Tensor:
+        """Compute a wo velocity through the same cache path as deployment."""
+
+        video_kv_cache, attention_mask, video_seq_len = (
+            self._prepare_action_video_cache(
+                first_frame_latents,
+                action_seq_len=latents_action.shape[1],
+                context=context,
+                context_mask=context_mask,
+                fuse_vae_embedding_in_latents=fuse_vae_embedding_in_latents,
+            )
+        )
+        return self._predict_action_noise_with_cache(
+            latents_action=latents_action,
+            timestep_action=timestep_action,
+            context=context,
+            context_mask=context_mask,
+            video_kv_cache=video_kv_cache,
+            attention_mask=attention_mask,
+            video_seq_len=video_seq_len,
+        )
 
     @torch.no_grad()
     def infer_joint(
@@ -1060,35 +1135,14 @@ class FastWAM(torch.nn.Module):
                 proprio=proprio,
             )
 
-        timestep_video = torch.zeros(
-            (first_frame_latents.shape[0],),
-            dtype=first_frame_latents.dtype,
-            device=self.device,
-        )
-        video_pre = self.video_expert.pre_dit(
-            x=first_frame_latents,
-            timestep=timestep_video,
-            context=context,
-            context_mask=context_mask,
-            action=None,
-            fuse_vae_embedding_in_latents=fuse_flag,
-        )
-        video_seq_len = int(video_pre["tokens"].shape[1])
-        attention_mask = self._build_mot_attention_mask(
-            video_seq_len=video_seq_len,
-            action_seq_len=latents_action.shape[1],
-            video_tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
-            device=video_pre["tokens"].device,
-        )
-        video_kv_cache = self.mot.prefill_video_cache(
-            video_tokens=video_pre["tokens"],
-            video_freqs=video_pre["freqs"],
-            video_t_mod=video_pre["t_mod"],
-            video_context_payload={
-                "context": video_pre["context"],
-                "mask": video_pre["context_mask"],
-            },
-            video_attention_mask=attention_mask[:video_seq_len, :video_seq_len],
+        video_kv_cache, attention_mask, video_seq_len = (
+            self._prepare_action_video_cache(
+                first_frame_latents,
+                action_seq_len=latents_action.shape[1],
+                context=context,
+                context_mask=context_mask,
+                fuse_vae_embedding_in_latents=fuse_flag,
+            )
         )
 
         infer_timesteps_action, infer_deltas_action = self.infer_action_scheduler.build_inference_schedule(
