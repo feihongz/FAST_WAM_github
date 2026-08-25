@@ -1,0 +1,48 @@
+import pytest
+import torch
+from torch import nn
+
+from fastwam.alignment import AlignmentTrainer
+
+
+class TinyAlignedModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.base = nn.Sequential(nn.Linear(2, 2), nn.Dropout(0.5))
+        self.alignment_adapter = nn.Linear(2, 2, bias=False)
+
+    def configure_alignment_training(self):
+        self.eval()
+        self.requires_grad_(False)
+        self.alignment_adapter.train()
+        self.alignment_adapter.requires_grad_(True)
+        return {"alignment_adapter.weight"}
+
+
+def test_trainer_keeps_base_frozen_and_updates_adapter():
+    model = TinyAlignedModel()
+    base_before = {
+        name: value.detach().clone() for name, value in model.base.state_dict().items()
+    }
+    adapter_before = model.alignment_adapter.weight.detach().clone()
+    trainer = AlignmentTrainer(model, lr=0.1)
+    x = torch.ones(1, 2, 2)
+    v_self = model.alignment_adapter(x)
+    zeros = torch.zeros_like(v_self)
+    trainer.step(zeros, zeros, v_self, zeros)
+    assert trainer.global_step == 1
+    assert model.base.training is False
+    assert all(not parameter.requires_grad for parameter in model.base.parameters())
+    assert all(
+        torch.equal(value, base_before[name])
+        for name, value in model.base.state_dict().items()
+    )
+    assert not torch.equal(model.alignment_adapter.weight, adapter_before)
+
+
+def test_trainer_rejects_detached_self_velocity():
+    model = TinyAlignedModel()
+    trainer = AlignmentTrainer(model)
+    zeros = torch.zeros(1, 2, 2)
+    with pytest.raises(RuntimeError, match="computation graph"):
+        trainer.step(zeros, zeros, zeros, zeros)
