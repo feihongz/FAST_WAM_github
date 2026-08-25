@@ -22,6 +22,9 @@ from fastwam.models.wan22.video_action_alignment import (
 )
 
 
+DATA_MANIFEST_SHA256 = "d" * 64
+
+
 class _TinyDataset:
     def __init__(self, length: int = 4):
         self.length = length
@@ -110,6 +113,7 @@ def _make_trainer(
     dataset_length: int = 4,
     batch_size: int = 1,
     resume: Path | None = None,
+    data_manifest_sha256: str | None = DATA_MANIFEST_SHA256,
 ) -> tuple[Stage3AlignmentTrainer, _TinyAlignedModel, Accelerator]:
     model = _TinyAlignedModel()
     accelerator = Accelerator(
@@ -135,6 +139,11 @@ def _make_trainer(
             size_bytes=5_000_000_000,
         ),
         git_identity=GitIdentity(commit="deadbeef", tracked_dirty=False),
+        data_identity=(
+            {}
+            if data_manifest_sha256 is None
+            else {"sha256": data_manifest_sha256}
+        ),
     )
     return trainer, model, accelerator
 
@@ -259,6 +268,11 @@ def test_accelerator_and_optimizer_own_only_adapter(tmp_path):
     assert all(not parameter.requires_grad for parameter in model.base.parameters())
 
 
+def test_formal_trainer_requires_data_manifest_sha256(tmp_path):
+    with pytest.raises(ValueError, match="data_identity.sha256"):
+        _make_trainer(tmp_path, data_manifest_sha256=None)
+
+
 def test_checkpoint_and_export_contain_adapter_but_no_base_weights(tmp_path):
     trainer, model, _ = _make_trainer(tmp_path)
     trainer.global_step = 0
@@ -281,6 +295,9 @@ def test_checkpoint_and_export_contain_adapter_but_no_base_weights(tmp_path):
     manifest = json.loads((state_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["base_checkpoint"] == "/frozen/base-checkpoint.pt"
     assert manifest["base_checkpoint_size_bytes"] == 5_000_000_000
+    assert manifest["data_manifest_sha256"] == DATA_MANIFEST_SHA256
+    assert payload["schema_version"] == 2
+    assert payload["data_manifest_sha256"] == DATA_MANIFEST_SHA256
     assert all("base-checkpoint.pt" not in name for name in manifest["files"])
 
     restored = _TinyAlignedModel().alignment_adapter
@@ -288,6 +305,7 @@ def test_checkpoint_and_export_contain_adapter_but_no_base_weights(tmp_path):
         export_path,
         restored,
         expected_base_checkpoint_sha256="a" * 64,
+        expected_data_manifest_sha256=DATA_MANIFEST_SHA256,
     )
     _assert_state_equal(restored.state_dict(), model.alignment_adapter.state_dict())
 
@@ -404,6 +422,7 @@ def test_mid_epoch_resume_matches_uninterrupted_rng_and_updates(tmp_path):
                 size_bytes=5_000_000_000,
             ),
             git_identity=GitIdentity(commit="deadbeef", tracked_dirty=False),
+            data_identity={"sha256": DATA_MANIFEST_SHA256},
         )
         return trainer, model
 

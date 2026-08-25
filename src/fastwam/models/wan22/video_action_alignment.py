@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
+import re
 from typing import Any, Mapping
 
 import torch
 from torch import nn
 
 
-ALIGNMENT_CHECKPOINT_SCHEMA_VERSION = 1
+ALIGNMENT_CHECKPOINT_SCHEMA_VERSION = 2
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _require_sha256(value: Any, *, field: str) -> str:
+    if not isinstance(value, str) or not _SHA256_PATTERN.fullmatch(value):
+        raise ValueError(f"{field} must contain exactly 64 lowercase hex chars")
+    return value
 
 
 class VideoActionResidualAdapter(nn.Module):
@@ -149,6 +156,7 @@ def save_alignment_checkpoint(
     adapter: VideoActionResidualAdapter,
     *,
     base_checkpoint: str,
+    data_manifest_sha256: str,
     base_checkpoint_sha256: str | None = None,
     global_step: int | None = None,
     adapter_state_dict: Mapping[str, torch.Tensor] | None = None,
@@ -156,6 +164,10 @@ def save_alignment_checkpoint(
     training_contract_sha256: str | None = None,
     asset_identities: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> Path:
+    data_manifest_sha256 = _require_sha256(
+        data_manifest_sha256,
+        field="data_manifest_sha256",
+    )
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
     state = adapter.state_dict() if adapter_state_dict is None else adapter_state_dict
@@ -170,6 +182,7 @@ def save_alignment_checkpoint(
             "adapter": state,
             "base_checkpoint": str(base_checkpoint),
             "base_checkpoint_sha256": base_checkpoint_sha256,
+            "data_manifest_sha256": data_manifest_sha256,
             "alignment_config": adapter.config(),
             "global_step": None if global_step is None else int(global_step),
             "git_commit": git_commit,
@@ -186,9 +199,10 @@ def load_alignment_checkpoint(
     adapter: VideoActionResidualAdapter,
     *,
     expected_base_checkpoint_sha256: str | None = None,
+    expected_data_manifest_sha256: str | None = None,
     map_location: str | torch.device = "cpu",
 ) -> dict[str, Any]:
-    payload = torch.load(path, map_location=map_location)
+    payload = torch.load(path, map_location=map_location, weights_only=False)
     if (
         not isinstance(payload, dict)
         or int(payload.get("schema_version", -1))
@@ -198,6 +212,17 @@ def load_alignment_checkpoint(
         raise ValueError("unsupported alignment checkpoint")
     if payload.get("alignment_config") != adapter.config():
         raise ValueError("alignment checkpoint config does not match Adapter")
+    data_manifest_sha256 = _require_sha256(
+        payload.get("data_manifest_sha256"),
+        field="alignment checkpoint data_manifest_sha256",
+    )
+    if expected_data_manifest_sha256 is not None:
+        expected_data_manifest_sha256 = _require_sha256(
+            expected_data_manifest_sha256,
+            field="expected_data_manifest_sha256",
+        )
+        if data_manifest_sha256 != expected_data_manifest_sha256:
+            raise ValueError("alignment checkpoint data manifest hash mismatch")
     if expected_base_checkpoint_sha256 is not None and payload.get("base_checkpoint_sha256") != expected_base_checkpoint_sha256:
         raise ValueError("alignment checkpoint base hash mismatch")
     state = payload.get("adapter")

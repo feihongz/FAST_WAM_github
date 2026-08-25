@@ -176,6 +176,7 @@ def test_alignment_checkpoint_roundtrip(tmp_path):
         tmp_path / "alignment.pt",
         adapter,
         base_checkpoint="base.pt",
+        data_manifest_sha256="d" * 64,
         base_checkpoint_sha256="a" * 64,
         global_step=7,
     )
@@ -184,10 +185,54 @@ def test_alignment_checkpoint_roundtrip(tmp_path):
         path,
         restored,
         expected_base_checkpoint_sha256="a" * 64,
+        expected_data_manifest_sha256="d" * 64,
     )
+    assert payload["schema_version"] == 2
+    assert payload["data_manifest_sha256"] == "d" * 64
     assert payload["global_step"] == 7
     for key, value in adapter.state_dict().items():
         assert torch.equal(value, restored.state_dict()[key])
+
+
+def test_alignment_checkpoint_requires_valid_data_manifest_sha256(tmp_path):
+    adapter = make_adapter()
+    with pytest.raises(TypeError, match="data_manifest_sha256"):
+        save_alignment_checkpoint(
+            tmp_path / "missing.pt",
+            adapter,
+            base_checkpoint="base.pt",
+        )
+    with pytest.raises(ValueError, match="64 lowercase hex"):
+        save_alignment_checkpoint(
+            tmp_path / "invalid.pt",
+            adapter,
+            base_checkpoint="base.pt",
+            data_manifest_sha256="D" * 64,
+        )
+
+
+def test_alignment_checkpoint_load_rejects_missing_or_mismatched_data_manifest(
+    tmp_path,
+):
+    adapter = make_adapter()
+    path = save_alignment_checkpoint(
+        tmp_path / "alignment.pt",
+        adapter,
+        base_checkpoint="base.pt",
+        data_manifest_sha256="d" * 64,
+    )
+    with pytest.raises(ValueError, match="data manifest hash mismatch"):
+        load_alignment_checkpoint(
+            path,
+            make_adapter(),
+            expected_data_manifest_sha256="e" * 64,
+        )
+
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    del payload["data_manifest_sha256"]
+    torch.save(payload, path)
+    with pytest.raises(ValueError, match="data_manifest_sha256"):
+        load_alignment_checkpoint(path, make_adapter())
 
 
 def _tiny_strict_base_model():

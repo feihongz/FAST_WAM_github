@@ -53,6 +53,16 @@ from .trainer import AlignmentVelocityModule
 logger = get_logger(__name__)
 
 
+def _require_sha256(value: Any, *, field: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{field} must contain exactly 64 lowercase hex chars")
+    return value
+
+
 def _plain_config(config: Any) -> dict[str, Any]:
     if OmegaConf.is_config(config):
         config = OmegaConf.to_container(config, resolve=True)
@@ -112,6 +122,10 @@ class Stage3AlignmentTrainer:
             for name, identity in (asset_identities or {}).items()
         }
         self.data_identity = dict(data_identity or {})
+        self.data_manifest_sha256 = _require_sha256(
+            self.data_identity.get("sha256"),
+            field="data_identity.sha256",
+        )
         self.training_cfg = dict(self.config["training"])
         self.stage3_cfg = dict(self.config["stage3"])
         self.checkpoint_cfg = dict(self.config["checkpoint"])
@@ -371,7 +385,7 @@ class Stage3AlignmentTrainer:
                         self.asset_identities.items()
                     )
                 },
-                "data_manifest_sha256": self.data_identity.get("sha256"),
+                "data_manifest_sha256": self.data_manifest_sha256,
                 "git_tracked_dirty": self.git_identity.tracked_dirty,
                 "git_untracked_source_files": list(
                     self.git_identity.untracked_source_files
@@ -777,6 +791,7 @@ class Stage3AlignmentTrainer:
                 export_in_state,
                 adapter,
                 base_checkpoint=self.base_identity.path,
+                data_manifest_sha256=self.data_manifest_sha256,
                 base_checkpoint_sha256=self.base_identity.sha256,
                 global_step=self.global_step,
                 adapter_state_dict=adapter_state,
