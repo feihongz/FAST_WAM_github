@@ -46,3 +46,10 @@ def test_trainer_rejects_detached_self_velocity():
     zeros = torch.zeros(1, 2, 2)
     with pytest.raises(RuntimeError, match="computation graph"):
         trainer.step(zeros, zeros, zeros, zeros)
+
+
+def test_trainer_rejects_optimizer_with_base_parameters():
+    model = TinyAlignedModel()
+    optimizer = torch.optim.AdamW(model.parameters())
+    with pytest.raises(ValueError, match="optimizer parameters"):
+        AlignmentTrainer(model, optimizer=optimizer)

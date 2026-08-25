@@ -46,6 +46,7 @@ def stage3_alignment_loss(
     v_target: torch.Tensor,
     action_is_pad: torch.Tensor | None = None,
     *,
+    action_weight: torch.Tensor | None = None,
     helpful_relative_margin: float = 0.05,
     lambda_action: float = 1.0,
     lambda_align: float = 1.0,
@@ -65,13 +66,24 @@ def stage3_alignment_loss(
     e0 = _per_sample_mse(v0, v_target, valid)
     egt = _per_sample_mse(v_gt, v_target, valid)
     eself = _per_sample_mse(v_self, v_target, valid)
+    if action_weight is None:
+        action_weight = torch.ones_like(eself)
+    else:
+        action_weight = action_weight.to(device=eself.device, dtype=eself.dtype)
+        if action_weight.ndim == 0:
+            action_weight = action_weight.expand_as(eself)
+        if action_weight.ndim != 1 or action_weight.shape != eself.shape:
+            raise ValueError(
+                f"action_weight must be scalar or have shape {tuple(eself.shape)}, "
+                f"got {tuple(action_weight.shape)}"
+            )
+        if not torch.isfinite(action_weight).all() or (action_weight < 0).any():
+            raise ValueError("action_weight must be finite and non-negative")
     helpful = egt < ((1.0 - helpful_relative_margin) * e0).detach()
     target_delta = helpful.to(dtype=v_self.dtype).view(-1, 1, 1) * (v_gt.detach() - v0.detach())
     delta = v_self - v0.detach()
-    alignment_token = (delta - target_delta).square().mean(dim=-1)
-    valid_f = valid.to(dtype=alignment_token.dtype)
-    alignment_loss = (alignment_token * valid_f).sum() / valid_f.sum().clamp_min(1.0)
+    alignment_loss = _per_sample_mse(delta, target_delta, valid).mean()
     safe_loss = torch.relu(eself - e0.detach()).mean()
-    action_loss = eself.mean()
+    action_loss = (eself * action_weight).mean()
     loss = lambda_action * action_loss + lambda_align * alignment_loss + lambda_safe * safe_loss
     return Stage3LossOutput(loss, action_loss, alignment_loss, safe_loss, helpful.float().mean(), e0, egt, eself)

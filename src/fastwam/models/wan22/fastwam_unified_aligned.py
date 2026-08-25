@@ -67,11 +67,11 @@ class FastWAMUnifiedAligned(FastWAMUnifiedShared):
         if str(getattr(self, "_unified_inference_mode", "wo")) != "w":
             return base_action_velocity
         correction = self.alignment_adapter(
-            action_tokens=action_tokens,
-            video_tokens=video_tokens,
+            action_tokens=action_tokens.detach(),
+            video_tokens=video_tokens.detach(),
             video_meta=video_pre.get("meta"),
         )
-        return base_action_velocity + correction.to(
+        return base_action_velocity.detach() + correction.to(
             device=base_action_velocity.device,
             dtype=base_action_velocity.dtype,
         )

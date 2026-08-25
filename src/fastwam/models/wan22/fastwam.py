@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Any, Optional, Sequence, Union
 
 import torch
@@ -13,6 +14,18 @@ from .mot import MoT
 from .schedulers.scheduler_continuous import WanContinuousFlowMatchScheduler
 
 logger = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class FrozenJointPrediction:
+    """Frozen joint-base outputs needed by inference and Adapter training."""
+
+    video_velocity: torch.Tensor
+    action_velocity: torch.Tensor
+    video_tokens: torch.Tensor
+    action_tokens: torch.Tensor
+    video_pre: dict[str, Any]
+    action_pre: dict[str, Any]
 
 
 class FastWAM(torch.nn.Module):
@@ -587,7 +600,7 @@ class FastWAM(torch.nn.Module):
         return base_action_velocity
 
     @torch.no_grad()
-    def _predict_joint_noise(
+    def _predict_joint_base(
         self,
         latents_video: torch.Tensor,
         latents_action: torch.Tensor,
@@ -597,7 +610,7 @@ class FastWAM(torch.nn.Module):
         context_mask: torch.Tensor,
         fuse_vae_embedding_in_latents: bool,
         gt_action: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> FrozenJointPrediction:
         video_pre = self.video_expert.pre_dit(
             x=latents_video,
             timestep=timestep_video,
@@ -648,14 +661,45 @@ class FastWAM(torch.nn.Module):
 
         pred_video = self.video_expert.post_dit(tokens_out["video"], video_pre)
         pred_action_base = self.action_expert.post_dit(tokens_out["action"], action_pre)
-        pred_action = self._apply_action_velocity_hook(
-            pred_action_base,
-            action_tokens=tokens_out["action"],
+        return FrozenJointPrediction(
+            video_velocity=pred_video,
+            action_velocity=pred_action_base,
             video_tokens=tokens_out["video"],
-            action_pre=action_pre,
+            action_tokens=tokens_out["action"],
             video_pre=video_pre,
+            action_pre=action_pre,
         )
-        return pred_video, pred_action
+
+    @torch.no_grad()
+    def _predict_joint_noise(
+        self,
+        latents_video: torch.Tensor,
+        latents_action: torch.Tensor,
+        timestep_video: torch.Tensor,
+        timestep_action: torch.Tensor,
+        context: torch.Tensor,
+        context_mask: torch.Tensor,
+        fuse_vae_embedding_in_latents: bool,
+        gt_action: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        prediction = self._predict_joint_base(
+            latents_video=latents_video,
+            latents_action=latents_action,
+            timestep_video=timestep_video,
+            timestep_action=timestep_action,
+            context=context,
+            context_mask=context_mask,
+            fuse_vae_embedding_in_latents=fuse_vae_embedding_in_latents,
+            gt_action=gt_action,
+        )
+        pred_action = self._apply_action_velocity_hook(
+            prediction.action_velocity,
+            action_tokens=prediction.action_tokens,
+            video_tokens=prediction.video_tokens,
+            action_pre=prediction.action_pre,
+            video_pre=prediction.video_pre,
+        )
+        return prediction.video_velocity, pred_action
 
     @torch.no_grad()
     def _predict_action_noise(

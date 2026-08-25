@@ -34,4 +34,7 @@ def shared_action_noise(*, shape: tuple[int, ...], seed: int,
 def perturb_with_shared_noise(latent: torch.Tensor, noise: torch.Tensor, sigma: float) -> torch.Tensor:
     if latent.shape != noise.shape:
         raise ValueError("latent and shared noise must have identical shapes")
-    return latent + float(sigma) * noise
+    sigma_value = float(sigma)
+    if not 0.0 <= sigma_value <= 1.0:
+        raise ValueError(f"sigma must be in [0,1], got {sigma_value}")
+    return (1.0 - sigma_value) * latent + sigma_value * noise

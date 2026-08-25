@@ -37,6 +37,20 @@ class AlignmentTrainer:
             )
         self.model = model
         self.optimizer = optimizer or torch.optim.AdamW(params, lr=lr)
+        expected_param_ids = [id(parameter) for parameter in params]
+        optimizer_param_ids = [
+            id(parameter)
+            for group in self.optimizer.param_groups
+            for parameter in group["params"]
+        ]
+        if (
+            len(optimizer_param_ids) != len(set(optimizer_param_ids))
+            or set(optimizer_param_ids) != set(expected_param_ids)
+        ):
+            raise ValueError(
+                "optimizer parameters must be exactly the trainable "
+                "alignment_adapter parameters"
+            )
         self.global_step = 0
 
     def step(
