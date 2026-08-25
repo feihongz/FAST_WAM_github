@@ -33,6 +33,8 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
 
         # sampling
         global_sample_stride: int = 1,
+        video_backend: str | None = None,
+        strict_data_mode: bool = False,
     ):
         assert len(dataset_dirs) > 0, "At least one dataset directory is required"
         assert past_action_size == 0
@@ -60,6 +62,7 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
 
         self.val_set_proportion = val_set_proportion
         self.is_training_set = is_training_set
+        self.strict_data_mode = bool(strict_data_mode)
 
         self.image_meta = shape_meta["images"]
         self.state_meta = shape_meta["state"]
@@ -105,6 +108,8 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
             dataset_dirs=self.dataset_dirs,
             episodes=episodes,
             delta_timestamps=delta_timestamps,
+            video_backend=video_backend,
+            allow_video_backend_fallback=not self.strict_data_mode,
         )
         
         # HACK: lerobot 3.0 will fix this
@@ -184,12 +189,17 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
         sample_idx = idx
         attempt = 0
         last_exception: Optional[Exception] = None
-        while attempt < MAX_GETITEM_ATTEMPT:
+        max_attempts = 1 if self.strict_data_mode else MAX_GETITEM_ATTEMPT
+        while attempt < max_attempts:
             try:
                 lerobot_sample = self.multi_dataset[sample_idx]
                 lerobot_sample = self._split_lerobot_sample(lerobot_sample)
                 break
             except Exception as err:
+                if self.strict_data_mode:
+                    raise RuntimeError(
+                        f"strict data mode failed to load requested index {idx}"
+                    ) from err
                 attempt += 1
                 last_exception = err
                 logger.warning(

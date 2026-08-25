@@ -353,6 +353,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         force_cache_sync: bool = False,
         download_videos: bool = True,
         video_backend: str | None = None,
+        allow_video_backend_fallback: bool = True,
         video_codec: Literal["h264", "hevc", "libsvtav1", "h264_nvenc"] = "libsvtav1", 
         is_compute_episode_stats_image: bool = True,
     ):
@@ -466,6 +467,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         self.tolerance_s = tolerance_s
         self.revision = revision if revision else CODEBASE_VERSION
         self.video_backend = video_backend if video_backend else get_safe_default_codec()
+        self.allow_video_backend_fallback = bool(allow_video_backend_fallback)
         self.video_codec = video_codec
         self.is_compute_episode_stats_image = is_compute_episode_stats_image
         self.delta_indices = None
@@ -732,7 +734,13 @@ class LeRobotDataset(torch.utils.data.Dataset):
         item = {}
         for vid_key, query_ts in query_timestamps.items():
             video_path = self.root / self.meta.get_video_file_path(ep_idx, vid_key)
-            frames = decode_video_frames(video_path, query_ts, self.tolerance_s, self.video_backend)
+            frames = decode_video_frames(
+                video_path,
+                query_ts,
+                self.tolerance_s,
+                self.video_backend,
+                allow_fallback=self.allow_video_backend_fallback,
+            )
             item[vid_key] = frames.squeeze(0)
 
         return item
@@ -1091,6 +1099,7 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
         tolerances_s: dict | None = None,
         download_videos: bool = True,
         video_backend: str | None = None,
+        allow_video_backend_fallback: bool = True,
     ):
         super().__init__()
         self.dataset_dirs = dataset_dirs
@@ -1113,6 +1122,7 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
                     tolerance_s=self.tolerances_s[ds_name],
                     download_videos=download_videos,
                     video_backend=video_backend,
+                    allow_video_backend_fallback=allow_video_backend_fallback,
                 )
                 self._datasets.append(_dataset)
             except Exception as e:

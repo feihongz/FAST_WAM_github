@@ -76,6 +76,24 @@ class PreparedStage3Batch:
 
 
 @dataclass(frozen=True)
+class Stage3FrozenPanel:
+    """Detached base outputs passed to the distributed Adapter forward."""
+
+    v0: torch.Tensor
+    v_gt: torch.Tensor
+    self_base_velocity: torch.Tensor
+    self_action_tokens: torch.Tensor
+    self_video_tokens: torch.Tensor
+    self_video_meta: Mapping[str, Any] | None
+    v_target: torch.Tensor
+    action_weight: torch.Tensor
+    action_is_pad: torch.Tensor | None
+    k: int
+    video_sigma: torch.Tensor
+    action_sigma: torch.Tensor
+
+
+@dataclass(frozen=True)
 class Stage3VelocityPanel:
     """The three shared-action-noise velocity branches consumed by the loss."""
 
@@ -474,13 +492,14 @@ def validate_video_only_joint_equivalence(
             adapter.train(adapter_was_training)
 
 
-def compute_stage3_velocity_panel(
+@torch.no_grad()
+def compute_stage3_frozen_panel(
     model: Any,
     prepared: PreparedStage3Batch,
-) -> Stage3VelocityPanel:
-    """Compute detached wo/GT anchors and one differentiable self branch."""
+) -> Stage3FrozenPanel:
+    """Compute every frozen branch without invoking the trainable Adapter."""
 
-    with torch.no_grad(), _unified_mode(model, "wo"):
+    with _unified_mode(model, "wo"):
         v0 = model._predict_wo_action_noise(
             first_frame_latents=prepared.first_frame_latents,
             latents_action=prepared.noisy_action,
@@ -492,7 +511,7 @@ def compute_stage3_velocity_panel(
             ),
         ).detach()
 
-    with torch.no_grad(), _unified_mode(model, "w"):
+    with _unified_mode(model, "w"):
         gt_prediction = model._predict_joint_base(
             latents_video=prepared.z_gt_k,
             latents_action=prepared.noisy_action,
@@ -526,30 +545,28 @@ def compute_stage3_velocity_panel(
         self_video_meta = self_prediction.video_pre.get("meta")
         del self_prediction
 
-    with _unified_mode(model, "w"):
-        v_self = model._apply_action_velocity_hook(
-            self_action_velocity,
-            action_tokens=self_action_tokens,
-            video_tokens=self_video_tokens,
-            action_pre={},
-            video_pre={"meta": self_video_meta},
-        )
-
     expected_shape = prepared.action_target.shape
-    for name, value in {"v0": v0, "v_gt": v_gt, "v_self": v_self}.items():
+    for name, value in {
+        "v0": v0,
+        "v_gt": v_gt,
+        "self_base_velocity": self_action_velocity,
+    }.items():
         if value.shape != expected_shape:
             raise ValueError(
                 f"{name} must have shape {tuple(expected_shape)}, "
                 f"got {tuple(value.shape)}"
             )
-    if v0.requires_grad or v_gt.requires_grad or prepared.action_target.requires_grad:
-        raise RuntimeError("v0, v_gt, and v_target must be detached")
-    if not v_self.requires_grad:
-        raise RuntimeError("v_self must retain the alignment Adapter graph")
-    return Stage3VelocityPanel(
+        if value.requires_grad:
+            raise RuntimeError(f"{name} must be detached")
+    if prepared.action_target.requires_grad:
+        raise RuntimeError("v_target must be detached")
+    return Stage3FrozenPanel(
         v0=v0,
         v_gt=v_gt,
-        v_self=v_self,
+        self_base_velocity=self_action_velocity,
+        self_action_tokens=self_action_tokens,
+        self_video_tokens=self_video_tokens,
+        self_video_meta=self_video_meta,
         v_target=prepared.action_target,
         action_weight=prepared.action_weight,
         action_is_pad=prepared.action_is_pad,
@@ -557,6 +574,51 @@ def compute_stage3_velocity_panel(
         video_sigma=prepared.video_sigma,
         action_sigma=prepared.action_sigma,
     )
+
+
+def complete_stage3_velocity_panel(
+    frozen: Stage3FrozenPanel,
+    v_self: torch.Tensor,
+) -> Stage3VelocityPanel:
+    """Combine detached base outputs with one differentiable Adapter result."""
+
+    expected_shape = frozen.v_target.shape
+    if v_self.shape != expected_shape:
+        raise ValueError(
+            f"v_self must have shape {tuple(expected_shape)}, "
+            f"got {tuple(v_self.shape)}"
+        )
+    if not v_self.requires_grad:
+        raise RuntimeError("v_self must retain the alignment Adapter graph")
+    return Stage3VelocityPanel(
+        v0=frozen.v0,
+        v_gt=frozen.v_gt,
+        v_self=v_self,
+        v_target=frozen.v_target,
+        action_weight=frozen.action_weight,
+        action_is_pad=frozen.action_is_pad,
+        k=frozen.k,
+        video_sigma=frozen.video_sigma,
+        action_sigma=frozen.action_sigma,
+    )
+
+
+def compute_stage3_velocity_panel(
+    model: Any,
+    prepared: PreparedStage3Batch,
+) -> Stage3VelocityPanel:
+    """Compute the frozen panel and apply the model's inference Adapter hook."""
+
+    frozen = compute_stage3_frozen_panel(model, prepared)
+    with _unified_mode(model, "w"):
+        v_self = model._apply_action_velocity_hook(
+            frozen.self_base_velocity,
+            action_tokens=frozen.self_action_tokens,
+            video_tokens=frozen.self_video_tokens,
+            action_pre={},
+            video_pre={"meta": frozen.self_video_meta},
+        )
+    return complete_stage3_velocity_panel(frozen, v_self)
 
 def shared_action_noise(*, shape: tuple[int, ...], seed: int,
                         device: torch.device | str = "cpu",

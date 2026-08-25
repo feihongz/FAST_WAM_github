@@ -2,7 +2,10 @@ import pytest
 import torch
 from torch import nn
 
-from fastwam.alignment import AlignmentTrainer
+from fastwam.alignment import AlignmentTrainer, AlignmentVelocityModule
+from fastwam.models.wan22.video_action_alignment import (
+    VideoActionResidualAdapter,
+)
 
 
 class TinyAlignedModel(nn.Module):
@@ -61,3 +64,33 @@ def test_trainer_uses_stage3_optimizer_defaults():
 
     assert trainer.optimizer.param_groups[0]["weight_decay"] == pytest.approx(1e-4)
     assert trainer.max_grad_norm == pytest.approx(1.0)
+
+
+def test_velocity_module_contains_only_adapter_and_keeps_base_detached():
+    adapter = VideoActionResidualAdapter(
+        action_hidden_dim=4,
+        video_hidden_dim=6,
+        action_dim=2,
+        bottleneck_dim=4,
+        num_heads=2,
+    )
+    module = AlignmentVelocityModule(adapter)
+    base = torch.randn(1, 3, 2, requires_grad=True)
+    action_tokens = torch.randn(1, 3, 4, requires_grad=True)
+    video_tokens = torch.randn(1, 4, 6, requires_grad=True)
+
+    output = module(
+        base,
+        action_tokens=action_tokens,
+        video_tokens=video_tokens,
+        video_meta={"tokens_per_frame": 2},
+    )
+    output.sum().backward()
+
+    assert set(dict(module.named_parameters())) == {
+        f"adapter.{name}" for name, _ in adapter.named_parameters()
+    }
+    assert base.grad is None
+    assert action_tokens.grad is None
+    assert video_tokens.grad is None
+    assert any(parameter.grad is not None for parameter in adapter.parameters())

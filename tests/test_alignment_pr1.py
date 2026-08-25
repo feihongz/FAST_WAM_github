@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+import pytest
 
 from fastwam.models.wan22.fastwam import FastWAM, FrozenJointPrediction
 from fastwam.models.wan22.fastwam_unified_aligned import FastWAMUnifiedAligned
@@ -187,3 +188,51 @@ def test_alignment_checkpoint_roundtrip(tmp_path):
     assert payload["global_step"] == 7
     for key, value in adapter.state_dict().items():
         assert torch.equal(value, restored.state_dict()[key])
+
+
+def _tiny_strict_base_model():
+    model = nn.Module.__new__(FastWAMUnifiedAligned)
+    nn.Module.__init__(model)
+    model.mot = nn.Linear(3, 3)
+    model.proprio_encoder = nn.Linear(2, 3)
+    model.alignment_adapter = make_adapter()
+    return model
+
+
+def test_strict_frozen_base_loads_mot_and_proprio_only(tmp_path):
+    source = _tiny_strict_base_model()
+    checkpoint = tmp_path / "base.pt"
+    torch.save(
+        {
+            "mot": source.mot.state_dict(),
+            "proprio_encoder": source.proprio_encoder.state_dict(),
+            "step": 21700,
+            "torch_dtype": "torch.bfloat16",
+        },
+        checkpoint,
+    )
+
+    target = _tiny_strict_base_model()
+    adapter_before = {
+        name: value.detach().clone()
+        for name, value in target.alignment_adapter.state_dict().items()
+    }
+    metadata = target.load_frozen_base_checkpoint(checkpoint)
+
+    assert metadata["step"] == 21700
+    for name, value in source.mot.state_dict().items():
+        assert torch.equal(value, target.mot.state_dict()[name])
+    for name, value in source.proprio_encoder.state_dict().items():
+        assert torch.equal(value, target.proprio_encoder.state_dict()[name])
+    for name, value in adapter_before.items():
+        assert torch.equal(value, target.alignment_adapter.state_dict()[name])
+    assert all(not parameter.requires_grad for parameter in target.mot.parameters())
+
+
+def test_strict_frozen_base_rejects_missing_proprio(tmp_path):
+    model = _tiny_strict_base_model()
+    checkpoint = tmp_path / "base.pt"
+    torch.save({"mot": model.mot.state_dict()}, checkpoint)
+
+    with pytest.raises(ValueError, match="proprio_encoder"):
+        model.load_frozen_base_checkpoint(checkpoint)

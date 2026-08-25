@@ -7,6 +7,8 @@ from typing import Any, Mapping
 import torch
 from torch import nn
 
+from fastwam.models.wan22.video_action_alignment import apply_alignment_velocity
+
 from .losses import Stage3LossOutput, stage3_alignment_loss
 from .rollout import (
     STAGE3_SOLVER_STEPS,
@@ -14,6 +16,30 @@ from .rollout import (
     compute_stage3_velocity_panel,
     prepare_stage3_batch,
 )
+
+
+class AlignmentVelocityModule(nn.Module):
+    """The only module handed to Accelerate/DeepSpeed for Stage 3."""
+
+    def __init__(self, adapter: nn.Module):
+        super().__init__()
+        self.adapter = adapter
+
+    def forward(
+        self,
+        base_action_velocity: torch.Tensor,
+        *,
+        action_tokens: torch.Tensor,
+        video_tokens: torch.Tensor,
+        video_meta: Mapping[str, Any] | None,
+    ) -> torch.Tensor:
+        return apply_alignment_velocity(
+            self.adapter,
+            base_action_velocity,
+            action_tokens=action_tokens,
+            video_tokens=video_tokens,
+            video_meta=video_meta,
+        )
 
 
 class AlignmentTrainer:

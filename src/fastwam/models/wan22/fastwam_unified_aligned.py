@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import torch
 from torch import nn
 
 from .fastwam_unified_shared import FastWAMUnifiedShared
-from .video_action_alignment import VideoActionResidualAdapter
+from .video_action_alignment import (
+    VideoActionResidualAdapter,
+    apply_alignment_velocity,
+)
 
 
 class FastWAMUnifiedAligned(FastWAMUnifiedShared):
@@ -55,6 +59,41 @@ class FastWAMUnifiedAligned(FastWAMUnifiedShared):
         ).to(device=self.device, dtype=self.torch_dtype)
         self.alignment_config = self.alignment_adapter.config()
 
+    def load_frozen_base_checkpoint(self, path: str | Path) -> dict[str, Any]:
+        """Strictly load the frozen UnifiedShared base without touching Adapter.
+
+        The formal Stage 3 launcher verifies the file SHA256 before calling this
+        method. Requiring an exact MoT/proprio state here prevents a nominally
+        compatible checkpoint from silently leaving random base parameters.
+        """
+
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+        if not isinstance(payload, dict) or not isinstance(payload.get("mot"), dict):
+            raise ValueError("Stage 3 base checkpoint must contain a `mot` state")
+        self.mot.load_state_dict(payload["mot"], strict=True)
+
+        if self.proprio_encoder is not None:
+            proprio_state = payload.get("proprio_encoder")
+            if not isinstance(proprio_state, dict):
+                raise ValueError(
+                    "Stage 3 base checkpoint must contain `proprio_encoder` "
+                    "for a proprio-conditioned model"
+                )
+            self.proprio_encoder.load_state_dict(proprio_state, strict=True)
+        elif "proprio_encoder" in payload:
+            raise ValueError(
+                "Stage 3 base checkpoint contains proprio weights but the "
+                "configured model has proprio_dim=None"
+            )
+
+        metadata = {
+            "step": payload.get("step"),
+            "torch_dtype": payload.get("torch_dtype"),
+        }
+        del payload
+        self.configure_alignment_training()
+        return metadata
+
     def _apply_action_velocity_hook(
         self,
         base_action_velocity: torch.Tensor,
@@ -66,14 +105,12 @@ class FastWAMUnifiedAligned(FastWAMUnifiedShared):
     ) -> torch.Tensor:
         if str(getattr(self, "_unified_inference_mode", "wo")) != "w":
             return base_action_velocity
-        correction = self.alignment_adapter(
-            action_tokens=action_tokens.detach(),
-            video_tokens=video_tokens.detach(),
+        return apply_alignment_velocity(
+            self.alignment_adapter,
+            base_action_velocity,
+            action_tokens=action_tokens,
+            video_tokens=video_tokens,
             video_meta=video_pre.get("meta"),
-        )
-        return base_action_velocity.detach() + correction.to(
-            device=base_action_velocity.device,
-            dtype=base_action_velocity.dtype,
         )
 
     def configure_alignment_training(self) -> set[str]:

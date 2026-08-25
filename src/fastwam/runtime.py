@@ -369,6 +369,63 @@ def create_fastwam_unified_shared(
     return FastWAMUnifiedShared.from_wan22_pretrained(**kwargs)
 
 
+def create_fastwam_unified_aligned(
+    model_id: str,
+    tokenizer_model_id: str,
+    video_dit_config,
+    tokenizer_max_len: int = 512,
+    load_text_encoder: bool = True,
+    proprio_dim: int | None = None,
+    action_dit_config=None,
+    action_dit_pretrained_path: str | None = None,
+    skip_dit_load_from_pretrain: bool = False,
+    video_scheduler=None,
+    action_scheduler=None,
+    loss=None,
+    alignment_config=None,
+    mot_checkpoint_mixed_attn: bool = True,
+    redirect_common_files: bool = True,
+    model_dtype: torch.dtype = torch.bfloat16,
+    device: str = "cuda",
+):
+    """Create the Stage 3 aligned model without changing UnifiedShared."""
+
+    from .models.wan22.fastwam_unified_aligned import FastWAMUnifiedAligned
+
+    kwargs = _fastwam_creator_kwargs(
+        model_id=model_id,
+        tokenizer_model_id=tokenizer_model_id,
+        video_dit_config=video_dit_config,
+        tokenizer_max_len=tokenizer_max_len,
+        load_text_encoder=load_text_encoder,
+        proprio_dim=proprio_dim,
+        action_dit_config=action_dit_config,
+        action_dit_pretrained_path=action_dit_pretrained_path,
+        skip_dit_load_from_pretrain=skip_dit_load_from_pretrain,
+        video_scheduler=video_scheduler,
+        action_scheduler=action_scheduler,
+        loss=loss,
+        mot_checkpoint_mixed_attn=mot_checkpoint_mixed_attn,
+        redirect_common_files=redirect_common_files,
+        model_dtype=model_dtype,
+        device=device,
+    )
+    if isinstance(alignment_config, DictConfig):
+        alignment_config = OmegaConf.to_container(
+            alignment_config,
+            resolve=True,
+        )
+    if alignment_config is not None and not isinstance(alignment_config, dict):
+        raise ValueError(
+            "alignment_config must resolve to a dict or null, "
+            f"got {type(alignment_config)}"
+        )
+    return FastWAMUnifiedAligned.from_wan22_pretrained(
+        alignment_config=alignment_config,
+        **kwargs,
+    )
+
+
 def create_fastwam_unified_two_action(
     model_id: str,
     tokenizer_model_id: str,

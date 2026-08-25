@@ -123,6 +123,27 @@ class VideoActionResidualAdapter(nn.Module):
         return self.output_proj(hidden + self.ffn(hidden))
 
 
+def apply_alignment_velocity(
+    adapter: nn.Module,
+    base_action_velocity: torch.Tensor,
+    *,
+    action_tokens: torch.Tensor,
+    video_tokens: torch.Tensor,
+    video_meta: Mapping[str, Any] | None,
+) -> torch.Tensor:
+    """Apply the shared Stage 3 residual used by training and w inference."""
+
+    correction = adapter(
+        action_tokens=action_tokens.detach(),
+        video_tokens=video_tokens.detach(),
+        video_meta=video_meta,
+    )
+    return base_action_velocity.detach() + correction.to(
+        device=base_action_velocity.device,
+        dtype=base_action_velocity.dtype,
+    )
+
+
 def save_alignment_checkpoint(
     path: str | Path,
     adapter: VideoActionResidualAdapter,
@@ -130,17 +151,30 @@ def save_alignment_checkpoint(
     base_checkpoint: str,
     base_checkpoint_sha256: str | None = None,
     global_step: int | None = None,
+    adapter_state_dict: Mapping[str, torch.Tensor] | None = None,
+    git_commit: str | None = None,
+    training_contract_sha256: str | None = None,
+    asset_identities: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> Path:
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
+    state = adapter.state_dict() if adapter_state_dict is None else adapter_state_dict
+    state = {
+        str(name): value.detach().to(device="cpu")
+        for name, value in state.items()
+    }
     torch.save(
         {
             "schema_version": ALIGNMENT_CHECKPOINT_SCHEMA_VERSION,
-            "adapter": adapter.state_dict(),
+            "kind": "stage3_alignment_export",
+            "adapter": state,
             "base_checkpoint": str(base_checkpoint),
             "base_checkpoint_sha256": base_checkpoint_sha256,
             "alignment_config": adapter.config(),
             "global_step": None if global_step is None else int(global_step),
+            "git_commit": git_commit,
+            "training_contract_sha256": training_contract_sha256,
+            "asset_identities": dict(asset_identities or {}),
         },
         output,
     )
@@ -155,7 +189,12 @@ def load_alignment_checkpoint(
     map_location: str | torch.device = "cpu",
 ) -> dict[str, Any]:
     payload = torch.load(path, map_location=map_location)
-    if not isinstance(payload, dict) or int(payload.get("schema_version", -1)) != ALIGNMENT_CHECKPOINT_SCHEMA_VERSION:
+    if (
+        not isinstance(payload, dict)
+        or int(payload.get("schema_version", -1))
+        != ALIGNMENT_CHECKPOINT_SCHEMA_VERSION
+        or payload.get("kind") != "stage3_alignment_export"
+    ):
         raise ValueError("unsupported alignment checkpoint")
     if payload.get("alignment_config") != adapter.config():
         raise ValueError("alignment checkpoint config does not match Adapter")

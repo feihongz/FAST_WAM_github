@@ -44,6 +44,7 @@ def decode_video_frames(
     timestamps: list[float],
     tolerance_s: float,
     backend: str | None = None,
+    allow_fallback: bool = True,
 ) -> torch.Tensor:
     """
     Decodes video frames using the specified backend.
@@ -65,6 +66,10 @@ def decode_video_frames(
         try:
             return decode_video_frames_torchcodec(video_path, timestamps, tolerance_s)
         except Exception as err:
+            if not allow_fallback:
+                raise RuntimeError(
+                    f"torchcodec video decode failed for {video_path}"
+                ) from err
             warnings.warn(
                 f"torchcodec video decode failed ({type(err).__name__}: {err}); falling back to torchvision/pyav."
             )

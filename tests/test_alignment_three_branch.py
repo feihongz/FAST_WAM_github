@@ -12,6 +12,8 @@ from fastwam.alignment.rollout import (
     SolverPanel,
     Stage3VelocityPanel,
     build_solver_panel,
+    complete_stage3_velocity_panel,
+    compute_stage3_frozen_panel,
     compute_stage3_velocity_panel,
     prepare_stage3_batch,
     rollout_self_video,
@@ -357,6 +359,34 @@ def test_velocity_panel_shares_action_state_and_keeps_only_adapter_graph():
     torch.testing.assert_close(velocity.video_sigma, prepared.video_sigma)
     torch.testing.assert_close(velocity.action_sigma, prepared.action_sigma)
 
+    velocity.v_self.sum().backward()
+    assert model.alignment_adapter.scale.grad is not None
+
+
+def test_frozen_panel_does_not_invoke_adapter_and_can_be_completed():
+    model = _MockAlignedModel()
+    prepared = prepare_stage3_batch(
+        model,
+        {"sample_id": "mock"},
+        k=3,
+        video_noise=_video_noise(),
+        action_noise=_action_noise(),
+    )
+
+    frozen = compute_stage3_frozen_panel(model, prepared)
+
+    assert model.hook_calls == []
+    assert frozen.v0.requires_grad is False
+    assert frozen.v_gt.requires_grad is False
+    assert frozen.self_base_velocity.requires_grad is False
+    assert frozen.self_action_tokens.requires_grad is False
+    assert frozen.self_video_tokens.requires_grad is False
+    pooled_video = frozen.self_video_tokens.mean(dim=1, keepdim=True)
+    v_self = frozen.self_base_velocity + model.alignment_adapter(
+        frozen.self_action_tokens + pooled_video
+    )
+    velocity = complete_stage3_velocity_panel(frozen, v_self)
+    assert velocity.v_self.requires_grad is True
     velocity.v_self.sum().backward()
     assert model.alignment_adapter.scale.grad is not None
 

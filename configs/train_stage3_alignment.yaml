@@ -1,0 +1,74 @@
+# @package _global_
+
+defaults:
+  - _self_
+  - data: null
+  - model: null
+  - task: null
+
+output_dir: ./runs/stage3_alignment/${now:%Y-%m-%d}_${now:%H-%M-%S}
+
+base:
+  checkpoint: ???
+  expected_sha256: ???
+
+assets:
+  vae:
+    path: ???
+    expected_sha256: ???
+  normalization_stats:
+    path: ???
+    expected_sha256: ???
+
+data_manifest:
+  path: ""
+  expected_sha256: ""
+  full_content_verify: true
+
+stage3:
+  num_solver_steps: 10
+  sigma_shift: null
+  k_sampling: uniform
+  helpful_relative_margin: 0.05
+  lambda_action: 1.0
+  lambda_align: 1.0
+  lambda_safe: 0.5
+
+training:
+  batch_size: 1
+  num_workers: 0
+  drop_last: true
+  gradient_accumulation_steps: 8
+  mixed_precision: bf16
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+  betas: [0.9, 0.95]
+  max_grad_norm: 1.0
+  num_epochs: 10
+  max_steps: null
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.05
+  seed: 42
+
+checkpoint:
+  save_every: 1000
+  keep_last: 3
+  save_final: true
+  strict_resume: true
+  resume: null
+
+runtime:
+  log_every: 10
+  repo_dir: null
+  require_clean_git: true
+  require_cuda: true
+  expected_dataset_length: ???
+  expected_dataset_episodes: ???
+  required_environment: {}
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null
