@@ -279,6 +279,7 @@ def _full_source() -> tuple[RobotVideoDataset, _CurrentProcessor]:
     source.override_instruction = None
     source.text_embedding_cache_dir = "/fake/text-cache"
     source.context_len = 3
+    source.text_context_cache_max_entries = 128
     source.resize_transform = _IdentityTransform()
     source.crop_transform = _IdentityTransform()
     source.normalize_transform = _IdentityTransform()
@@ -319,6 +320,7 @@ def test_current_only_matches_full_t0_and_caches_text_without_aliasing(
     assert _FakeCurrentBase.init_kwargs["action_size"] == 0
     assert _FakeCurrentBase.init_kwargs["load_actions"] is False
     assert _FakeCurrentBase.init_kwargs["strict_data_mode"] is True
+    assert current.text_context_cache_max_entries == 128
 
     torch.manual_seed(123)
     first = current[0]
@@ -349,6 +351,125 @@ def test_current_only_matches_full_t0_and_caches_text_without_aliasing(
         "image_is_pad",
         "proprio_is_pad",
     }.isdisjoint(second)
+
+
+def test_current_text_context_cache_is_bounded_lru_and_returns_clones(
+    monkeypatch,
+):
+    source, _ = _full_source()
+    source.text_context_cache_max_entries = 2
+    monkeypatch.setattr(
+        current_module, "BaseLerobotDataset", _FakeCurrentBase
+    )
+    monkeypatch.setattr(current_module.os.path, "isfile", lambda _path: True)
+    load_calls = []
+
+    def fake_load(path, *, map_location):
+        load_calls.append((path, map_location))
+        value = float(len(load_calls))
+        return {
+            "context": torch.full((3, 4), value),
+            "mask": torch.tensor([True, False, True]),
+        }
+
+    monkeypatch.setattr(current_module.torch, "load", fake_load)
+    current = source.current_only()
+
+    current._get_cached_text_context("prompt-0")
+    current._get_cached_text_context("prompt-1")
+    current._get_cached_text_context("prompt-0")
+    current._get_cached_text_context("prompt-2")
+
+    assert len(load_calls) == 3
+    assert tuple(current._text_context_cache) == ("prompt-0", "prompt-2")
+
+    context, mask = current._get_cached_text_context("prompt-2")
+    context.fill_(-1.0)
+    mask.fill_(False)
+    cached_context, cached_mask = current._get_cached_text_context("prompt-2")
+    assert torch.all(cached_context == 3.0)
+    assert cached_mask.tolist() == [True, False, True]
+    assert len(load_calls) == 3
+
+    current._get_cached_text_context("prompt-1")
+    assert len(load_calls) == 4
+    assert tuple(current._text_context_cache) == ("prompt-2", "prompt-1")
+
+    for index in range(3, 35):
+        prompt = f"prompt-{index}"
+        current._get_cached_text_context(prompt)
+        assert len(current._text_context_cache) <= 2
+    assert tuple(current._text_context_cache) == ("prompt-33", "prompt-34")
+
+
+def test_full_dataset_text_context_cache_is_bounded_lru_and_returns_clones(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        robot_module, "BaseLerobotDataset", _FakeCurrentBase
+    )
+    monkeypatch.setattr(robot_module.os, "makedirs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(robot_module.os.path, "exists", lambda _path: True)
+    load_calls = []
+
+    def fake_load(path, *, map_location):
+        load_calls.append((path, map_location))
+        value = float(len(load_calls))
+        return {
+            "context": torch.full((3, 4), value),
+            "mask": torch.tensor([True, False, True]),
+        }
+
+    monkeypatch.setattr(robot_module.torch, "load", fake_load)
+    dataset = RobotVideoDataset(
+        dataset_dirs=["/data/robotwin"],
+        shape_meta=OmegaConf.create(_SHAPE_META),
+        num_frames=5,
+        action_video_freq_ratio=1,
+        text_embedding_cache_dir="/fake/text-cache",
+        context_len=3,
+        text_context_cache_max_entries=2,
+        strict_data_mode=True,
+    )
+
+    context, mask = dataset._get_cached_text_context("prompt-0")
+    context.fill_(-1.0)
+    mask.fill_(False)
+    cached_context, cached_mask = dataset._get_cached_text_context("prompt-0")
+    assert torch.all(cached_context == 1.0)
+    assert cached_mask.tolist() == [True, False, True]
+    assert len(load_calls) == 1
+
+    dataset._get_cached_text_context("prompt-1")
+    dataset._get_cached_text_context("prompt-0")
+    dataset._get_cached_text_context("prompt-2")
+    assert len(load_calls) == 3
+    assert tuple(dataset._text_context_cache) == ("prompt-0", "prompt-2")
+
+    dataset._get_cached_text_context("prompt-1")
+    assert len(load_calls) == 4
+    assert tuple(dataset._text_context_cache) == ("prompt-2", "prompt-1")
+    assert len(dataset._text_context_cache) == 2
+
+
+@pytest.mark.parametrize("cache_limit", [None, True, 1.5, "16"])
+def test_text_context_cache_limit_rejects_non_integer(cache_limit):
+    with pytest.raises(TypeError, match="must be an integer"):
+        RobotVideoDataset(
+            dataset_dirs=["/data/robotwin"],
+            shape_meta=OmegaConf.create(_SHAPE_META),
+            text_context_cache_max_entries=cache_limit,
+        )
+
+
+@pytest.mark.parametrize("cache_limit", [0, -1])
+def test_text_context_cache_limit_rejects_unbounded_or_negative(cache_limit):
+    with pytest.raises(ValueError, match="must be positive"):
+        RobotVideoDataset(
+            dataset_dirs=["/data/robotwin"],
+            shape_meta=OmegaConf.create(_SHAPE_META),
+            text_context_cache_max_entries=cache_limit,
+        )
 
 
 def test_current_only_requires_strict_source_and_never_random_fallback(

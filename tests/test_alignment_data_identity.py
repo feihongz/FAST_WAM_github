@@ -7,13 +7,23 @@ from types import SimpleNamespace
 
 import pytest
 
+import fastwam.alignment.data_identity as data_identity_module
+import fastwam.alignment.text_cache_index as text_cache_index_module
 from fastwam.alignment.data_identity import (
     DATA_MANIFEST_KIND,
+    DATA_MANIFEST_V2_KIND,
+    DATA_MANIFEST_V2_SCHEMA_VERSION,
+    DEFAULT_PROMPT_TEMPLATE,
     LEROBOT_META_PATHS,
+    TEXT_CACHE_FILENAME_SUFFIX_TEMPLATE,
     build_robot_video_dataset_manifest,
     canonical_data_manifest_sha256,
+    require_supported_data_manifest_header,
+    resolve_text_cache_index_descriptor_path,
+    selected_text_cache_prompts,
     validate_robot_video_dataset_manifest,
 )
+from fastwam.alignment.text_cache_index import build_text_cache_index
 
 
 class _FakeMeta:
@@ -321,3 +331,233 @@ def test_validation_detects_file_size_drift_without_rehashing(fake_data):
             normalization_stats_path=stats,
             full_content_verify=False,
         )
+
+
+def _build_v2_cache_index(tmp_path: Path, dataset, *, prompts=None) -> Path:
+    selected = tuple(prompts or selected_text_cache_prompts(dataset))
+    descriptor_path = tmp_path / "identity" / "text.index.json"
+    build_text_cache_index(
+        cache_root=dataset.text_embedding_cache_dir,
+        prompts=selected,
+        context_len=dataset.context_len,
+        prompt_template=DEFAULT_PROMPT_TEMPLATE,
+        filename_suffix=TEXT_CACHE_FILENAME_SUFFIX_TEMPLATE.format(
+            context_len=dataset.context_len
+        ),
+        index_path=tmp_path / "identity" / "text.index",
+        descriptor_path=descriptor_path,
+    )
+    return descriptor_path
+
+
+def test_v2_manifest_uses_external_index_without_touching_cache_payloads(
+    fake_data,
+    tmp_path,
+    monkeypatch,
+):
+    dataset, stats = fake_data
+    descriptor_path = _build_v2_cache_index(tmp_path, dataset)
+    cache_root = Path(dataset.text_embedding_cache_dir).resolve()
+    original_selected_file = data_identity_module._selected_file
+    original_stable_reader = text_cache_index_module._read_stable_regular_file
+
+    def reject_cache_payload_selection(**kwargs):
+        if Path(kwargs["anchor"]).resolve() == cache_root:
+            pytest.fail("v2 manifest must not stat or hash cache payloads")
+        return original_selected_file(**kwargs)
+
+    def reject_cache_payload_open(anchor, relative_path):
+        if Path(anchor).resolve() == cache_root:
+            pytest.fail("v2 manifest must not open cache payloads")
+        return original_stable_reader(anchor, relative_path)
+
+    monkeypatch.setattr(
+        data_identity_module,
+        "_selected_file",
+        reject_cache_payload_selection,
+    )
+    monkeypatch.setattr(
+        text_cache_index_module,
+        "_read_stable_regular_file",
+        reject_cache_payload_open,
+    )
+
+    manifest = build_robot_video_dataset_manifest(
+        dataset,
+        normalization_stats_path=stats,
+        schema_version=DATA_MANIFEST_V2_SCHEMA_VERSION,
+        text_cache_index_descriptor_path=descriptor_path,
+    )
+    assert manifest["kind"] == DATA_MANIFEST_V2_KIND
+    assert "files" not in manifest["text_embedding_cache"]
+    integrity = manifest["text_embedding_cache"]["integrity"]
+    assert [entry["role"] for entry in integrity["files"]] == [
+        "text_cache_index_descriptor",
+        "text_cache_index",
+    ]
+    assert require_supported_data_manifest_header(manifest) == 2
+    assert resolve_text_cache_index_descriptor_path(manifest) == (
+        descriptor_path.resolve()
+    )
+    assert validate_robot_video_dataset_manifest(
+        dataset,
+        manifest,
+        normalization_stats_path=stats,
+    ) == manifest
+
+
+def test_v2_manifest_requires_exact_selected_prompt_coverage(fake_data, tmp_path):
+    dataset, stats = fake_data
+    prompts = selected_text_cache_prompts(dataset)
+    descriptor_path = _build_v2_cache_index(
+        tmp_path,
+        dataset,
+        prompts=prompts[:-1],
+    )
+    with pytest.raises(ValueError, match="prompt count"):
+        build_robot_video_dataset_manifest(
+            dataset,
+            normalization_stats_path=stats,
+            schema_version=DATA_MANIFEST_V2_SCHEMA_VERSION,
+            text_cache_index_descriptor_path=descriptor_path,
+        )
+
+
+def test_manifest_header_dispatch_rejects_bool_and_mixed_pairs(fake_data, tmp_path):
+    dataset, stats = fake_data
+    descriptor_path = _build_v2_cache_index(tmp_path, dataset)
+    manifest = build_robot_video_dataset_manifest(
+        dataset,
+        normalization_stats_path=stats,
+        schema_version=DATA_MANIFEST_V2_SCHEMA_VERSION,
+        text_cache_index_descriptor_path=descriptor_path,
+    )
+
+    with pytest.raises(ValueError, match="must be an integer"):
+        require_supported_data_manifest_header(
+            {"schema_version": True, "kind": DATA_MANIFEST_KIND}
+        )
+    mixed = copy.deepcopy(manifest)
+    mixed["kind"] = DATA_MANIFEST_KIND
+    _resign(mixed)
+    with pytest.raises(ValueError, match="schema/kind pair"):
+        validate_robot_video_dataset_manifest(
+            dataset,
+            mixed,
+            normalization_stats_path=stats,
+        )
+
+
+def test_v1_default_and_explicit_schema_are_identical(fake_data):
+    dataset, stats = fake_data
+    implicit = build_robot_video_dataset_manifest(
+        dataset,
+        normalization_stats_path=stats,
+    )
+    explicit = build_robot_video_dataset_manifest(
+        dataset,
+        normalization_stats_path=stats,
+        schema_version=1,
+    )
+    assert explicit == implicit
+
+
+class _UniqueTaskIndexDataset:
+    def __init__(self, result):
+        self.result = result
+        self.calls = []
+
+    def unique(self, column):
+        self.calls.append(column)
+        return self.result
+
+    def __getitem__(self, _column):
+        raise AssertionError("frame-level task_index fallback must not be read")
+
+
+def test_selected_prompts_use_hf_unique_without_reading_frame_column(fake_data):
+    dataset, _ = fake_data
+    fallback_prompts = selected_text_cache_prompts(dataset)
+    first_part = dataset.lerobot_dataset.multi_dataset._datasets[0]
+    unique_dataset = _UniqueTaskIndexDataset([1, 0, 1])
+    first_part.hf_dataset = unique_dataset
+
+    assert selected_text_cache_prompts(dataset) == fallback_prompts
+    assert unique_dataset.calls == ["task_index"]
+
+
+@pytest.mark.parametrize(
+    ("result", "error_type", "message"),
+    [
+        (None, TypeError, "must be iterable"),
+        ([], ValueError, "contains no frame task indices"),
+        ([True], ValueError, "must be an integer"),
+        ([999], ValueError, "absent from metadata"),
+    ],
+)
+def test_selected_prompts_reject_invalid_hf_unique_results(
+    fake_data,
+    result,
+    error_type,
+    message,
+):
+    dataset, _ = fake_data
+    first_part = dataset.lerobot_dataset.multi_dataset._datasets[0]
+    first_part.hf_dataset = _UniqueTaskIndexDataset(result)
+
+    with pytest.raises(error_type, match=message):
+        selected_text_cache_prompts(dataset)
+
+
+def test_selected_prompts_reject_noncallable_hf_unique(fake_data):
+    dataset, _ = fake_data
+    first_part = dataset.lerobot_dataset.multi_dataset._datasets[0]
+
+    class NonCallableUnique:
+        unique = [1, 0]
+
+        def __getitem__(self, _column):
+            raise AssertionError("invalid unique must not trigger fallback")
+
+    first_part.hf_dataset = NonCallableUnique()
+    with pytest.raises(TypeError, match="unique must be callable"):
+        selected_text_cache_prompts(dataset)
+
+
+def test_public_v2_descriptor_resolver_validates_manifest_binding(
+    fake_data,
+    tmp_path,
+):
+    dataset, stats = fake_data
+    descriptor_path = _build_v2_cache_index(tmp_path, dataset)
+    manifest = build_robot_video_dataset_manifest(
+        dataset,
+        normalization_stats_path=stats,
+        schema_version=DATA_MANIFEST_V2_SCHEMA_VERSION,
+        text_cache_index_descriptor_path=descriptor_path,
+    )
+
+    wrong_descriptor = copy.deepcopy(manifest)
+    wrong_descriptor["text_embedding_cache"]["integrity"][
+        "descriptor_sha256"
+    ] = "0" * 64
+    _resign(wrong_descriptor)
+    with pytest.raises(ValueError, match="does not bind"):
+        resolve_text_cache_index_descriptor_path(wrong_descriptor)
+
+    wrong_contract = copy.deepcopy(manifest)
+    wrong_contract["text_embedding_cache"]["context_len"] += 1
+    _resign(wrong_contract)
+    with pytest.raises(ValueError, match="contract differs"):
+        resolve_text_cache_index_descriptor_path(wrong_contract)
+
+    wrong_index = copy.deepcopy(manifest)
+    index_entry = next(
+        entry
+        for entry in wrong_index["text_embedding_cache"]["integrity"]["files"]
+        if entry["role"] == "text_cache_index"
+    )
+    index_entry["sha256"] = "0" * 64
+    _resign(wrong_index)
+    with pytest.raises(ValueError, match="index entry differs"):
+        resolve_text_cache_index_descriptor_path(wrong_index)

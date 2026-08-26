@@ -43,7 +43,8 @@ def main(config: DictConfig) -> None:
         repo_dir=_repo_dir(runtime_config),
     )
 
-    manifest_path_value = resolved["data_manifest"].get("path")
+    manifest_spec = dict(resolved["data_manifest"])
+    manifest_path_value = manifest_spec.get("path")
     if not manifest_path_value:
         raise ValueError(
             "set data_manifest.path to the output JSON for manifest generation"
@@ -62,15 +63,28 @@ def main(config: DictConfig) -> None:
         train_dataset,
         runtime_config=runtime_config,
     )
+    schema_version = manifest_spec.get("schema_version", 1)
+    if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+        raise TypeError("data_manifest.schema_version must be an integer")
+    descriptor_path = manifest_spec.get("text_cache_index_descriptor_path")
+    if descriptor_path is not None and (
+        not isinstance(descriptor_path, str) or not descriptor_path
+    ):
+        raise TypeError(
+            "data_manifest.text_cache_index_descriptor_path must be a path"
+        )
     manifest = build_data_manifest(
         train_dataset,
         normalization_stats_path=stats_identity.path,
+        schema_version=schema_version,
+        text_cache_index_descriptor_path=descriptor_path,
     )
     write_json_atomic(manifest_path, manifest)
     print(
         "Stage 3 data manifest written:\n"
         f"  path: {manifest_path}\n"
         f"  canonical_sha256: {manifest['manifest_sha256']}\n"
+        f"  schema: {manifest['schema_version']} / {manifest['kind']}\n"
         f"  frames: {cardinality['dataset_length']}\n"
         f"  episodes: {cardinality['dataset_episodes']}"
     )

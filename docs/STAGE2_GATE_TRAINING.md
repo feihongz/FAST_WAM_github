@@ -1,6 +1,6 @@
 # Stage 2 Binary Video Gate：正式标签与训练链
 
-Stage 2 在已经完成的 Stage 3 之上学习动态路由：对每个 LIBERO 当前观测，判断
+Stage 2 在各 benchmark 已完成的 Stage 3 之上学习动态路由：对每个当前观测，判断
 是否值得走带未来想象的 `w / N=10` 分支。它不是继续微调 5B 模型。
 
 | 阶段 | 加载什么 | 实际训练什么 |
@@ -15,24 +15,32 @@ Stage 2 在已经完成的 Stage 3 之上学习动态路由：对每个 LIBERO �
 
 ## 正式范围与前置条件
 
-当前 formal v1 只支持 LIBERO。不要把 `data=robotwin` 当作已完成的正式 Stage 2
-链路。开始前需要准备：
+正式代码支持两种数据身份：LIBERO 使用 schema-v1 inline manifest；RoboTwin 2.0
+使用 schema-v2 manifest，并通过 descriptor + fixed-record binary index 绑定大规模文本
+cache。v2 reader 会先按 index 校验 payload 字节的 SHA256，再从同一份已校验字节反序列化；
+不会在 cache miss 时退回未经验证的 `torch.load(path)`。
+
+这表示 RoboTwin 的 Stage 2 软件链已经有正式入口，不表示它现在可以越过 Stage 3
+直接训练。每个 benchmark 开始 Stage 2 前都需要准备：
 
 - 完成并冻结的 Stage 3 Adapter-only export；它必须绑定本次使用的 base、VAE 和
   data manifest；
 - Stage 3 使用的同一份 UnifiedShared base checkpoint、Wan2.2 VAE、normalization
   stats 和 selected-data manifest，以及每个文件的 SHA256；
-- manifest 所绑定的 LIBERO dataset roots 和 text embedding cache；
+- manifest 所绑定的数据 roots、text embedding cache；RoboTwin 还需要 manifest 所绑定的
+  descriptor/index；
 - 可复现的干净 Git 状态。正式入口默认拒绝 tracked dirty，以及
   `src/`、`configs/`、`scripts/`、`tests/` 下的未跟踪文件；
 - 标签生成所需的 CUDA 显存。Gate 本身很小，但正式配置同样默认
   `runtime.require_cuda=true`。
 
 先按 [Stage 3 Action Alignment](./STAGE3_ALIGNMENT_TRAINING.md) 生成并验证 data
-manifest、训练 Adapter。下面所有 `/absolute/path/...` 和 `*_SHA256` 都是占位符，
-必须替换成用户实际资产；本仓库不会替用户猜测资产路径或 hash。
+manifest、训练 Adapter。LIBERO 与 RoboTwin 必须分别拥有自己的 base、manifest、
+Adapter export、label job、merged labels 和 Gate；不能混用或把两个 benchmark 合并成
+一个 Adapter/Gate。下面的长命令是 LIBERO 通用示例，其中所有 `/absolute/path/...` 和
+`*_SHA256` 都必须替换成实际资产。
 
-为使三条命令易读，先定义一次路径：
+为使 LIBERO 的三条命令易读，先定义一次路径：
 
 ```bash
 export FASTWAM_STAGE2_ROOT=/absolute/path/stage2_run
@@ -122,6 +130,27 @@ torchrun --standalone --nproc_per_node=NUM_GPUS \
   labeling.num_shards=64
 ```
 
+RoboTwin 不再复制上面的长 override 列表，而使用已锁定的正式 task。它固定
+`robotwin_formal`、3-camera/384 配置、`seed=42`、两对 seed、10-step、64 shards、
+chunk size 64、BF16 和 strict TorchCodec：
+
+```bash
+export FASTWAM_ROBOTWIN_STAGE2_LABEL_JOB=/absolute/durable/path/robotwin/label_job
+export FASTWAM_ROBOTWIN_STAGE3_DATA_MANIFEST_SHA256=REAL_SCHEMA_V2_MANIFEST_SHA256
+export FASTWAM_ROBOTWIN_STAGE3_ADAPTER=/absolute/path/robotwin_stage3_adapter.pt
+export FASTWAM_ROBOTWIN_STAGE3_ADAPTER_SHA256=REAL_ROBOTWIN_ADAPTER_SHA256
+
+torchrun --standalone --nproc_per_node=8 \
+  scripts/generate_gate_labels.py \
+  task=robotwin_stage2_gate_labels_3cam384
+```
+
+task 中 manifest SHA 和 Adapter 路径/SHA 的默认值都是故意无效的 placeholder；未提供
+真实值会 fail closed。`FASTWAM_ROBOTWIN_STAGE2_LABEL_JOB` 没有本地 fallback，避免 8 个
+rank 因时间戳或工作目录漂移写到不同任务。`label_contract.json` 的 `contract_sha256` 只能
+在所有身份和运行环境确定后计算，因此它不是预填输入：由该步骤原子发布，再由 merge 和
+Gate 配置显式锁定。
+
 `NUM_GPUS` 不能大于 `labeling.num_shards`。也可让独立作业显式传递已排序且互不重叠的
 `labeling.shard_indices='[0,1,...]'`；显式 subset 只能用于 `WORLD_SIZE=1` 的独立
 单进程作业，不能和 `torchrun` 叠加；所有作业的其余配置必须完全相同。
@@ -165,6 +194,9 @@ merge 不用 glob 猜测输入，而是从 immutable contract 重算完整 shard
 
 从 `${FASTWAM_MERGED_LABELS}/manifest.json` 记录 `manifest_sha256`。
 
+merge 入口与 benchmark 无关；RoboTwin 必须把本段变量指向它自己的 label job、schema-v2
+data manifest 和输出目录。不要把 LIBERO chunk 与 RoboTwin chunk 放进同一目录。
+
 ## 第三步：只训练 BinaryVideoGate
 
 ```bash
@@ -189,6 +221,10 @@ python scripts/train_video_gate.py \
   data.train.text_embedding_cache_dir="${FASTWAM_LIBERO_TEXT_CACHE}" \
   data.train.pretrained_norm_stats="${FASTWAM_NORMALIZATION_STATS}"
 ```
+
+RoboTwin Gate 训练把 `data=libero_2cam` 改为 `data=robotwin_formal`，并使用 RoboTwin
+自己的 manifest、split、label contract/manifest、base/Adapter SHA 和 stats。其余严格
+合并、恢复和 no-clobber 语义相同；两个 Gate 仍是两个独立 run。
 
 这一入口不会打开 `base.checkpoint` 或 `adapter.checkpoint`；只要求它们的 SHA 与 label
 contract 一致。底层 current-only reader 的每样本查询只请求当前图像和当前 proprio，并返回
@@ -250,10 +286,15 @@ shard 数、chunk size 和规划算法。不同模型配置或数值环境产生
 Gate export 继续绑定 merged-label manifest、base/Adapter hash、data manifest、split、
 训练配置和 Git identity。
 
-Stage 2 还会对 manifest 选中的 parquet、MP4、text cache 和 stats 建立源文件快照。在
-长任务的 chunk/epoch 边界做低成本文件身份检查，并在合并或最终发布前做完整内容复核；
-路径、inode、size、mtime/ctime 或 SHA256 发生漂移都会 fail closed。manifest 只证明
-生成时的内容，这些运行期检查用来防止文件在长任务中被原地替换。
+Stage 2 还会对 manifest 选中的 parquet、MP4、text cache 身份和 stats 建立源文件快照。
+schema-v1 直接绑定选中的 cache payload；schema-v2 绑定 descriptor/index，并在实际读取
+每个 cache payload 时先核对 index 中的 size/SHA256。长任务还会在 chunk/epoch 边界检查
+源身份，并在合并或最终发布前完整复核；路径、inode、size、mtime/ctime 或 SHA256 漂移
+都会 fail closed。
+
+正式标签任务通过临时 SQLite B-tree 对选中 sample ID 做磁盘外排；Python 内存只保留固定
+插入批次和当前 chunk，不会一次物化 RoboTwin 的数百万 sample plan。外排仍严格保持
+`shard -> sample_id -> chunk_index` 的既有 canonical 顺序，resume artifact 路径不变。
 
 所有 durable 标签 artifact 都采用 no-clobber 发布：目标不存在时才原子创建；目标已存在
 时只能接受严格一致的完整内容。Gate fresh run 同样拒绝覆盖，只有通过身份校验的显式
@@ -261,7 +302,8 @@ resume 才能继续。
 
 ## 已验证边界
 
-本链路的 contract、标签数学、分片/合并、current-only Gate dataset、Gate optimizer 与
-严格恢复由 CPU 单元和入口测试覆盖。本文没有声称已经完成真实 5B H100 端到端标签生成
-或 Gate GPU 验收；使用用户自己的绝对资产路径和 hash 跑正式任务前，仍需完成该环境的
-CUDA smoke、短标签分片、merge 和 Gate save→resume 验收。
+本链路的 schema-v1/v2 contract、标签数学、分片/合并、current-only Gate dataset、Gate
+optimizer、严格恢复和 RoboTwin Hydra task 由 CPU 单元与入口测试覆盖。RoboTwin 的真实
+AV1/data-shape smoke 已通过，但本文没有声称完成任一 benchmark 的真实 5B H100 端到端
+标签生成或 Gate GPU 验收。正式长任务前仍需分别完成 CUDA 短标签分片、merge 和 Gate
+save→resume 验收。

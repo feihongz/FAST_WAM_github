@@ -31,13 +31,15 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _entry(path: Path, *, anchor: Path, role: str) -> dict:
-    return {
+def _entry(path: Path, *, anchor: Path, role: str, **extra) -> dict:
+    entry = {
         "role": role,
         "relative_path": path.relative_to(anchor).as_posix(),
         "size_bytes": path.stat().st_size,
         "sha256": _sha256(path),
     }
+    entry.update(extra)
+    return entry
 
 
 def _manifest(tmp_path: Path, *, selected_path: Path | None = None) -> tuple[dict, Path]:
@@ -50,6 +52,8 @@ def _manifest(tmp_path: Path, *, selected_path: Path | None = None) -> tuple[dic
     selected = selected_path or (dataset_root / "selected.bin")
     if selected_path is None:
         selected.write_bytes(b"AAAA")
+    selected_second = dataset_root / "selected-second.bin"
+    selected_second.write_bytes(b"CCCC")
     cache = cache_root / "prompt.pt"
     stats = stats_root / "stats.json"
     cache.write_bytes(b"embedding")
@@ -70,7 +74,20 @@ def _manifest(tmp_path: Path, *, selected_path: Path | None = None) -> tuple[dic
                     {"episode_index": 1, "from": 1, "to": 2, "length": 1},
                 ],
                 "video_keys": [],
-                "files": [_entry(selected, anchor=dataset_root, role="parquet")],
+                "files": [
+                    _entry(
+                        selected,
+                        anchor=dataset_root,
+                        role="parquet",
+                        episode_index=0,
+                    ),
+                    _entry(
+                        selected_second,
+                        anchor=dataset_root,
+                        role="parquet",
+                        episode_index=1,
+                    ),
+                ],
             }
         ],
         "text_embedding_cache": {
@@ -85,6 +102,45 @@ def _manifest(tmp_path: Path, *, selected_path: Path | None = None) -> tuple[dic
     }
     manifest["manifest_sha256"] = canonical_data_manifest_sha256(manifest)
     return manifest, selected
+
+
+def _v2_manifest(tmp_path: Path) -> tuple[dict, Path, Path, Path]:
+    manifest, selected = _manifest(tmp_path)
+    cache_root = Path(manifest["text_embedding_cache"]["root"])
+    cache_payload = cache_root / "prompt.pt"
+    index_root = tmp_path / "cache_index"
+    index_root.mkdir()
+    descriptor = index_root / "descriptor.json"
+    binary_index = index_root / "prompts.bin"
+    descriptor.write_bytes(b"descriptor")
+    binary_index.write_bytes(b"binary-index")
+    manifest.update(
+        schema_version=2,
+        kind="stage3_robot_video_data_manifest",
+        text_embedding_cache={
+            "root": str(cache_root.resolve()),
+            "context_len": 512,
+            "prompt_template": "test: {task}",
+            "filename_suffix": ".pt",
+            "required_prompt_count": 1,
+            "prompt_set_sha256": "a" * 64,
+            "integrity": {
+                "mode": "binary_sha256_index_v1",
+                "root": str(index_root.resolve()),
+                "descriptor_sha256": "b" * 64,
+                "files": [
+                    _entry(
+                        descriptor,
+                        anchor=index_root,
+                        role="text_cache_index_descriptor",
+                    ),
+                    _entry(binary_index, anchor=index_root, role="text_cache_index"),
+                ],
+            },
+        },
+    )
+    manifest["manifest_sha256"] = canonical_data_manifest_sha256(manifest)
+    return manifest, selected, cache_payload, binary_index
 
 
 def _context(manifest: dict):
@@ -125,11 +181,172 @@ def test_snapshot_is_immutable_and_supports_stat_and_content_rechecks(tmp_path):
     snapshot = capture_selected_source_snapshot(manifest)
 
     assert snapshot.data_manifest_sha256 == manifest["manifest_sha256"]
-    assert len(snapshot.files) == 3
+    assert len(snapshot.files) == 4
     snapshot.check_stats()
     snapshot.check_content()
     with pytest.raises(FrozenInstanceError):
         snapshot.files[0].st_ino = 0
+
+
+def test_chunk_key_selection_is_global_plus_exact_touched_episode(tmp_path):
+    manifest, selected_episode_zero = _manifest(tmp_path)
+    root = manifest["dataset_roots"][0]
+    dataset_root = Path(root["root"])
+    metadata = dataset_root / "meta.json"
+    metadata.write_bytes(b"metadata")
+    root["files"].append(
+        _entry(metadata, anchor=dataset_root, role="metadata")
+    )
+    root["video_keys"] = ["front", "wrist"]
+    for episode_index in (0, 1):
+        for video_key in root["video_keys"]:
+            video = dataset_root / f"{episode_index}-{video_key}.mp4"
+            video.write_bytes(f"{episode_index}:{video_key}".encode())
+            root["files"].append(
+                _entry(
+                    video,
+                    anchor=dataset_root,
+                    role="video",
+                    episode_index=episode_index,
+                    video_key=video_key,
+                )
+            )
+    manifest["manifest_sha256"] = canonical_data_manifest_sha256(manifest)
+    snapshot = capture_selected_source_snapshot(manifest)
+
+    scoped = snapshot.keys_for_sample_identities(
+        [
+            {"dataset_index": 0, "episode_index": 1},
+            {"dataset_index": 0, "episode_index": 1},
+        ]
+    )
+    assert set(scoped) == (
+        set(snapshot.global_file_keys)
+        | set(snapshot.episode_file_keys[(0, 1)])
+    )
+    assert set(scoped).isdisjoint(snapshot.episode_file_keys[(0, 0)])
+    assert len(snapshot.global_file_keys) == 3  # metadata, v1 cache, stats
+    assert len(snapshot.episode_file_keys[(0, 1)]) == 3  # parquet + 2 cameras
+    with pytest.raises(TypeError):
+        snapshot.episode_file_keys[(0, 1)] = ()
+
+    guard = make_source_stat_guard(snapshot)
+    selected_episode_zero.write_bytes(b"drift")
+    # Unrelated episode drift does not make every chunk scan the full corpus.
+    guard.check_sample_identities(
+        [{"dataset_index": 0, "episode_index": 1}]
+    )
+    # Legacy/full boundaries still sweep the complete selected inventory.
+    with pytest.raises(SourceDataDriftError, match="filesystem identity drifted"):
+        guard()
+    with pytest.raises(SourceDataDriftError, match="filesystem identity drifted"):
+        snapshot.check_content()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["missing_episode_index", "duplicate_parquet", "ambiguous_role"],
+)
+def test_snapshot_rejects_incomplete_or_ambiguous_episode_inventory(
+    tmp_path,
+    mutation,
+):
+    manifest, _ = _manifest(tmp_path)
+    root = manifest["dataset_roots"][0]
+    dataset_root = Path(root["root"])
+    if mutation == "missing_episode_index":
+        root["files"][0].pop("episode_index")
+    elif mutation == "duplicate_parquet":
+        duplicate = dataset_root / "duplicate.parquet"
+        duplicate.write_bytes(b"duplicate")
+        root["files"].append(
+            _entry(
+                duplicate,
+                anchor=dataset_root,
+                role="parquet",
+                episode_index=0,
+            )
+        )
+    else:
+        root["files"][0]["role"] = "metadata"
+    manifest["manifest_sha256"] = canonical_data_manifest_sha256(manifest)
+
+    with pytest.raises(
+        ValueError,
+        match="missing episode_index|exactly one parquet|ambiguous role",
+    ):
+        capture_selected_source_snapshot(manifest)
+
+
+def test_v2_snapshot_guards_index_not_text_cache_payload(tmp_path):
+    manifest, _, cache_payload, binary_index = _v2_manifest(tmp_path)
+    snapshot = capture_selected_source_snapshot(manifest)
+
+    assert [source.key.anchor_kind for source in snapshot.files] == [
+        "dataset",
+        "dataset",
+        "text_cache_index",
+        "text_cache_index",
+        "normalization_stats",
+    ]
+    assert all(source.resolved_path != cache_payload for source in snapshot.files)
+    snapshot.check_content()
+
+    cache_payload.write_bytes(b"payload-is-not-enumerated")
+    snapshot.check_content()
+
+    binary_index.write_bytes(b"tampered-index")
+    with pytest.raises(SourceDataDriftError, match="filesystem identity drifted"):
+        snapshot.check_content()
+
+
+def test_v2_snapshot_rejects_manifest_tamper_before_capture(tmp_path):
+    manifest, _, _, _ = _v2_manifest(tmp_path)
+    manifest["text_embedding_cache"]["integrity"]["files"][0]["sha256"] = "c" * 64
+
+    with pytest.raises(ValueError, match="canonical SHA256 mismatch"):
+        capture_selected_source_snapshot(manifest)
+
+
+def test_v2_snapshot_rejects_rehashed_path_escape(tmp_path):
+    manifest, _, _, _ = _v2_manifest(tmp_path)
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"outside")
+    entry = manifest["text_embedding_cache"]["integrity"]["files"][0]
+    entry.update(
+        relative_path="../outside.bin",
+        size_bytes=outside.stat().st_size,
+        sha256=_sha256(outside),
+    )
+    manifest["manifest_sha256"] = canonical_data_manifest_sha256(manifest)
+
+    with pytest.raises(ValueError, match="not canonical"):
+        capture_selected_source_snapshot(manifest)
+
+
+@pytest.mark.parametrize("mutation", ["mode", "extra_file", "wrong_role"])
+def test_v2_snapshot_rejects_noncanonical_index_inventory(tmp_path, mutation):
+    manifest, _, _, _ = _v2_manifest(tmp_path)
+    integrity = manifest["text_embedding_cache"]["integrity"]
+    if mutation == "mode":
+        integrity["mode"] = "per_file_sha256"
+    elif mutation == "extra_file":
+        integrity["files"].append(dict(integrity["files"][1]))
+    else:
+        integrity["files"][1]["role"] = "text_embedding"
+    manifest["manifest_sha256"] = canonical_data_manifest_sha256(manifest)
+
+    with pytest.raises(ValueError, match="integrity (mode|must select|file roles)"):
+        capture_selected_source_snapshot(manifest)
+
+
+def test_v2_snapshot_rejects_mismatched_schema_kind_pair(tmp_path):
+    manifest, _, _, _ = _v2_manifest(tmp_path)
+    manifest["kind"] = "stage3_libero_data_manifest"
+    manifest["manifest_sha256"] = canonical_data_manifest_sha256(manifest)
+
+    with pytest.raises(ValueError, match="unsupported.*schema/kind pair"):
+        capture_selected_source_snapshot(manifest)
 
 
 def test_full_recheck_detects_same_size_drift_present_at_capture(tmp_path):

@@ -36,6 +36,11 @@ model:
   mot_checkpoint_mixed_attn: false
   action_dit_pretrained_path: null
 
+training:
+  # Eight H100s: floor(273465 / (8 * 2)) == 17091, divisible by 3.
+  batch_size: 2
+  gradient_accumulation_steps: 3
+
 runtime:
   # Accepted on 2026-08-26 and bound by data_manifest above. The 2026-07-01
   # base used 277713 frames / 1712 episodes; keep its normalization stats while

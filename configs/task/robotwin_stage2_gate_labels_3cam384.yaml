@@ -1,0 +1,94 @@
+# @package _global_
+
+defaults:
+  - override /data: robotwin_formal
+  - override /model: fastwam_unified_aligned
+  - _self_
+
+# All ranks in one label job must resolve this environment variable to the same
+# durable directory. There is intentionally no local fallback.
+output_dir: ${oc.env:FASTWAM_ROBOTWIN_STAGE2_LABEL_JOB}
+
+base:
+  checkpoint: ${oc.env:FASTWAM_ROBOTWIN_STAGE3_BASE_CHECKPOINT,/root/feihong/FastWAM/formal_runs/FAST_WAM_github/robotwin_unified_shared_3cam_384_1e-4/2026-07-01_00-51-30/checkpoints/weights/latest.pt}
+  expected_sha256: ${oc.env:FASTWAM_ROBOTWIN_STAGE3_BASE_SHA256,368a99ca9575a78d01f4cdcdee8820ec74d30c4528cf7aff07b83361a17cbbda}
+
+# Stage 2 must use the Adapter-only export produced by this benchmark's Stage 3
+# run. These defaults are deliberately invalid until that export exists.
+adapter:
+  checkpoint: ${oc.env:FASTWAM_ROBOTWIN_STAGE3_ADAPTER,REPLACE_AFTER_STAGE3_ADAPTER_EXPORT}
+  expected_sha256: ${oc.env:FASTWAM_ROBOTWIN_STAGE3_ADAPTER_SHA256,REPLACE_AFTER_STAGE3_ADAPTER_EXPORT}
+
+assets:
+  vae:
+    path: ${oc.env:FASTWAM_ROBOTWIN_STAGE3_VAE,/root/feihong/FastWAM/checkpoints/Wan-AI/Wan2.2-TI2V-5B/Wan2.2_VAE.pth}
+    expected_sha256: 20eb789667fa5e60e7516bf509512f6cb61f01b0aa0695eadaea930c13892b36
+  normalization_stats:
+    path: ${data.train.pretrained_norm_stats}
+    expected_sha256: 7a02c46cfc8c5e746c0afbe41fca73f723eda34cbc083f8ca54f76d8f7468095
+
+# The schema-v2 manifest itself binds the selected prompt set plus the compact
+# text-cache descriptor/index. Its canonical SHA remains invalid until the
+# real index and manifest have been built.
+data_manifest:
+  path: ${oc.env:FASTWAM_ROBOTWIN_STAGE3_DATA_MANIFEST,/root/feihong/FastWAM/formal_runs/contracts/stage3/robotwin_train_6011575f_27225e/robotwin_stage3_data_manifest.json}
+  expected_sha256: ${oc.env:FASTWAM_ROBOTWIN_STAGE3_DATA_MANIFEST_SHA256,REPLACE_AFTER_IDENTITY_BUILD}
+
+data:
+  train:
+    val_set_proportion: 0.01
+    is_training_set: true
+    seed: 42
+    pretrained_norm_stats: ${oc.env:FASTWAM_ROBOTWIN_STATS,/root/feihong/FastWAM/datasets/robotwin2.0/dataset_stats.json}
+    video_backend: torchcodec
+    strict_data_mode: true
+    save_stats_copy: false
+  val: null
+
+model:
+  skip_dit_load_from_pretrain: true
+  redirect_common_files: false
+  mot_checkpoint_mixed_attn: false
+  action_dit_pretrained_path: null
+
+# These fields are part of the immutable label contract. Do not change them
+# between ranks, resumed chunks, or the subsequent merge.
+episode_split:
+  validation_fraction: 0.1
+  split_seed: 42
+  expected_assignment_sha256: ""
+
+labeling:
+  base_seed: 42
+  num_seed_pairs: 2
+  relative_margin: 0.05
+  relative_gain_epsilon: 1.0e-12
+  num_inference_steps: 10
+  sigma_shift: null
+  rand_device: cpu
+  tiled: false
+  num_shards: 64
+  chunk_size: 64
+  shard_indices: null
+  contract_file: label_contract.json
+  runtime_config_file: label_runtime_config.json
+
+runtime:
+  require_clean_git: true
+  require_cuda: true
+  device: cuda
+  mixed_precision: bf16
+  required_environment:
+    DIFFSYNTH_MODEL_BASE_PATH: /root/feihong/FastWAM/checkpoints
+    DIFFSYNTH_SKIP_DOWNLOAD: "true"
+    HF_HUB_OFFLINE: "1"
+    TRANSFORMERS_OFFLINE: "1"
+
+hydra:
+  job:
+    env_set:
+      DIFFSYNTH_MODEL_BASE_PATH: /root/feihong/FastWAM/checkpoints
+      DIFFSYNTH_SKIP_DOWNLOAD: "true"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True

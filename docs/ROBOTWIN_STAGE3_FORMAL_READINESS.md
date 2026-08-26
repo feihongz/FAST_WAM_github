@@ -1,0 +1,91 @@
+# RoboTwin 2.0 Stage 2/3 formal readiness
+
+RoboTwin 2.0 已有独立 Stage 3 Hydra 入口
+`task=robotwin_stage3_alignment_3cam384_1e-4`，以及 Stage 3 完成后使用的 Stage 2
+标签入口 `task=robotwin_stage2_gate_labels_3cam384`。两个入口都复现 UnifiedShared base
+的 `seed=42`、1% validation episode split；formal train 固定为 `6011575` frames /
+`27225` episodes。
+
+当前仍未达到“可启动正式长训练”的最终门槛：schema-v2 text-cache index/descriptor 与
+data manifest 尚未发布，Stage 3 task 的 manifest SHA 默认值因此仍是
+`REPLACE_AFTER_IDENTITY_BUILD`。这是故意的 fail-closed 状态，不能填写推测 hash。
+
+## 已确认的真实数据与资产
+
+完整 RoboTwin 数据为 `27500` episodes / `6075103` frames，包含 `27500` 个 parquet、
+`82500` 个 MP4（三路相机）和 `921032` 个 text-cache payload；数据约 75 GB，text cache
+约 903 GB。按正式 seed/split 实例化后，train 部分含 `914763` 个唯一 selected prompt，
+schema-v2 index 只绑定这组 prompt，不把未选 cache 混入身份。
+
+真实 formal-train 样本已经在 strict TorchCodec、无 fallback 模式下通过：
+
+```text
+video         (3, 9, 384, 320)  float32
+action        (32, 14)          float32
+proprio       (32, 14)          float32
+context       (128, 4096)       bfloat16
+context_mask  (128,)            bool
+```
+
+首、中、末 episode 的三路真实 AV1 共 9 个视频也已通过严格解码 smoke。当前软件环境已
+确认 Torch `2.7.1+cu128`、TorchCodec `0.5+cu128`、FFmpeg `4.4.2`。这些是数据/decoder
+smoke，不是 5B 模型的 GPU 训练 smoke。
+
+已确认的固定资产为：
+
+- base：`/root/feihong/FastWAM/formal_runs/FAST_WAM_github/robotwin_unified_shared_3cam_384_1e-4/2026-07-01_00-51-30/checkpoints/weights/latest.pt`；
+- base SHA256：`368a99ca9575a78d01f4cdcdee8820ec74d30c4528cf7aff07b83361a17cbbda`；
+- normalization stats SHA256：`7a02c46cfc8c5e746c0afbe41fca73f723eda34cbc083f8ca54f76d8f7468095`；
+- Wan2.2 VAE SHA256：`20eb789667fa5e60e7516bf509512f6cb61f01b0aa0695eadaea930c13892b36`。
+
+## 仍需完成的数据身份
+
+先生成选中 prompt 的 compact index/descriptor；builder 从数据集推导精确 cache 路径，
+不扫描整个 cache root，`workers=32` 只影响并行哈希吞吐，不影响排序或 canonical identity：
+
+```bash
+python scripts/build_text_cache_index.py \
+  task=robotwin_stage3_alignment_3cam384_1e-4 \
+  +text_cache_index.path=/root/feihong/FastWAM/formal_runs/contracts/stage3/robotwin_train_6011575f_27225e/robotwin_text_cache_index.bin \
+  +text_cache_index.descriptor_path=/root/feihong/FastWAM/formal_runs/contracts/stage3/robotwin_train_6011575f_27225e/robotwin_text_cache_index.json \
+  +text_cache_index.workers=32
+```
+
+再生成 schema-v2 manifest：
+
+```bash
+python scripts/build_stage3_data_manifest.py \
+  task=robotwin_stage3_alignment_3cam384_1e-4
+```
+
+记录脚本输出的 canonical SHA256，并通过
+`FASTWAM_ROBOTWIN_STAGE3_DATA_MANIFEST_SHA256` 提供给正式训练。正式 runtime 会复核
+manifest、descriptor、index、prompt set、静态数据/stats，并把验证后的 index 绑定到
+dataset；实际 cache payload 必须先通过 size/SHA256 校验，之后才能反序列化。
+
+## Batch 合同与 GPU 验收
+
+8 卡 H100 的锁定配置是每卡 batch 2、gradient accumulation 3：每个 epoch 有
+`375723` 个 global micro-batch，能组成完整 accumulation group，有效 global batch 48，
+tail 为 7 个 sample。manifest SHA 有效后先跑单卡一步：
+
+```bash
+accelerate launch \
+  --config_file scripts/accelerate_configs/accelerate_stage3_single_gpu.yaml \
+  scripts/train_stage3_alignment.py \
+  task=robotwin_stage3_alignment_3cam384_1e-4 \
+  training.batch_size=1 \
+  training.gradient_accumulation_steps=1 \
+  training.max_steps=1
+```
+
+随后跑 8 卡至少两个 optimizer step，并验证 Adapter-only save/resume。本文没有声称这些
+GPU 项已经完成。
+
+## 与 LIBERO 对齐后的顺序
+
+RoboTwin 完成 index/manifest、单卡一步和 8 卡 smoke 后，才与 LIBERO 同时启动两个独立
+Stage 3 run。各自 Adapter 冻结并通过 endpoint eval 后，再分别开始 Stage 2：生成标签、
+严格 merge、训练 Gate。RoboTwin Stage 2 task 当前也故意保留无效 Adapter/manifest
+placeholder；在 Stage 3 export 与真实 SHA 出现前不会启动。两个 benchmark 绝不共享
+Adapter、label contract、label manifest 或 Gate checkpoint。

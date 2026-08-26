@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Mapping
 from copy import copy, deepcopy
 import hashlib
@@ -11,8 +12,18 @@ from typing import Any
 import torch
 import torchvision.transforms.functional as transforms_F
 
+from fastwam.alignment.text_cache_index import TextCacheIndexIdentity
+
 from .base_lerobot_dataset import BaseLerobotDataset
-from .robot_video_dataset import DEFAULT_PROMPT, RobotVideoDataset
+from .robot_video_dataset import (
+    DEFAULT_PROMPT,
+    RobotVideoDataset,
+    _bind_dataset_text_cache_index,
+    _close_dataset_text_cache_index,
+    _dataset_text_cache_getstate,
+    _expected_text_cache_filename_suffix,
+    _get_dataset_text_cache_index,
+)
 
 
 GATE_INPUT_SCHEMA_VERSION = 1
@@ -82,12 +93,66 @@ class CurrentRobotVideoDataset(torch.utils.data.Dataset):
         self.override_instruction = source.override_instruction
         self.text_embedding_cache_dir = source.text_embedding_cache_dir
         self.context_len = source.context_len
-        self._text_context_cache: dict[
+        cache_limit = getattr(source, "text_context_cache_max_entries", None)
+        if isinstance(cache_limit, bool) or not isinstance(cache_limit, int):
+            raise TypeError(
+                "source.text_context_cache_max_entries must be an integer"
+            )
+        if cache_limit <= 0:
+            raise ValueError(
+                "source.text_context_cache_max_entries must be positive"
+            )
+        self.text_context_cache_max_entries = cache_limit
+        self._text_context_cache: OrderedDict[
             str, tuple[torch.Tensor, torch.Tensor]
-        ] = {}
+        ] = OrderedDict()
+        self._text_cache_index_descriptor_path: str | None = None
+        self._text_cache_index_expected_identity: (
+            TextCacheIndexIdentity | None
+        ) = None
+        self._text_cache_index = None
+        self._text_cache_index_pid: int | None = None
         self.resize_transform = source.resize_transform
         self.crop_transform = source.crop_transform
         self.normalize_transform = source.normalize_transform
+        source_descriptor = getattr(
+            source, "_text_cache_index_descriptor_path", None
+        )
+        source_identity = getattr(
+            source, "_text_cache_index_expected_identity", None
+        )
+        if source_descriptor is not None:
+            if not isinstance(source_identity, TextCacheIndexIdentity):
+                raise RuntimeError(
+                    "source text cache binding has no immutable identity"
+                )
+            self.bind_text_cache_index(source_descriptor, source_identity)
+        elif source_identity is not None:
+            raise RuntimeError(
+                "source has a text cache identity without a descriptor"
+            )
+
+    def bind_text_cache_index(
+        self,
+        descriptor_path,
+        expected_identity: TextCacheIndexIdentity | None = None,
+    ) -> None:
+        """Bind the same fail-closed v2 cache receipt as the full source."""
+
+        _bind_dataset_text_cache_index(
+            self,
+            descriptor_path,
+            expected_identity,
+        )
+
+    def __getstate__(self) -> dict:
+        return _dataset_text_cache_getstate(self)
+
+    def __del__(self) -> None:
+        try:
+            _close_dataset_text_cache_index(self)
+        except Exception:
+            pass
 
     def __len__(self) -> int:
         return len(self.lerobot_dataset)
@@ -166,23 +231,30 @@ class CurrentRobotVideoDataset(torch.utils.data.Dataset):
     def _get_cached_text_context(
         self, prompt: str
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        cache_index = _get_dataset_text_cache_index(self)
         cached = self._text_context_cache.get(prompt)
         if cached is not None:
+            self._text_context_cache.move_to_end(prompt)
             return cached[0].clone(), cached[1].clone()
 
-        if self.text_embedding_cache_dir is None:
-            raise ValueError("text_embedding_cache_dir is not set")
-        hashed = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-        cache_path = os.path.join(
-            self.text_embedding_cache_dir,
-            f"{hashed}.t5_len{self.context_len}.wan22ti2v5b.pt",
-        )
-        if not os.path.isfile(cache_path):
-            raise FileNotFoundError(
-                f"Missing text embedding cache: {cache_path}. "
-                "Run scripts/precompute_text_embeds.py first."
+        if cache_index is not None:
+            payload = cache_index.load_verified_payload(prompt, map_location="cpu")
+            cache_path = cache_index.descriptor_path
+        else:
+            if self.text_embedding_cache_dir is None:
+                raise ValueError("text_embedding_cache_dir is not set")
+            hashed = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+            suffix = _expected_text_cache_filename_suffix(self.context_len)
+            cache_path = os.path.join(
+                self.text_embedding_cache_dir,
+                f"{hashed}{suffix}",
             )
-        payload = torch.load(cache_path, map_location="cpu")
+            if not os.path.isfile(cache_path):
+                raise FileNotFoundError(
+                    f"Missing text embedding cache: {cache_path}. "
+                    "Run scripts/precompute_text_embeds.py first."
+                )
+            payload = torch.load(cache_path, map_location="cpu")
         if not isinstance(payload, Mapping):
             raise TypeError(f"text embedding cache is not a mapping: {cache_path}")
         context = payload.get("context")
@@ -209,6 +281,11 @@ class CurrentRobotVideoDataset(torch.utils.data.Dataset):
             cached_context,
             cached_mask,
         )
+        while (
+            len(self._text_context_cache)
+            > self.text_context_cache_max_entries
+        ):
+            self._text_context_cache.popitem(last=False)
         return cached_context.clone(), cached_mask.clone()
 
     def __getitem__(self, index: int) -> dict[str, Any]:

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from accelerate import Accelerator
-from accelerate.utils import gather_object
+from accelerate.utils import broadcast_object_list, gather_object
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 import torch
@@ -35,6 +35,7 @@ from .checkpointing import (
 )
 from .data_identity import validate_data_manifest
 from .formal_trainer import Stage3AlignmentTrainer
+from .text_cache_binding import bind_validated_text_cache_integrity
 
 
 logger = get_logger(__name__)
@@ -224,6 +225,53 @@ def _run_all_rank_phase(
     return value
 
 
+def _main_rank_value(
+    accelerator: Accelerator,
+    operation: Callable[[], dict[str, Any]],
+    *,
+    label: str,
+) -> dict[str, Any]:
+    """Run expensive identity work only on rank zero and broadcast its result."""
+
+    status: list[dict[str, Any] | None] = [None]
+    if accelerator.is_main_process:
+        try:
+            status[0] = {"ok": True, "value": operation()}
+        except Exception as error:
+            status[0] = {
+                "ok": False,
+                "error_type": type(error).__name__,
+                "message": str(error),
+            }
+    broadcast_object_list(status, from_process=0)
+
+    def require_valid_broadcast() -> dict[str, Any]:
+        result = status[0]
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            if isinstance(result, dict):
+                error_type = result.get("error_type", "UnknownError")
+                message = result.get("message", "missing error message")
+            else:
+                error_type = type(result).__name__
+                message = "invalid main-process status payload"
+            raise RuntimeError(
+                f"Stage 3 {label} failed on main process: "
+                f"{error_type}: {message}"
+            )
+        value = result.get("value")
+        if not isinstance(value, dict):
+            raise RuntimeError(
+                f"Stage 3 {label} main-process value is invalid"
+            )
+        return value
+
+    return _run_all_rank_phase(
+        accelerator,
+        require_valid_broadcast,
+        label=f"{label} broadcast",
+    )
+
+
 def _resolve_base_identity(
     accelerator: Accelerator,
     base_config: dict[str, Any],
@@ -336,13 +384,19 @@ def _resolve_data_identity(
         )
     manifest_path = Path(path_value).expanduser().resolve()
 
-    def validate_local() -> dict[str, Any]:
+    def read_local_manifest() -> dict[str, Any]:
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
             raise ValueError(
                 f"cannot read Stage 3 data manifest: {manifest_path}"
             ) from error
+        if not isinstance(manifest, dict):
+            raise ValueError("Stage 3 data manifest must be a mapping")
+        return manifest
+
+    def validate_on_main() -> dict[str, Any]:
+        manifest = read_local_manifest()
         validated = validate_data_manifest(
             train_dataset,
             manifest,
@@ -365,11 +419,46 @@ def _resolve_data_identity(
             "full_content_verified": True,
         }
 
-    return _all_rank_value(
+    identity = _main_rank_value(
         accelerator,
-        validate_local,
+        validate_on_main,
         label="dataset manifest",
     )
+
+    def bind_local_verified_manifest() -> dict[str, Any]:
+        manifest = read_local_manifest()
+        validated = validate_data_manifest(
+            train_dataset,
+            manifest,
+            normalization_stats_path=normalization_stats_path,
+            full_content_verify=False,
+        )
+        recorded_sha256 = validated["manifest_sha256"]
+        local_identity = {
+            "path": str(manifest_path),
+            "sha256": recorded_sha256,
+            "num_frames": int(validated["num_frames"]),
+            "dataset_roots": [
+                row["root"] for row in validated["dataset_roots"]
+            ],
+            "full_content_verified": True,
+        }
+        if recorded_sha256 != expected_sha256 or local_identity != identity:
+            raise ValueError(
+                "Stage 3 local data manifest identity differs from the "
+                "main-process validation"
+            )
+        return bind_validated_text_cache_integrity(train_dataset, manifest)
+
+    text_cache_verification = _all_rank_value(
+        accelerator,
+        bind_local_verified_manifest,
+        label="dataset manifest local binding",
+    )
+    return {
+        **identity,
+        "text_cache_verification": text_cache_verification,
+    }
 
 
 def run_stage3_alignment_training(

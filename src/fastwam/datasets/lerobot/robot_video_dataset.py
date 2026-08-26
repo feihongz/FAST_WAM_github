@@ -1,5 +1,7 @@
+from collections import OrderedDict
 import hashlib
 import os
+from pathlib import Path
 from typing import Optional
 import time
 import numpy as np
@@ -16,11 +18,139 @@ from .utils.normalizer import save_dataset_stats_to_json, load_dataset_stats_fro
 from ..dataset_utils import ResizeSmallestSideAspectPreserving, CenterCrop, Normalize
 from fastwam.utils.logging_config import get_logger
 from fastwam.utils import misc, pytorch_utils
+from fastwam.alignment.text_cache_index import (
+    TextCacheIndex,
+    TextCacheIndexIdentity,
+)
 from accelerate import PartialState
 logger = get_logger(__name__)
 
 
 DEFAULT_PROMPT = "A video recorded from a robot's point of view executing the following instruction: {task}"
+DEFAULT_TEXT_CONTEXT_CACHE_MAX_ENTRIES = 128
+TEXT_CACHE_FILENAME_SUFFIX_TEMPLATE = ".t5_len{context_len}.wan22ti2v5b.pt"
+
+
+def _expected_text_cache_filename_suffix(context_len: int) -> str:
+    return TEXT_CACHE_FILENAME_SUFFIX_TEMPLATE.format(context_len=context_len)
+
+
+def _require_text_cache_index_contract(dataset, cache_index: TextCacheIndex) -> None:
+    """Require an index to describe exactly this dataset's text cache contract."""
+
+    cache_dir = getattr(dataset, "text_embedding_cache_dir", None)
+    if cache_dir is None:
+        raise ValueError(
+            "text_embedding_cache_dir must be set before binding a text cache index"
+        )
+    try:
+        cache_root = Path(cache_dir).expanduser().resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise ValueError(
+            "text_embedding_cache_dir must resolve to the indexed cache directory"
+        ) from error
+    if not cache_root.is_dir():
+        raise ValueError("text_embedding_cache_dir must resolve to a directory")
+
+    descriptor = cache_index.descriptor
+    if Path(descriptor["cache_root"]) != cache_root:
+        raise ValueError(
+            "text cache index cache_root differs from text_embedding_cache_dir"
+        )
+    if descriptor["context_len"] != dataset.context_len:
+        raise ValueError(
+            "text cache index context_len differs from the dataset context_len"
+        )
+    if descriptor["prompt_template"] != DEFAULT_PROMPT:
+        raise ValueError(
+            "text cache index prompt_template differs from DEFAULT_PROMPT"
+        )
+    expected_suffix = _expected_text_cache_filename_suffix(dataset.context_len)
+    if descriptor["filename_suffix"] != expected_suffix:
+        raise ValueError(
+            "text cache index filename_suffix differs from the dataset cache suffix"
+        )
+
+
+def _close_dataset_text_cache_index(dataset) -> None:
+    cache_index = getattr(dataset, "_text_cache_index", None)
+    if cache_index is not None:
+        cache_index.close()
+    dataset._text_cache_index = None
+    dataset._text_cache_index_pid = None
+
+
+def _bind_dataset_text_cache_index(
+    dataset,
+    descriptor_path,
+    expected_identity: TextCacheIndexIdentity | None = None,
+) -> None:
+    """Validate a binding eagerly while keeping index bytes process-local."""
+
+    candidate = TextCacheIndex(descriptor_path, verify_index_sha256=True)
+    try:
+        _require_text_cache_index_contract(dataset, candidate)
+        observed_identity = TextCacheIndexIdentity.from_verified_index(candidate)
+        if expected_identity is None:
+            expected_identity = observed_identity
+        elif not isinstance(expected_identity, TextCacheIndexIdentity):
+            raise TypeError("expected text cache identity has an invalid type")
+        candidate.require_identity(expected_identity)
+        canonical_path = str(candidate.descriptor_path)
+    finally:
+        candidate.close()
+
+    _close_dataset_text_cache_index(dataset)
+    dataset._text_cache_index_descriptor_path = canonical_path
+    dataset._text_cache_index_expected_identity = expected_identity
+    cache = getattr(dataset, "_text_context_cache", None)
+    if cache is None:
+        dataset._text_context_cache = OrderedDict()
+    else:
+        cache.clear()
+
+
+def _get_dataset_text_cache_index(dataset) -> TextCacheIndex | None:
+    descriptor_path = getattr(dataset, "_text_cache_index_descriptor_path", None)
+    if descriptor_path is None:
+        return None
+    expected_identity = getattr(
+        dataset, "_text_cache_index_expected_identity", None
+    )
+    if not isinstance(expected_identity, TextCacheIndexIdentity):
+        raise RuntimeError(
+            "bound text cache index has no immutable expected identity"
+        )
+
+    current_pid = os.getpid()
+    cache_index = getattr(dataset, "_text_cache_index", None)
+    index_pid = getattr(dataset, "_text_cache_index_pid", None)
+    if cache_index is not None and index_pid == current_pid:
+        return cache_index
+    if cache_index is not None:
+        _close_dataset_text_cache_index(dataset)
+        dataset._text_context_cache.clear()
+
+    candidate = TextCacheIndex(descriptor_path, verify_index_sha256=True)
+    try:
+        _require_text_cache_index_contract(dataset, candidate)
+        candidate.require_identity(expected_identity)
+    except Exception:
+        candidate.close()
+        raise
+    dataset._text_cache_index = candidate
+    dataset._text_cache_index_pid = current_pid
+    return candidate
+
+
+def _dataset_text_cache_getstate(dataset) -> dict:
+    state = dataset.__dict__.copy()
+    state["_text_cache_index"] = None
+    state["_text_cache_index_pid"] = None
+    if state.get("_text_cache_index_descriptor_path") is not None:
+        state["_text_context_cache"] = OrderedDict()
+    return state
+
 
 class RobotVideoDataset(torch.utils.data.Dataset):
     def __init__(
@@ -33,9 +163,11 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         processor=None,
         text_embedding_cache_dir=None,
         context_len=128,
+        text_context_cache_max_entries: int = DEFAULT_TEXT_CONTEXT_CACHE_MAX_ENTRIES,
         pretrained_norm_stats=None,
         val_set_proportion=0.05,
         is_training_set=False,
+        seed: int = 42,
         global_sample_stride=1,
         action_video_freq_ratio: int = 1,
         skip_padding_as_possible: bool = False,
@@ -48,6 +180,12 @@ class RobotVideoDataset(torch.utils.data.Dataset):
     ):
         if not isinstance(save_stats_copy, bool):
             raise TypeError("save_stats_copy must be bool")
+        if isinstance(text_context_cache_max_entries, bool) or not isinstance(
+            text_context_cache_max_entries, int
+        ):
+            raise TypeError("text_context_cache_max_entries must be an integer")
+        if text_context_cache_max_entries <= 0:
+            raise ValueError("text_context_cache_max_entries must be positive")
         self.save_stats_copy = save_stats_copy
         self.lerobot_dataset = BaseLerobotDataset(
             dataset_dirs=dataset_dirs,
@@ -56,6 +194,7 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             action_size=num_frames - 1,
             val_set_proportion=val_set_proportion,
             is_training_set=is_training_set,
+            seed=seed,
             global_sample_stride=global_sample_stride,
             video_backend=video_backend,
             strict_data_mode=strict_data_mode,
@@ -77,6 +216,16 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         self.video_size = video_size
         self.text_embedding_cache_dir = text_embedding_cache_dir
         self.context_len = context_len
+        self.text_context_cache_max_entries = text_context_cache_max_entries
+        self._text_context_cache: OrderedDict[
+            str, tuple[torch.Tensor, torch.Tensor]
+        ] = OrderedDict()
+        self._text_cache_index_descriptor_path: str | None = None
+        self._text_cache_index_expected_identity: (
+            TextCacheIndexIdentity | None
+        ) = None
+        self._text_cache_index: TextCacheIndex | None = None
+        self._text_cache_index_pid: int | None = None
         self.skip_padding_as_possible = skip_padding_as_possible
         self.max_padding_retry = max_padding_retry
         self.concat_multi_camera = concat_multi_camera
@@ -131,6 +280,35 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         from .current_robot_video_dataset import CurrentRobotVideoDataset
 
         return CurrentRobotVideoDataset(self)
+
+    def label_only(self):
+        """Build the current-observation source used for Stage 2 labels."""
+
+        from .label_robot_video_dataset import LabelRobotVideoDataset
+
+        return LabelRobotVideoDataset(self)
+
+    def bind_text_cache_index(
+        self,
+        descriptor_path,
+        expected_identity: TextCacheIndexIdentity | None = None,
+    ) -> None:
+        """Bind a v2 cache receipt and reject any contract mismatch."""
+
+        _bind_dataset_text_cache_index(
+            self,
+            descriptor_path,
+            expected_identity,
+        )
+
+    def __getstate__(self) -> dict:
+        return _dataset_text_cache_getstate(self)
+
+    def __del__(self) -> None:
+        try:
+            _close_dataset_text_cache_index(self)
+        except Exception:
+            pass
 
     def _get(self, idx):
         sample_idx = idx
@@ -258,18 +436,29 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         return data
 
     def _get_cached_text_context(self, prompt: str):
-        if self.text_embedding_cache_dir is None:
-            raise ValueError("text_embedding_cache_dir is not set.")
-        cache_dir = self.text_embedding_cache_dir
-        os.makedirs(cache_dir, exist_ok=True)
-        hashed = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-        cache_path = os.path.join(cache_dir, f"{hashed}.t5_len{self.context_len}.wan22ti2v5b.pt")
-        if not os.path.exists(cache_path):
-            raise FileNotFoundError(
-                f"Missing text embedding cache: {cache_path}. "
-                "Run scripts/precompute_text_embeds.py first."
-            )
-        payload = torch.load(cache_path, map_location="cpu")
+        cache_index = _get_dataset_text_cache_index(self)
+        cached = self._text_context_cache.get(prompt)
+        if cached is not None:
+            self._text_context_cache.move_to_end(prompt)
+            return cached[0].clone(), cached[1].clone()
+
+        if cache_index is not None:
+            payload = cache_index.load_verified_payload(prompt, map_location="cpu")
+            cache_path = cache_index.descriptor_path
+        else:
+            if self.text_embedding_cache_dir is None:
+                raise ValueError("text_embedding_cache_dir is not set.")
+            cache_dir = self.text_embedding_cache_dir
+            os.makedirs(cache_dir, exist_ok=True)
+            hashed = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+            suffix = _expected_text_cache_filename_suffix(self.context_len)
+            cache_path = os.path.join(cache_dir, f"{hashed}{suffix}")
+            if not os.path.exists(cache_path):
+                raise FileNotFoundError(
+                    f"Missing text embedding cache: {cache_path}. "
+                    "Run scripts/precompute_text_embeds.py first."
+                )
+            payload = torch.load(cache_path, map_location="cpu")
         context = payload["context"]
         context_mask = payload["mask"].bool()
         if context.ndim != 2:
@@ -289,7 +478,18 @@ class RobotVideoDataset(torch.utils.data.Dataset):
                 f"Cached mask_len mismatch: expected {self.context_len}, got {context_mask.shape[0]} in {cache_path}"
             )
 
-        return context, context_mask
+        cached_context = context.detach().clone()
+        cached_mask = context_mask.detach().clone()
+        self._text_context_cache[prompt] = (
+            cached_context,
+            cached_mask,
+        )
+        while (
+            len(self._text_context_cache)
+            > self.text_context_cache_max_entries
+        ):
+            self._text_context_cache.popitem(last=False)
+        return cached_context.clone(), cached_mask.clone()
 
     def __getitem__(self, idx):
         if self.strict_data_mode:

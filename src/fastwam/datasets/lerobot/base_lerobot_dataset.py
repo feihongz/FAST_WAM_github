@@ -75,11 +75,30 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
         video_backend: str | None = None,
         strict_data_mode: bool = False,
         load_actions: bool = True,
+        allow_independent_action_horizon: bool = False,
     ):
         assert len(dataset_dirs) > 0, "At least one dataset directory is required"
         assert past_action_size == 0
         assert past_obs_size == 0
-        assert action_size == obs_size - 1, "In this dataset, action_size should be obs_size - 1"
+        if not isinstance(allow_independent_action_horizon, bool):
+            raise TypeError("allow_independent_action_horizon must be bool")
+        if allow_independent_action_horizon:
+            if not strict_data_mode:
+                raise ValueError(
+                    "independent action horizons require strict_data_mode"
+                )
+            if not load_actions:
+                raise ValueError(
+                    "independent action horizons require load_actions"
+                )
+            if obs_size != 1 or action_size < 1:
+                raise ValueError(
+                    "independent action horizons are restricted to one current "
+                    "observation and a positive future action horizon"
+                )
+        else:
+            assert action_size == obs_size - 1, \
+                "In this dataset, action_size should be obs_size - 1"
         
         self.dataset_dirs = dataset_dirs
         self.shape_meta = shape_meta
@@ -87,6 +106,9 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
         self.past_action_size = past_action_size
         self.obs_size = obs_size
         self.load_actions = bool(load_actions)
+        self.allow_independent_action_horizon = (
+            allow_independent_action_horizon
+        )
         if not self.load_actions and action_size != 0:
             raise ValueError("action_size must be zero when load_actions is disabled")
         self.processor = None  # Will be set externally

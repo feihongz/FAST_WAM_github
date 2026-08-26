@@ -7,6 +7,7 @@ import pytest
 import torch
 
 import fastwam.gating.artifacts as gate_artifacts
+import fastwam.gating.label_job as gate_label_job
 from fastwam.alignment.checkpointing import canonical_json_sha256
 from fastwam.alignment.data_identity import canonical_data_manifest_sha256
 from fastwam.gating.artifacts import (
@@ -20,6 +21,8 @@ from fastwam.gating.inference import PairedActionRollouts
 from fastwam.gating.label_job import (
     LabelJobDependencies,
     enumerate_label_samples,
+    iter_label_chunks,
+    iter_label_samples,
     plan_label_chunks,
     run_label_job,
 )
@@ -216,6 +219,117 @@ def test_plan_is_metadata_only_deterministic_and_fixed_by_shard(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_streamed_label_enumeration_matches_compatibility_materialization():
+    context = _context(num_shards=3)
+    streamed = tuple(iter_label_samples(context))
+    assert streamed == enumerate_label_samples(context)
+    assert [sample.global_sample_index for sample in streamed] == list(range(6))
+
+
+def test_streamed_chunk_plans_match_materialized_api_for_selected_shards(
+    tmp_path,
+):
+    context = _context(num_shards=3)
+    selected = [2, 0]
+    materialized = plan_label_chunks(
+        context=context,
+        output_dir=tmp_path,
+        chunk_size=2,
+        shard_indices=selected,
+    )
+    streamed = tuple(
+        iter_label_chunks(
+            context=context,
+            output_dir=tmp_path,
+            chunk_size=2,
+            shard_indices=selected,
+        )
+    )
+
+    assert streamed == materialized
+    assert [plan.shard_index for plan in streamed] == sorted(
+        plan.shard_index for plan in streamed
+    )
+    assert all(len(plan.samples) <= 2 for plan in streamed)
+
+
+def test_million_sample_plan_source_is_lazy_on_iterator_construction(
+    tmp_path,
+    monkeypatch,
+):
+    context = _context(num_shards=1)
+    sample = enumerate_label_samples(context)[0]
+    entered = False
+
+    def million_synthetic_samples(_context):
+        nonlocal entered
+        entered = True
+        for _ in range(1_000_000):
+            yield sample
+
+    monkeypatch.setattr(
+        gate_label_job, "iter_label_samples", million_synthetic_samples
+    )
+    plans = iter_label_chunks(
+        context=context,
+        output_dir=tmp_path,
+        chunk_size=2,
+    )
+
+    assert entered is False
+    plans.close()
+    assert entered is False
+
+
+def test_streaming_plan_detects_duplicate_sample_ids_globally(
+    tmp_path,
+    monkeypatch,
+):
+    context = _context(num_shards=1)
+    sample = enumerate_label_samples(context)[0]
+
+    def duplicate_samples(_context):
+        yield sample
+        yield sample
+
+    monkeypatch.setattr(gate_label_job, "iter_label_samples", duplicate_samples)
+    with pytest.raises(RuntimeError, match="duplicate sample IDs"):
+        tuple(
+            iter_label_chunks(
+                context=context,
+                output_dir=tmp_path,
+                chunk_size=2,
+            )
+        )
+
+
+def test_run_uses_streaming_planner_not_materializing_api(
+    tmp_path,
+    monkeypatch,
+):
+    context = _context(num_shards=2)
+    identities = enumerate_label_samples(context)
+
+    def forbidden_materialization(**_kwargs):
+        raise AssertionError("formal run must not materialize all chunk plans")
+
+    monkeypatch.setattr(
+        gate_label_job, "plan_label_chunks", forbidden_materialization
+    )
+    result = run_label_job(
+        object(),
+        RecordingDataset(identities),
+        context=context,
+        output_dir=tmp_path,
+        chunk_size=2,
+        dependencies=_dependencies(FakeRolloutRunner()),
+    )
+
+    assert result.planned_sample_count == 6
+    assert result.inferred_sample_count == 6
+    assert result.planned_chunk_count == len(result.chunk_paths)
+
+
 def test_run_writes_complete_chunks_then_resumes_without_dataset_reads(tmp_path):
     context = _context(num_shards=2)
     identities = enumerate_label_samples(context)
@@ -274,6 +388,72 @@ def test_run_writes_complete_chunks_then_resumes_without_dataset_reads(tmp_path)
     assert second.inferred_sample_count == 0
     assert resumed_dataset.requests == []
     assert {path: path.read_bytes() for path in second.chunk_paths} == before
+
+
+def test_run_uses_scoped_guard_twice_per_chunk_and_keeps_legacy_api(tmp_path):
+    context = _context(num_shards=2)
+    identities = enumerate_label_samples(context)
+    plans = plan_label_chunks(
+        context=context,
+        output_dir=tmp_path / "scoped",
+        chunk_size=2,
+    )
+
+    class RecordingScopedGuard:
+        def __init__(self) -> None:
+            self.calls = []
+            self.legacy_calls = 0
+
+        def __call__(self) -> None:
+            self.legacy_calls += 1
+
+        def check_sample_identities(self, samples) -> None:
+            self.calls.append(
+                tuple(
+                    (sample["dataset_index"], sample["episode_index"])
+                    for sample in samples
+                )
+            )
+
+    scoped_guard = RecordingScopedGuard()
+    run_label_job(
+        object(),
+        RecordingDataset(identities),
+        context=context,
+        output_dir=tmp_path / "scoped",
+        chunk_size=2,
+        dependencies=_dependencies(FakeRolloutRunner()),
+        source_guard=scoped_guard,
+    )
+    expected = []
+    for plan in plans:
+        chunk_identities = tuple(
+            (
+                sample.identity["dataset_index"],
+                sample.identity["episode_index"],
+            )
+            for sample in plan.samples
+        )
+        expected.extend((chunk_identities, chunk_identities))
+    assert scoped_guard.calls == expected
+    assert scoped_guard.legacy_calls == 0
+
+    legacy_calls = 0
+
+    def legacy_guard() -> None:
+        nonlocal legacy_calls
+        legacy_calls += 1
+
+    legacy_result = run_label_job(
+        object(),
+        RecordingDataset(identities),
+        context=context,
+        output_dir=tmp_path / "legacy",
+        chunk_size=2,
+        dependencies=_dependencies(FakeRolloutRunner()),
+        source_guard=legacy_guard,
+    )
+    assert legacy_calls == 2 * legacy_result.planned_chunk_count
 
 
 def test_dataset_identity_mismatch_fails_before_rollout_or_publish(tmp_path):
@@ -379,6 +559,39 @@ def test_failed_inference_publishes_no_partial_chunk_and_retry_is_atomic(tmp_pat
         planned_sample_ids=plan.planned_sample_ids,
     )["row_count"] == 6
     assert not list(tmp_path.rglob("*.tmp"))
+
+
+def test_failed_inference_immediately_removes_streaming_plan_index(
+    tmp_path,
+    monkeypatch,
+):
+    context = _context(num_shards=1, chunk_size=99)
+    identities = enumerate_label_samples(context)
+    original_temporary_directory = gate_label_job.tempfile.TemporaryDirectory
+    plan_index_directories: list[Path] = []
+
+    def tracking_temporary_directory(*args, **kwargs):
+        directory = original_temporary_directory(*args, **kwargs)
+        plan_index_directories.append(Path(directory.name))
+        return directory
+
+    monkeypatch.setattr(
+        gate_label_job.tempfile,
+        "TemporaryDirectory",
+        tracking_temporary_directory,
+    )
+    with pytest.raises(RuntimeError, match="synthetic rollout failure"):
+        run_label_job(
+            object(),
+            RecordingDataset(identities),
+            context=context,
+            output_dir=tmp_path,
+            chunk_size=99,
+            dependencies=_dependencies(FakeRolloutRunner(fail_on_call=1)),
+        )
+
+    assert plan_index_directories
+    assert all(not path.exists() for path in plan_index_directories)
 
 
 def test_publish_race_with_identical_complete_winner_resumes(tmp_path, monkeypatch):

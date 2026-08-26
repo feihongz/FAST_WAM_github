@@ -259,6 +259,17 @@ def test_stage2_label_dataset_is_strict_normalized_and_manifest_bound(
         return dict(payload)
 
     monkeypatch.setattr(runtime, "validate_data_manifest", validate)
+    binding_calls = []
+
+    def bind_text_cache(candidate, payload):
+        binding_calls.append((candidate, payload))
+        return {"integrity_mode": "test-v1"}
+
+    monkeypatch.setattr(
+        runtime,
+        "bind_validated_text_cache_integrity",
+        bind_text_cache,
+    )
     identity = runtime.validate_stage2_label_dataset(
         dataset,
         manifest,
@@ -270,7 +281,11 @@ def test_stage2_label_dataset_is_strict_normalized_and_manifest_bound(
     assert identity["dataset_length"] == 23
     assert identity["dataset_episodes"] == 7
     assert identity["content_verified"] is True
+    assert identity["text_cache_verification"] == {
+        "integrity_mode": "test-v1"
+    }
     assert identity["normalized_action_space"] is True
+    assert binding_calls == [(dataset, manifest)]
     assert calls[0][2]["full_content_verify"] is True
     assert calls[0][2]["normalization_stats_path"] == stats_path.resolve()
 

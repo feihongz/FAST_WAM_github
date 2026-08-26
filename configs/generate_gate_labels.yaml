@@ -4,6 +4,7 @@ defaults:
   - _self_
   - data: null
   - model: null
+  - task: null
 
 # Supply a durable location shared by all label shards.
 output_dir: ???

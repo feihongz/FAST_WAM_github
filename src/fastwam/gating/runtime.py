@@ -17,6 +17,9 @@ import torch
 
 from fastwam.alignment.checkpointing import resolve_base_checkpoint, sha256_file
 from fastwam.alignment.data_identity import validate_data_manifest
+from fastwam.alignment.text_cache_binding import (
+    bind_validated_text_cache_integrity,
+)
 from fastwam.models.wan22.video_action_alignment import (
     ALIGNMENT_CHECKPOINT_SCHEMA_VERSION,
     load_alignment_checkpoint,
@@ -321,6 +324,10 @@ def validate_stage2_label_dataset(
     )
     if validated.get("manifest_sha256") != expected_sha256:
         raise RuntimeError("validated Stage 2 data manifest SHA256 drifted")
+    text_cache_verification = bind_validated_text_cache_integrity(
+        dataset,
+        data_manifest,
+    )
     identity = {
         "schema_version": 1,
         "kind": STAGE2_LABEL_DATA_IDENTITY_KIND,
@@ -333,6 +340,7 @@ def validate_stage2_label_dataset(
         "skip_padding_as_possible": False,
         "video_backend": "torchcodec",
         "content_verified": True,
+        "text_cache_verification": text_cache_verification,
         "normalized_action_space": True,
     }
     return _json_copy(identity, field="Stage 2 label data identity")

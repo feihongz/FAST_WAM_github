@@ -364,6 +364,52 @@ def _instantiate_label_dataset_under_source_guard(
     return dataset, source_snapshot
 
 
+def _build_label_only_dataset(dataset: Any) -> Any:
+    """Switch views only after the full formal dataset has been validated."""
+
+    factory = getattr(dataset, "label_only", None)
+    if not callable(factory):
+        raise TypeError(
+            "formal Stage 2 label dataset must provide label_only()"
+        )
+    source_base = getattr(dataset, "lerobot_dataset", None)
+    expected_action_horizon = getattr(source_base, "action_size", None)
+    expected_video_frames = len(getattr(dataset, "video_sample_indices", ()))
+    source_descriptor = getattr(
+        dataset, "_text_cache_index_descriptor_path", None
+    )
+
+    label_dataset = factory()
+    if label_dataset is dataset:
+        raise RuntimeError("label_only() must return an independent dataset view")
+    if len(label_dataset) != len(dataset):
+        raise RuntimeError("label-only dataset length differs from full dataset")
+    if getattr(label_dataset, "strict_data_mode", False) is not True:
+        raise RuntimeError("label-only dataset did not preserve strict data mode")
+    if getattr(label_dataset, "skip_padding_as_possible", None) is not False:
+        raise RuntimeError("label-only dataset permits sample replacement")
+
+    label_base = getattr(label_dataset, "lerobot_dataset", None)
+    if label_base is None or getattr(label_base, "obs_size", None) != 1:
+        raise RuntimeError("label-only dataset must query one observation step")
+    if getattr(label_base, "action_size", None) != expected_action_horizon:
+        raise RuntimeError("label-only dataset changed the action horizon")
+    if (
+        getattr(label_base, "allow_independent_action_horizon", False)
+        is not True
+    ):
+        raise RuntimeError("label-only dataset did not declare independent horizons")
+    if getattr(label_dataset, "num_video_frames", None) != expected_video_frames:
+        raise RuntimeError("label-only dataset changed the rollout video length")
+
+    label_descriptor = getattr(
+        label_dataset, "_text_cache_index_descriptor_path", None
+    )
+    if label_descriptor != source_descriptor:
+        raise RuntimeError("label-only dataset changed text cache binding")
+    return label_dataset
+
+
 def run_generate_gate_labels(
     config: DictConfig | Mapping[str, Any],
 ) -> Any:
@@ -497,6 +543,7 @@ def run_generate_gate_labels(
         normalization_stats_path=stats_identity.path,
         expected_data_manifest_sha256=expected_data_sha,
     )
+    dataset = _build_label_only_dataset(dataset)
     source_snapshot.check_stats()
     source_guard = make_source_stat_guard(source_snapshot)
 

@@ -1,0 +1,69 @@
+# @package _global_
+
+defaults:
+  - override /data: robotwin_formal
+  - override /model: fastwam_unified_aligned
+  - _self_
+
+output_dir: ./runs/stage3_alignment/robotwin_3cam384/${now:%Y-%m-%d}_${now:%H-%M-%S}
+
+base:
+  checkpoint: ${oc.env:FASTWAM_ROBOTWIN_STAGE3_BASE_CHECKPOINT,/root/feihong/FastWAM/formal_runs/FAST_WAM_github/robotwin_unified_shared_3cam_384_1e-4/2026-07-01_00-51-30/checkpoints/weights/latest.pt}
+  expected_sha256: ${oc.env:FASTWAM_ROBOTWIN_STAGE3_BASE_SHA256,368a99ca9575a78d01f4cdcdee8820ec74d30c4528cf7aff07b83361a17cbbda}
+
+assets:
+  vae:
+    path: ${oc.env:FASTWAM_ROBOTWIN_STAGE3_VAE,/root/feihong/FastWAM/checkpoints/Wan-AI/Wan2.2-TI2V-5B/Wan2.2_VAE.pth}
+    expected_sha256: 20eb789667fa5e60e7516bf509512f6cb61f01b0aa0695eadaea930c13892b36
+  normalization_stats:
+    path: ${data.train.pretrained_norm_stats}
+    expected_sha256: 7a02c46cfc8c5e746c0afbe41fca73f723eda34cbc083f8ca54f76d8f7468095
+
+data_manifest:
+  path: ${oc.env:FASTWAM_ROBOTWIN_STAGE3_DATA_MANIFEST,/root/feihong/FastWAM/formal_runs/contracts/stage3/robotwin_train_6011575f_27225e/robotwin_stage3_data_manifest.json}
+  schema_version: 2
+  text_cache_index_descriptor_path: ${oc.env:FASTWAM_ROBOTWIN_TEXT_CACHE_INDEX_DESCRIPTOR,/root/feihong/FastWAM/formal_runs/contracts/stage3/robotwin_train_6011575f_27225e/robotwin_text_cache_index.json}
+  # Intentionally invalid until the selected-data manifest has been built.
+  expected_sha256: ${oc.env:FASTWAM_ROBOTWIN_STAGE3_DATA_MANIFEST_SHA256,REPLACE_AFTER_IDENTITY_BUILD}
+  full_content_verify: true
+
+data:
+  train:
+    # These fields explicitly reproduce the seed=42 split used by the base.
+    val_set_proportion: 0.01
+    is_training_set: true
+    pretrained_norm_stats: ${oc.env:FASTWAM_ROBOTWIN_STATS,/root/feihong/FastWAM/datasets/robotwin2.0/dataset_stats.json}
+    video_backend: torchcodec
+    strict_data_mode: true
+    save_stats_copy: false
+  # Stage 3 never consumes validation samples; avoid constructing a second copy.
+  val: null
+
+model:
+  skip_dit_load_from_pretrain: true
+  redirect_common_files: false
+  mot_checkpoint_mixed_attn: false
+  action_dit_pretrained_path: null
+
+training:
+  # Eight H100s: floor(6011575 / (8 * 2)) == 375723, divisible by 3.
+  batch_size: 2
+  gradient_accumulation_steps: 3
+
+runtime:
+  expected_dataset_length: ${oc.env:FASTWAM_ROBOTWIN_STAGE3_EXPECTED_DATASET_LENGTH,6011575}
+  expected_dataset_episodes: ${oc.env:FASTWAM_ROBOTWIN_STAGE3_EXPECTED_DATASET_EPISODES,27225}
+  required_environment:
+    DIFFSYNTH_MODEL_BASE_PATH: /root/feihong/FastWAM/checkpoints
+    DIFFSYNTH_SKIP_DOWNLOAD: "true"
+    HF_HUB_OFFLINE: "1"
+    TRANSFORMERS_OFFLINE: "1"
+
+hydra:
+  job:
+    env_set:
+      DIFFSYNTH_MODEL_BASE_PATH: /root/feihong/FastWAM/checkpoints
+      DIFFSYNTH_SKIP_DOWNLOAD: "true"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True

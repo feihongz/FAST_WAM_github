@@ -15,9 +15,17 @@ from pathlib import Path
 import re
 from typing import Any, Mapping
 
+from .text_cache_index import (
+    TEXT_CACHE_INDEX_MODE,
+    TextCacheIndex,
+    load_text_cache_index_descriptor,
+)
+
 
 DATA_MANIFEST_SCHEMA_VERSION = 1
 DATA_MANIFEST_KIND = "stage3_libero_data_manifest"
+DATA_MANIFEST_V2_SCHEMA_VERSION = 2
+DATA_MANIFEST_V2_KIND = "stage3_robot_video_data_manifest"
 DATA_MANIFEST_SHA256_KEY = "manifest_sha256"
 
 LEROBOT_META_PATHS = (
@@ -33,6 +41,7 @@ DEFAULT_PROMPT_TEMPLATE = (
 VIDEO_DECODER_IMPLEMENTATION = (
     "fastwam.datasets.lerobot.lerobot.datasets.video_utils.decode_video_frames"
 )
+TEXT_CACHE_FILENAME_SUFFIX_TEMPLATE = ".t5_len{context_len}.wan22ti2v5b.pt"
 
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
@@ -231,14 +240,34 @@ def _selected_prompt_tasks(part: Any) -> list[str]:
     """
 
     try:
-        raw_indices = part.hf_dataset["task_index"]
+        hf_dataset = part.hf_dataset
         task_table = part.meta.tasks
-    except (AttributeError, KeyError, TypeError) as error:
+    except AttributeError as error:
         raise TypeError(
             "underlying dataset must expose its selected task_index column"
         ) from error
+
+    unique = getattr(hf_dataset, "unique", None)
+    if unique is None:
+        try:
+            raw_indices = hf_dataset["task_index"]
+        except (KeyError, TypeError) as error:
+            raise TypeError(
+                "underlying dataset must expose its selected task_index column"
+            ) from error
+    else:
+        if not callable(unique):
+            raise TypeError("hf_dataset.unique must be callable")
+        try:
+            raw_indices = unique("task_index")
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("hf_dataset.unique('task_index') failed") from error
+    try:
+        iterator = iter(raw_indices)
+    except TypeError as error:
+        raise TypeError("selected task_index values must be iterable") from error
     indices = [
-        _integer(value, name="selected frame task_index") for value in raw_indices
+        _integer(value, name="selected frame task_index") for value in iterator
     ]
     if not indices:
         raise ValueError("selected dataset contains no frame task indices")
@@ -254,6 +283,27 @@ def _selected_prompt_tasks(part: Any) -> list[str]:
             raise ValueError(f"selected task {task_index} is not a non-empty string")
         tasks.append(task)
     return tasks
+
+
+def selected_text_cache_prompts(dataset: Any) -> tuple[str, ...]:
+    """Return the exact unique prompts selected by a RobotVideoDataset."""
+
+    _, _, parts = _dataset_parts(dataset)
+    override = dataset.override_instruction
+    if override is not None:
+        if not isinstance(override, str) or not override:
+            raise ValueError("override_instruction must be a non-empty string")
+        tasks = [override]
+    else:
+        tasks = []
+        for part in parts:
+            tasks.extend(_selected_prompt_tasks(part))
+    unique_tasks = list(dict.fromkeys(tasks))
+    if not unique_tasks:
+        raise ValueError("selected dataset contains no task instructions")
+    return tuple(
+        DEFAULT_PROMPT_TEMPLATE.format(task=task) for task in unique_tasks
+    )
 
 
 def _sampling_contract(dataset: Any, lerobot_dataset: Any) -> dict[str, Any]:
@@ -283,6 +333,23 @@ def _sampling_contract(dataset: Any, lerobot_dataset: Any) -> dict[str, Any]:
         "action_video_freq_ratio": action_ratio,
         "video_sample_indices": video_indices,
     }
+
+
+def require_supported_data_manifest_header(manifest: Mapping[str, Any]) -> int:
+    if not isinstance(manifest, Mapping):
+        raise TypeError("data manifest must be a mapping")
+    schema_version = manifest.get("schema_version")
+    if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+        raise ValueError("data manifest schema_version must be an integer")
+    pair = (schema_version, manifest.get("kind"))
+    if pair == (DATA_MANIFEST_SCHEMA_VERSION, DATA_MANIFEST_KIND):
+        return DATA_MANIFEST_SCHEMA_VERSION
+    if pair == (DATA_MANIFEST_V2_SCHEMA_VERSION, DATA_MANIFEST_V2_KIND):
+        return DATA_MANIFEST_V2_SCHEMA_VERSION
+    raise ValueError(
+        "unsupported Stage 3 data manifest schema/kind pair: "
+        f"{pair!r}"
+    )
 
 
 def _sha_lookup_from_manifest(
@@ -325,7 +392,16 @@ def _sha_lookup_from_manifest(
         normalization, Mapping
     ):
         raise ValueError("data manifest external file roots are invalid")
-    add_files("text_cache", None, text_cache.get("files"))
+    schema_version = require_supported_data_manifest_header(manifest)
+    if schema_version == DATA_MANIFEST_SCHEMA_VERSION:
+        add_files("text_cache", None, text_cache.get("files"))
+    else:
+        integrity = text_cache.get("integrity")
+        if not isinstance(integrity, Mapping):
+            raise ValueError("v2 text cache integrity must be a mapping")
+        if integrity.get("mode") != TEXT_CACHE_INDEX_MODE:
+            raise ValueError("unsupported v2 text cache integrity mode")
+        add_files("text_cache_index", None, integrity.get("files"))
     add_files("normalization_stats", None, normalization.get("files"))
     return lookup
 
@@ -335,7 +411,21 @@ def _build_robot_video_dataset_manifest(
     *,
     normalization_stats_path: str | Path,
     sha_lookup: Mapping[tuple[str, int | None, str], str] | None,
+    schema_version: int,
+    text_cache_index_descriptor_path: str | Path | None,
 ) -> dict[str, Any]:
+    if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+        raise TypeError("data manifest schema_version must be an integer")
+    if schema_version == DATA_MANIFEST_SCHEMA_VERSION:
+        manifest_kind = DATA_MANIFEST_KIND
+        if text_cache_index_descriptor_path is not None:
+            raise ValueError("v1 data manifests do not accept a text cache index")
+    elif schema_version == DATA_MANIFEST_V2_SCHEMA_VERSION:
+        manifest_kind = DATA_MANIFEST_V2_KIND
+        if text_cache_index_descriptor_path is None:
+            raise ValueError("v2 data manifests require a text cache index descriptor")
+    else:
+        raise ValueError("unsupported Stage 3 data manifest schema")
     lerobot_dataset, _, parts = _dataset_parts(dataset)
     sampling = _sampling_contract(dataset, lerobot_dataset)
 
@@ -455,21 +545,90 @@ def _build_robot_video_dataset_manifest(
     if not cache_root.is_dir():
         raise ValueError("text_embedding_cache_dir must be a directory")
 
-    cache_files: list[dict[str, Any]] = []
-    for task in unique_tasks:
-        prompt = DEFAULT_PROMPT_TEMPLATE.format(task=task)
-        prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-        relative = f"{prompt_sha256}.t5_len{context_len}.wan22ti2v5b.pt"
-        cache_files.append(
-            _selected_file(
-                anchor=cache_root,
-                anchor_key=("text_cache", None),
-                relative_path=relative,
-                role="text_embedding",
-                sha_lookup=sha_lookup,
-                extra={"prompt_sha256": prompt_sha256},
+    prompts = tuple(
+        DEFAULT_PROMPT_TEMPLATE.format(task=task) for task in unique_tasks
+    )
+    if schema_version == DATA_MANIFEST_SCHEMA_VERSION:
+        cache_files: list[dict[str, Any]] = []
+        for prompt in prompts:
+            prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+            relative = f"{prompt_sha256}.t5_len{context_len}.wan22ti2v5b.pt"
+            cache_files.append(
+                _selected_file(
+                    anchor=cache_root,
+                    anchor_key=("text_cache", None),
+                    relative_path=relative,
+                    role="text_embedding",
+                    sha_lookup=sha_lookup,
+                    extra={"prompt_sha256": prompt_sha256},
+                )
             )
+        text_cache_identity: dict[str, Any] = {
+            "root": str(cache_root),
+            "context_len": context_len,
+            "prompt_template": DEFAULT_PROMPT_TEMPLATE,
+            "files": cache_files,
+        }
+    else:
+        descriptor_path = (
+            Path(text_cache_index_descriptor_path)
+            .expanduser()
+            .resolve(strict=True)
         )
+        descriptor = load_text_cache_index_descriptor(descriptor_path)
+        expected_suffix = TEXT_CACHE_FILENAME_SUFFIX_TEMPLATE.format(
+            context_len=context_len
+        )
+        if descriptor["cache_root"] != str(cache_root):
+            raise ValueError("text cache index root disagrees with the dataset")
+        if (
+            descriptor["context_len"] != context_len
+            or descriptor["prompt_template"] != DEFAULT_PROMPT_TEMPLATE
+            or descriptor["filename_suffix"] != expected_suffix
+        ):
+            raise ValueError("text cache index contract disagrees with the dataset")
+
+        descriptor_root = descriptor_path.parent.resolve(strict=True)
+        index_files = [
+            _selected_file(
+                anchor=descriptor_root,
+                anchor_key=("text_cache_index", None),
+                relative_path=descriptor_path.name,
+                role="text_cache_index_descriptor",
+                sha_lookup=sha_lookup,
+            ),
+            _selected_file(
+                anchor=descriptor_root,
+                anchor_key=("text_cache_index", None),
+                relative_path=descriptor["index"]["relative_path"],
+                role="text_cache_index",
+                sha_lookup=sha_lookup,
+            ),
+        ]
+        if (
+            index_files[1]["size_bytes"] != descriptor["index"]["size_bytes"]
+            or index_files[1]["sha256"] != descriptor["index"]["sha256"]
+        ):
+            raise ValueError("text cache index file disagrees with its descriptor")
+        with TextCacheIndex(
+            descriptor_path,
+            verify_index_sha256=False,
+        ) as cache_index:
+            cache_index.require_exact_prompts(prompts)
+        text_cache_identity = {
+            "root": str(cache_root),
+            "context_len": context_len,
+            "prompt_template": DEFAULT_PROMPT_TEMPLATE,
+            "filename_suffix": expected_suffix,
+            "required_prompt_count": descriptor["record_count"],
+            "prompt_set_sha256": descriptor["prompt_set_sha256"],
+            "integrity": {
+                "mode": TEXT_CACHE_INDEX_MODE,
+                "root": str(descriptor_root),
+                "descriptor_sha256": descriptor["descriptor_sha256"],
+                "files": index_files,
+            },
+        }
 
     stats_path = Path(normalization_stats_path).expanduser().resolve(strict=True)
     if not stats_path.is_file():
@@ -489,17 +648,12 @@ def _build_robot_video_dataset_manifest(
     if strict_data_mode and any(row["allow_fallback"] for row in decoder_datasets):
         raise ValueError("strict data mode cannot allow video backend fallback")
     manifest: dict[str, Any] = {
-        "schema_version": DATA_MANIFEST_SCHEMA_VERSION,
-        "kind": DATA_MANIFEST_KIND,
+        "schema_version": schema_version,
+        "kind": manifest_kind,
         "sampling": sampling,
         "num_frames": total_frames,
         "dataset_roots": dataset_roots,
-        "text_embedding_cache": {
-            "root": str(cache_root),
-            "context_len": context_len,
-            "prompt_template": DEFAULT_PROMPT_TEMPLATE,
-            "files": cache_files,
-        },
+        "text_embedding_cache": text_cache_identity,
         "normalization_stats": {
             "root": str(stats_root),
             "files": [stats_file],
@@ -518,14 +672,111 @@ def build_robot_video_dataset_manifest(
     dataset: Any,
     *,
     normalization_stats_path: str | Path,
+    schema_version: int = DATA_MANIFEST_SCHEMA_VERSION,
+    text_cache_index_descriptor_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Build and fully hash the selected inputs of a RobotVideoDataset."""
+    """Build selected-data identity using the legacy v1 or indexed v2 schema."""
 
     return _build_robot_video_dataset_manifest(
         dataset,
         normalization_stats_path=normalization_stats_path,
         sha_lookup=None,
+        schema_version=schema_version,
+        text_cache_index_descriptor_path=text_cache_index_descriptor_path,
     )
+
+
+def resolve_text_cache_index_descriptor_path(
+    manifest: Mapping[str, Any],
+) -> Path:
+    if require_supported_data_manifest_header(manifest) != DATA_MANIFEST_V2_SCHEMA_VERSION:
+        raise ValueError("text cache index descriptors require a v2 data manifest")
+    text_cache = manifest.get("text_embedding_cache")
+    if not isinstance(text_cache, Mapping):
+        raise ValueError("v2 text_embedding_cache must be a mapping")
+    integrity = text_cache.get("integrity")
+    if not isinstance(integrity, Mapping):
+        raise ValueError("v2 text cache integrity must be a mapping")
+    if integrity.get("mode") != TEXT_CACHE_INDEX_MODE:
+        raise ValueError("unsupported v2 text cache integrity mode")
+    bound_descriptor_sha256 = integrity.get("descriptor_sha256")
+    if (
+        not isinstance(bound_descriptor_sha256, str)
+        or not _SHA256_PATTERN.fullmatch(bound_descriptor_sha256)
+    ):
+        raise ValueError("v2 text cache descriptor SHA256 is invalid")
+    root_value = integrity.get("root")
+    if not isinstance(root_value, str) or not Path(root_value).is_absolute():
+        raise ValueError("v2 text cache index root must be absolute")
+    root = Path(root_value).expanduser().resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError("v2 text cache index root must be a directory")
+    files = integrity.get("files")
+    if (
+        not isinstance(files, list)
+        or len(files) != 2
+        or any(not isinstance(entry, Mapping) for entry in files)
+    ):
+        raise ValueError("v2 text cache integrity must select exactly two files")
+    by_role: dict[str, Mapping[str, Any]] = {}
+    for entry in files:
+        if set(entry) != {"role", "relative_path", "size_bytes", "sha256"}:
+            raise ValueError("v2 text cache file entry fields are invalid")
+        role = entry.get("role")
+        if not isinstance(role, str):
+            raise ValueError("v2 text cache file role must be a string")
+        if role in by_role:
+            raise ValueError("v2 text cache file roles must be unique")
+        by_role[role] = entry
+    expected_roles = {"text_cache_index_descriptor", "text_cache_index"}
+    if set(by_role) != expected_roles:
+        raise ValueError("v2 text cache integrity file roles are invalid")
+
+    descriptor_entry = by_role["text_cache_index_descriptor"]
+    relative = _safe_relative_path(descriptor_entry.get("relative_path"))
+    candidate = (root / relative).resolve(strict=True)
+    try:
+        candidate.relative_to(root)
+    except ValueError as error:
+        raise ValueError("v2 text cache descriptor escapes its root") from error
+    if not candidate.is_file():
+        raise ValueError("v2 text cache descriptor must be a regular file")
+    descriptor_size = descriptor_entry.get("size_bytes")
+    descriptor_file_sha = descriptor_entry.get("sha256")
+    if (
+        isinstance(descriptor_size, bool)
+        or not isinstance(descriptor_size, int)
+        or descriptor_size <= 0
+        or descriptor_size != candidate.stat().st_size
+        or not isinstance(descriptor_file_sha, str)
+        or not _SHA256_PATTERN.fullmatch(descriptor_file_sha)
+        or descriptor_file_sha != _sha256_file(candidate)
+    ):
+        raise ValueError("v2 text cache descriptor file identity is invalid")
+
+    descriptor = load_text_cache_index_descriptor(candidate)
+    if descriptor["descriptor_sha256"] != bound_descriptor_sha256:
+        raise ValueError("v2 manifest does not bind the selected cache descriptor")
+    bound_fields = {
+        "cache_root": "root",
+        "context_len": "context_len",
+        "prompt_template": "prompt_template",
+        "filename_suffix": "filename_suffix",
+        "record_count": "required_prompt_count",
+        "prompt_set_sha256": "prompt_set_sha256",
+    }
+    if any(
+        descriptor[descriptor_key] != text_cache.get(manifest_key)
+        for descriptor_key, manifest_key in bound_fields.items()
+    ):
+        raise ValueError("v2 text cache contract differs from its descriptor")
+    index_entry = by_role["text_cache_index"]
+    if any(
+        index_entry.get(key) != descriptor["index"].get(key)
+        for key in ("relative_path", "size_bytes", "sha256")
+    ):
+        raise ValueError("v2 text cache index entry differs from its descriptor")
+    return candidate
 
 
 def validate_robot_video_dataset_manifest(
@@ -545,10 +796,7 @@ def validate_robot_video_dataset_manifest(
 
     if not isinstance(manifest, Mapping):
         raise TypeError("data manifest must be a mapping")
-    if manifest.get("schema_version") != DATA_MANIFEST_SCHEMA_VERSION:
-        raise ValueError("unsupported Stage 3 data manifest schema")
-    if manifest.get("kind") != DATA_MANIFEST_KIND:
-        raise ValueError("unsupported Stage 3 data manifest kind")
+    schema_version = require_supported_data_manifest_header(manifest)
     recorded_sha256 = manifest.get(DATA_MANIFEST_SHA256_KEY)
     if (
         not isinstance(recorded_sha256, str)
@@ -560,10 +808,17 @@ def validate_robot_video_dataset_manifest(
     sha_lookup = None
     if not full_content_verify:
         sha_lookup = _sha_lookup_from_manifest(manifest)
+    descriptor_path = (
+        resolve_text_cache_index_descriptor_path(manifest)
+        if schema_version == DATA_MANIFEST_V2_SCHEMA_VERSION
+        else None
+    )
     current = _build_robot_video_dataset_manifest(
         dataset,
         normalization_stats_path=normalization_stats_path,
         sha_lookup=sha_lookup,
+        schema_version=schema_version,
+        text_cache_index_descriptor_path=descriptor_path,
     )
     if current != dict(manifest):
         raise ValueError("Stage 3 selected data identity drifted from manifest")
@@ -578,10 +833,16 @@ validate_data_manifest = validate_robot_video_dataset_manifest
 __all__ = [
     "DATA_MANIFEST_KIND",
     "DATA_MANIFEST_SCHEMA_VERSION",
+    "DATA_MANIFEST_V2_KIND",
+    "DATA_MANIFEST_V2_SCHEMA_VERSION",
     "LEROBOT_META_PATHS",
+    "TEXT_CACHE_FILENAME_SUFFIX_TEMPLATE",
     "build_data_manifest",
     "build_robot_video_dataset_manifest",
     "canonical_data_manifest_sha256",
+    "require_supported_data_manifest_header",
+    "resolve_text_cache_index_descriptor_path",
+    "selected_text_cache_prompts",
     "validate_data_manifest",
     "validate_robot_video_dataset_manifest",
 ]

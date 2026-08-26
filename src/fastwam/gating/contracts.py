@@ -10,9 +10,8 @@ from typing import Any
 
 from fastwam.alignment.checkpointing import canonical_json_sha256
 from fastwam.alignment.data_identity import (
-    DATA_MANIFEST_KIND,
-    DATA_MANIFEST_SCHEMA_VERSION,
     canonical_data_manifest_sha256,
+    require_supported_data_manifest_header,
 )
 
 
@@ -59,15 +58,7 @@ def _nonnegative_int(value: Any, *, field: str) -> int:
 
 def _validated_data_manifest(manifest: Mapping[str, Any]) -> tuple[dict, str]:
     payload = dict(manifest)
-    schema_version = payload.get("schema_version")
-    if (
-        isinstance(schema_version, bool)
-        or not isinstance(schema_version, int)
-        or schema_version != DATA_MANIFEST_SCHEMA_VERSION
-    ):
-        raise ValueError("unsupported data manifest schema_version")
-    if payload.get("kind") != DATA_MANIFEST_KIND:
-        raise ValueError("unsupported data manifest kind")
+    require_supported_data_manifest_header(payload)
     recorded = require_sha256(
         payload.get("manifest_sha256"),
         field="data manifest manifest_sha256",

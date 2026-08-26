@@ -60,6 +60,19 @@ def _data_manifest():
     return manifest
 
 
+def _v2_data_manifest():
+    manifest = _data_manifest()
+    manifest.update(
+        schema_version=2,
+        kind="stage3_robot_video_data_manifest",
+        text_embedding_cache={
+            "integrity": {"mode": "binary_sha256_index_v1", "files": []}
+        },
+    )
+    manifest["manifest_sha256"] = canonical_data_manifest_sha256(manifest)
+    return manifest
+
+
 def _identity():
     return {
         "global_sample_index": 8,
@@ -68,6 +81,35 @@ def _identity():
         "frame_index": 1,
         "dataset_frame_index": 3,
     }
+
+
+@pytest.mark.parametrize("manifest_factory", [_data_manifest, _v2_data_manifest])
+def test_stage2_contracts_accept_each_supported_manifest_header(manifest_factory):
+    manifest = manifest_factory()
+    identity = _identity()
+
+    assert validate_sample_identity(manifest, identity) == identity
+    split = build_episode_split(
+        manifest,
+        validation_fraction=0.4,
+        split_seed=7,
+    )
+    lookup = build_episode_split_lookup(split, manifest)
+    assert sample_id_from_lookup(identity, lookup) == sample_id(manifest, identity)
+    assert dataset_id_from_lookup(1, lookup) == dataset_id(manifest, 1)
+
+
+def test_stage2_contracts_reject_mismatched_v2_schema_kind_pair():
+    manifest = _v2_data_manifest()
+    manifest["kind"] = "stage3_libero_data_manifest"
+    manifest["manifest_sha256"] = canonical_data_manifest_sha256(manifest)
+
+    with pytest.raises(ValueError, match="unsupported.*schema/kind pair"):
+        build_episode_split(
+            manifest,
+            validation_fraction=0.4,
+            split_seed=7,
+        )
 
 
 def test_sample_and_dataset_ids_bind_manifest_and_semantic_frame():
@@ -291,6 +333,15 @@ def test_episode_split_and_manifest_tamper_fail_closed():
     with pytest.raises(ValueError, match="SHA256"):
         build_episode_split(
             tampered_manifest,
+            validation_fraction=0.4,
+            split_seed=7,
+        )
+
+    tampered_v2 = _v2_data_manifest()
+    tampered_v2["dataset_roots"][0]["num_frames"] += 1
+    with pytest.raises(ValueError, match="SHA256"):
+        build_episode_split(
+            tampered_v2,
             validation_fraction=0.4,
             split_seed=7,
         )
