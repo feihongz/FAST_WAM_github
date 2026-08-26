@@ -74,12 +74,13 @@ python scripts/build_stage3_data_manifest.py \
 ```
 
 当前已确认的 RoboTwin formal train split 是 `6011575` frames / `27225` episodes，含
-`914763` 个唯一 selected prompt。实际 index 与 schema-v2 manifest 仍在待生成清单中，
-因此 task 的 `REPLACE_AFTER_IDENTITY_BUILD` 仍应保持 fail closed；本文不提供虚构 SHA。
+`914763` 个唯一 selected prompt。index 与 schema-v2 manifest 已发布，task 默认锁定
+canonical manifest SHA
+`1190b75b1ef19a7abd949bdff5679da59afa7e51a043eeb43663cf2c4495173c`。
 
 ## 训练配置与启动顺序
 
-RoboTwin 的 index/manifest 和两类 GPU smoke 完成后，再同时启动两个独立 Stage 3 run。
+RoboTwin 的数据身份已完成；两类 GPU smoke 完成后，再同时启动两个独立 Stage 3 run。
 不要先生成 Stage 2 标签：标签合同必须绑定各自最终冻结的 Stage 3 Adapter。
 
 LIBERO 单卡入口：
@@ -165,9 +166,9 @@ accumulation boundary、scheduler/global step、base/assets 和运行合同。
 CPU contract/unit tests 已覆盖 Adapter-only optimizer/checkpoint、mid-epoch 与 epoch-tail
 严格恢复、RNG、分布式 tail 分片算法、10-step 接入、strict data mode，以及 schema-v2
 descriptor/index 的生成、验证和 runtime loader binding。RoboTwin 已用真实 formal train
-样本通过 strict TorchCodec AV1/data-shape smoke；尚未完成的项目仍包括实际 index/manifest
-发布、真实 5B CUDA 单步、单卡 ZeRO-2 save→resume 和真实 8 进程恢复。不要把数据 smoke
-写成 GPU 训练 smoke。
+样本通过 strict TorchCodec AV1/data-shape smoke，真实 index/manifest 也已发布；尚未完成
+的项目包括真实 5B CUDA 单步、单卡 save→resume 和真实 8 进程 ZeRO-2 恢复。不要把
+数据 smoke 写成 GPU 训练 smoke。
 
 本链锁定的 official Wan2.2 VAE PTH 可保证本次 Stage 3 自身稳定；原 base 日志使用的
 converted safetensors 当前不在机器上，因此在恢复原文件或完成 tensor digest 对比前，

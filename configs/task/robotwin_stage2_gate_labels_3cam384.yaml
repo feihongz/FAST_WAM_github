@@ -27,12 +27,11 @@ assets:
     path: ${data.train.pretrained_norm_stats}
     expected_sha256: 7a02c46cfc8c5e746c0afbe41fca73f723eda34cbc083f8ca54f76d8f7468095
 
-# The schema-v2 manifest itself binds the selected prompt set plus the compact
-# text-cache descriptor/index. Its canonical SHA remains invalid until the
-# real index and manifest have been built.
+# The schema-v2 manifest binds the selected prompt set plus the compact
+# text-cache descriptor/index. Stage 2 reuses the exact Stage 3 data identity.
 data_manifest:
   path: ${oc.env:FASTWAM_ROBOTWIN_STAGE3_DATA_MANIFEST,/root/feihong/FastWAM/formal_runs/contracts/stage3/robotwin_train_6011575f_27225e/robotwin_stage3_data_manifest.json}
-  expected_sha256: ${oc.env:FASTWAM_ROBOTWIN_STAGE3_DATA_MANIFEST_SHA256,REPLACE_AFTER_IDENTITY_BUILD}
+  expected_sha256: ${oc.env:FASTWAM_ROBOTWIN_STAGE3_DATA_MANIFEST_SHA256,1190b75b1ef19a7abd949bdff5679da59afa7e51a043eeb43663cf2c4495173c}
 
 data:
   train:

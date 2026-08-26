@@ -9,10 +9,14 @@ drifts.
 
 from __future__ import annotations
 
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from dataclasses import dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import stat
 from typing import Any, Mapping
 
 from .text_cache_index import (
@@ -42,8 +46,11 @@ VIDEO_DECODER_IMPLEMENTATION = (
     "fastwam.datasets.lerobot.lerobot.datasets.video_utils.decode_video_frames"
 )
 TEXT_CACHE_FILENAME_SUFFIX_TEMPLATE = ".t5_len{context_len}.wan22ti2v5b.pt"
+DEFAULT_DATA_MANIFEST_HASH_WORKERS = 32
 
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_HASH_READ_CHUNK_SIZE = 8 * 1024 * 1024
+_HASH_MAXIMUM_PENDING_FACTOR = 2
 
 
 def _canonical_json_bytes(payload: Any) -> bytes:
@@ -70,12 +77,146 @@ def canonical_data_manifest_sha256(manifest: Mapping[str, Any]) -> str:
     return hashlib.sha256(_canonical_json_bytes(payload)).hexdigest()
 
 
-def _sha256_file(path: Path, *, chunk_size: int = 8 * 1024 * 1024) -> str:
+def _stat_identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        int(info.st_dev),
+        int(info.st_ino),
+        int(info.st_size),
+        int(info.st_mtime_ns),
+        int(info.st_ctime_ns),
+    )
+
+
+def _sha256_file(
+    path: Path,
+    *,
+    chunk_size: int = _HASH_READ_CHUNK_SIZE,
+    expected_stat_identity: tuple[int, int, int, int, int] | None = None,
+) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
+        before = os.fstat(handle.fileno())
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError(f"selected data file is not regular: {path}")
+        if (
+            expected_stat_identity is not None
+            and _stat_identity(before) != expected_stat_identity
+        ):
+            raise RuntimeError(f"selected data file changed before hashing: {path}")
         for chunk in iter(lambda: handle.read(chunk_size), b""):
             digest.update(chunk)
+        after = os.fstat(handle.fileno())
+    if _stat_identity(before) != _stat_identity(after):
+        raise RuntimeError(f"selected data file changed while hashing: {path}")
+    try:
+        current = path.stat()
+    except OSError as error:
+        raise RuntimeError(
+            f"selected data file disappeared after hashing: {path}"
+        ) from error
+    if _stat_identity(current) != _stat_identity(after):
+        raise RuntimeError(f"selected data file changed after hashing: {path}")
     return digest.hexdigest()
+
+
+def _positive_hash_workers(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("hash_workers must be a positive integer")
+    return int(value)
+
+
+@dataclass(slots=True)
+class _PendingSelectedFileHash:
+    entry: dict[str, Any]
+    resolved_path: Path
+    expected_stat_identity: tuple[int, int, int, int, int]
+
+
+class _SelectedFileHashPlan:
+    """Bounded concurrent hashing that never changes manifest entry order."""
+
+    def __init__(self, workers: int) -> None:
+        self.workers = _positive_hash_workers(workers)
+        self._work: list[_PendingSelectedFileHash] = []
+        self._executed = False
+
+    def add(
+        self,
+        *,
+        entry: dict[str, Any],
+        resolved_path: Path,
+        expected_stat_identity: tuple[int, int, int, int, int],
+    ) -> None:
+        if self._executed:
+            raise RuntimeError("cannot add files after manifest hashing started")
+        self._work.append(
+            _PendingSelectedFileHash(
+                entry=entry,
+                resolved_path=resolved_path,
+                expected_stat_identity=expected_stat_identity,
+            )
+        )
+
+    @staticmethod
+    def _hash(work: _PendingSelectedFileHash) -> str:
+        return _sha256_file(
+            work.resolved_path,
+            expected_stat_identity=work.expected_stat_identity,
+        )
+
+    def execute(self) -> None:
+        if self._executed:
+            raise RuntimeError("manifest file hash plan may execute only once")
+        self._executed = True
+        if not self._work:
+            return
+        if self.workers == 1:
+            try:
+                for work in self._work:
+                    work.entry["sha256"] = self._hash(work)
+            finally:
+                self._work.clear()
+            return
+
+        work_iterator = iter(self._work)
+        maximum_pending = self.workers * _HASH_MAXIMUM_PENDING_FACTOR
+        executor = ThreadPoolExecutor(
+            max_workers=self.workers,
+            thread_name_prefix="fastwam-data-manifest-hash",
+        )
+        pending: dict[Future[str], _PendingSelectedFileHash] = {}
+
+        def submit_one() -> bool:
+            try:
+                work = next(work_iterator)
+            except StopIteration:
+                return False
+            pending[executor.submit(self._hash, work)] = work
+            return True
+
+        try:
+            while len(pending) < maximum_pending and submit_one():
+                pass
+            while pending:
+                completed, _ = wait(
+                    tuple(pending),
+                    return_when=FIRST_COMPLETED,
+                )
+                results: list[tuple[_PendingSelectedFileHash, str]] = []
+                # Resolve every completed future before submitting replacements.
+                # Any exception therefore stops new work immediately.
+                for future in completed:
+                    work = pending.pop(future)
+                    results.append((work, future.result()))
+                for work, digest in results:
+                    work.entry["sha256"] = digest
+                while len(pending) < maximum_pending and submit_one():
+                    pass
+        finally:
+            for future in pending:
+                future.cancel()
+            executor.shutdown(wait=True, cancel_futures=True)
+            self._work.clear()
 
 
 def _integer(value: Any, *, name: str) -> int:
@@ -102,6 +243,7 @@ def _selected_file(
     relative_path: str | Path,
     role: str,
     sha_lookup: Mapping[tuple[str, int | None, str], str] | None,
+    hash_plan: _SelectedFileHashPlan | None,
     extra: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     relative = _safe_relative_path(relative_path)
@@ -118,10 +260,12 @@ def _selected_file(
             f"selected data file escapes its manifest root: {candidate}"
         ) from error
 
+    current = resolved_candidate.stat()
+    if not stat.S_ISREG(current.st_mode):
+        raise ValueError(f"selected data file is not regular: {resolved_candidate}")
+
     key = (anchor_key[0], anchor_key[1], relative)
-    if sha_lookup is None:
-        sha256 = _sha256_file(resolved_candidate)
-    else:
+    if sha_lookup is not None:
         try:
             sha256 = sha_lookup[key]
         except KeyError as error:
@@ -130,15 +274,25 @@ def _selected_file(
             ) from error
         if not isinstance(sha256, str) or not _SHA256_PATTERN.fullmatch(sha256):
             raise ValueError(f"invalid selected-file SHA256 for {key}")
+    else:
+        if hash_plan is None:
+            raise RuntimeError("content hashing requires a selected-file hash plan")
+        sha256 = None
 
     entry: dict[str, Any] = {
         "role": role,
         "relative_path": relative,
-        "size_bytes": resolved_candidate.stat().st_size,
+        "size_bytes": int(current.st_size),
         "sha256": sha256,
     }
     if extra:
         entry.update(extra)
+    if sha_lookup is None:
+        hash_plan.add(
+            entry=entry,
+            resolved_path=resolved_candidate,
+            expected_stat_identity=_stat_identity(current),
+        )
     return entry
 
 
@@ -413,7 +567,12 @@ def _build_robot_video_dataset_manifest(
     sha_lookup: Mapping[tuple[str, int | None, str], str] | None,
     schema_version: int,
     text_cache_index_descriptor_path: str | Path | None,
+    hash_workers: int,
 ) -> dict[str, Any]:
+    workers = _positive_hash_workers(hash_workers)
+    hash_plan = (
+        _SelectedFileHashPlan(workers) if sha_lookup is None else None
+    )
     if isinstance(schema_version, bool) or not isinstance(schema_version, int):
         raise TypeError("data manifest schema_version must be an integer")
     if schema_version == DATA_MANIFEST_SCHEMA_VERSION:
@@ -449,6 +608,7 @@ def _build_robot_video_dataset_manifest(
                     relative_path=relative,
                     role="metadata",
                     sha_lookup=sha_lookup,
+                    hash_plan=hash_plan,
                 )
             )
         try:
@@ -476,6 +636,7 @@ def _build_robot_video_dataset_manifest(
                     relative_path=parquet_relative,
                     role="parquet",
                     sha_lookup=sha_lookup,
+                    hash_plan=hash_plan,
                     extra={"episode_index": episode},
                 )
             )
@@ -492,6 +653,7 @@ def _build_robot_video_dataset_manifest(
                         relative_path=video_relative,
                         role="video",
                         sha_lookup=sha_lookup,
+                        hash_plan=hash_plan,
                         extra={
                             "episode_index": episode,
                             "video_key": video_key,
@@ -560,6 +722,7 @@ def _build_robot_video_dataset_manifest(
                     relative_path=relative,
                     role="text_embedding",
                     sha_lookup=sha_lookup,
+                    hash_plan=hash_plan,
                     extra={"prompt_sha256": prompt_sha256},
                 )
             )
@@ -596,6 +759,7 @@ def _build_robot_video_dataset_manifest(
                 relative_path=descriptor_path.name,
                 role="text_cache_index_descriptor",
                 sha_lookup=sha_lookup,
+                hash_plan=hash_plan,
             ),
             _selected_file(
                 anchor=descriptor_root,
@@ -603,13 +767,9 @@ def _build_robot_video_dataset_manifest(
                 relative_path=descriptor["index"]["relative_path"],
                 role="text_cache_index",
                 sha_lookup=sha_lookup,
+                hash_plan=hash_plan,
             ),
         ]
-        if (
-            index_files[1]["size_bytes"] != descriptor["index"]["size_bytes"]
-            or index_files[1]["sha256"] != descriptor["index"]["sha256"]
-        ):
-            raise ValueError("text cache index file disagrees with its descriptor")
         with TextCacheIndex(
             descriptor_path,
             verify_index_sha256=False,
@@ -642,7 +802,21 @@ def _build_robot_video_dataset_manifest(
         relative_path=stats_path.name,
         role="normalization_stats",
         sha_lookup=sha_lookup,
+        hash_plan=hash_plan,
     )
+
+    if hash_plan is not None:
+        hash_plan.execute()
+    if schema_version == DATA_MANIFEST_V2_SCHEMA_VERSION:
+        if (
+            index_files[1]["size_bytes"] != descriptor["index"]["size_bytes"]
+            or index_files[1]["sha256"] != descriptor["index"]["sha256"]
+        ):
+            raise ValueError("text cache index file disagrees with its descriptor")
+        if load_text_cache_index_descriptor(descriptor_path) != descriptor:
+            raise RuntimeError(
+                "text cache index descriptor changed while manifest was built"
+            )
 
     strict_data_mode = bool(dataset.strict_data_mode)
     if strict_data_mode and any(row["allow_fallback"] for row in decoder_datasets):
@@ -674,6 +848,7 @@ def build_robot_video_dataset_manifest(
     normalization_stats_path: str | Path,
     schema_version: int = DATA_MANIFEST_SCHEMA_VERSION,
     text_cache_index_descriptor_path: str | Path | None = None,
+    hash_workers: int = DEFAULT_DATA_MANIFEST_HASH_WORKERS,
 ) -> dict[str, Any]:
     """Build selected-data identity using the legacy v1 or indexed v2 schema."""
 
@@ -683,6 +858,7 @@ def build_robot_video_dataset_manifest(
         sha_lookup=None,
         schema_version=schema_version,
         text_cache_index_descriptor_path=text_cache_index_descriptor_path,
+        hash_workers=hash_workers,
     )
 
 
@@ -785,6 +961,7 @@ def validate_robot_video_dataset_manifest(
     *,
     normalization_stats_path: str | Path,
     full_content_verify: bool = True,
+    hash_workers: int = DEFAULT_DATA_MANIFEST_HASH_WORKERS,
 ) -> dict[str, Any]:
     """Validate an existing manifest against a freshly instantiated dataset.
 
@@ -819,6 +996,7 @@ def validate_robot_video_dataset_manifest(
         sha_lookup=sha_lookup,
         schema_version=schema_version,
         text_cache_index_descriptor_path=descriptor_path,
+        hash_workers=hash_workers,
     )
     if current != dict(manifest):
         raise ValueError("Stage 3 selected data identity drifted from manifest")
@@ -835,6 +1013,7 @@ __all__ = [
     "DATA_MANIFEST_SCHEMA_VERSION",
     "DATA_MANIFEST_V2_KIND",
     "DATA_MANIFEST_V2_SCHEMA_VERSION",
+    "DEFAULT_DATA_MANIFEST_HASH_WORKERS",
     "LEROBOT_META_PATHS",
     "TEXT_CACHE_FILENAME_SUFFIX_TEMPLATE",
     "build_data_manifest",

@@ -6,9 +6,10 @@ RoboTwin 2.0 已有独立 Stage 3 Hydra 入口
 的 `seed=42`、1% validation episode split；formal train 固定为 `6011575` frames /
 `27225` episodes。
 
-当前仍未达到“可启动正式长训练”的最终门槛：schema-v2 text-cache index/descriptor 与
-data manifest 尚未发布，Stage 3 task 的 manifest SHA 默认值因此仍是
-`REPLACE_AFTER_IDENTITY_BUILD`。这是故意的 fail-closed 状态，不能填写推测 hash。
+schema-v2 text-cache index/descriptor 与 data manifest 已发布，Stage 3 和 Stage 2 task
+均默认锁定 canonical manifest SHA
+`1190b75b1ef19a7abd949bdff5679da59afa7e51a043eeb43663cf2c4495173c`。数据身份门槛已
+完成；正式长训练前仍需完成真实 5B CUDA 单卡和 8 卡 save/resume smoke。
 
 ## 已确认的真实数据与资产
 
@@ -38,9 +39,9 @@ smoke，不是 5B 模型的 GPU 训练 smoke。
 - normalization stats SHA256：`7a02c46cfc8c5e746c0afbe41fca73f723eda34cbc083f8ca54f76d8f7468095`；
 - Wan2.2 VAE SHA256：`20eb789667fa5e60e7516bf509512f6cb61f01b0aa0695eadaea930c13892b36`。
 
-## 仍需完成的数据身份
+## 已完成的数据身份
 
-先生成选中 prompt 的 compact index/descriptor；builder 从数据集推导精确 cache 路径，
+以下命令可复现选中 prompt 的 compact index/descriptor；builder 从数据集推导精确 cache 路径，
 不扫描整个 cache root，`workers=32` 只影响并行哈希吞吐，不影响排序或 canonical identity：
 
 ```bash
@@ -58,8 +59,21 @@ python scripts/build_stage3_data_manifest.py \
   task=robotwin_stage3_alignment_3cam384_1e-4
 ```
 
-记录脚本输出的 canonical SHA256，并通过
-`FASTWAM_ROBOTWIN_STAGE3_DATA_MANIFEST_SHA256` 提供给正式训练。正式 runtime 会复核
+已发布结果为：
+
+- index：`914763` records / `65863096` bytes，SHA256
+  `57d5820e1d7c7cc327884c22c13c721fc7830938e126259f6f61548c0e3b4228`；
+- descriptor semantic SHA256：
+  `3d5dc4b56703705803b1431090d00c63fd255a97d8524b3db326105ad056365e`；
+- schema-v2 manifest：`108904` 个静态文件 / `40490762` bytes，canonical SHA256
+  `1190b75b1ef19a7abd949bdff5679da59afa7e51a043eeb43663cf2c4495173c`。
+
+发布后已在新实例化的 formal split 上完成一次独立 `full_content_verify=True`：逐文件内容、
+episode topology、prompt set、stats、descriptor/index 全部一致；随后真实读取的 Stage 3
+完整样本和 Stage 2 `label_only()` 样本也都通过 cache payload SHA 与 AV1 解码检查。
+
+task 已内置该 canonical SHA；只有显式迁移或重新生成身份时才应通过
+`FASTWAM_ROBOTWIN_STAGE3_DATA_MANIFEST_SHA256` 连同对应路径一起覆盖。正式 runtime 会复核
 manifest、descriptor、index、prompt set、静态数据/stats，并把验证后的 index 绑定到
 dataset；实际 cache payload 必须先通过 size/SHA256 校验，之后才能反序列化。
 
@@ -84,8 +98,8 @@ GPU 项已经完成。
 
 ## 与 LIBERO 对齐后的顺序
 
-RoboTwin 完成 index/manifest、单卡一步和 8 卡 smoke 后，才与 LIBERO 同时启动两个独立
-Stage 3 run。各自 Adapter 冻结并通过 endpoint eval 后，再分别开始 Stage 2：生成标签、
-严格 merge、训练 Gate。RoboTwin Stage 2 task 当前也故意保留无效 Adapter/manifest
-placeholder；在 Stage 3 export 与真实 SHA 出现前不会启动。两个 benchmark 绝不共享
+RoboTwin 的 index/manifest 已完成；单卡一步和 8 卡 smoke 通过后，才与 LIBERO 同时启动
+两个独立 Stage 3 run。各自 Adapter 冻结并通过 endpoint eval 后，再分别开始 Stage 2：
+生成标签、严格 merge、训练 Gate。RoboTwin Stage 2 task 当前只保留无效 Adapter
+placeholder；在 Stage 3 最终 export 与真实 SHA 出现前不会启动。两个 benchmark 绝不共享
 Adapter、label contract、label manifest 或 Gate checkpoint。

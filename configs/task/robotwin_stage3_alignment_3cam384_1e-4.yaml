@@ -23,8 +23,8 @@ data_manifest:
   path: ${oc.env:FASTWAM_ROBOTWIN_STAGE3_DATA_MANIFEST,/root/feihong/FastWAM/formal_runs/contracts/stage3/robotwin_train_6011575f_27225e/robotwin_stage3_data_manifest.json}
   schema_version: 2
   text_cache_index_descriptor_path: ${oc.env:FASTWAM_ROBOTWIN_TEXT_CACHE_INDEX_DESCRIPTOR,/root/feihong/FastWAM/formal_runs/contracts/stage3/robotwin_train_6011575f_27225e/robotwin_text_cache_index.json}
-  # Intentionally invalid until the selected-data manifest has been built.
-  expected_sha256: ${oc.env:FASTWAM_ROBOTWIN_STAGE3_DATA_MANIFEST_SHA256,REPLACE_AFTER_IDENTITY_BUILD}
+  # Canonical schema-v2 identity for the locked seed=42 formal-train split.
+  expected_sha256: ${oc.env:FASTWAM_ROBOTWIN_STAGE3_DATA_MANIFEST_SHA256,1190b75b1ef19a7abd949bdff5679da59afa7e51a043eeb43663cf2c4495173c}
   full_content_verify: true
 
 data:

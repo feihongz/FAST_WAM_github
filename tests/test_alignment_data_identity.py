@@ -3,6 +3,8 @@ from __future__ import annotations
 import copy
 import hashlib
 from pathlib import Path
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +15,7 @@ from fastwam.alignment.data_identity import (
     DATA_MANIFEST_KIND,
     DATA_MANIFEST_V2_KIND,
     DATA_MANIFEST_V2_SCHEMA_VERSION,
+    DEFAULT_DATA_MANIFEST_HASH_WORKERS,
     DEFAULT_PROMPT_TEMPLATE,
     LEROBOT_META_PATHS,
     TEXT_CACHE_FILENAME_SUFFIX_TEMPLATE,
@@ -404,6 +407,131 @@ def test_v2_manifest_uses_external_index_without_touching_cache_payloads(
         manifest,
         normalization_stats_path=stats,
     ) == manifest
+
+
+def test_v2_parallel_hashing_is_deterministic_and_reused_by_full_validation(
+    fake_data,
+    tmp_path,
+    monkeypatch,
+):
+    dataset, stats = fake_data
+    descriptor_path = _build_v2_cache_index(tmp_path, dataset)
+    serial = build_robot_video_dataset_manifest(
+        dataset,
+        normalization_stats_path=stats,
+        schema_version=DATA_MANIFEST_V2_SCHEMA_VERSION,
+        text_cache_index_descriptor_path=descriptor_path,
+        hash_workers=1,
+    )
+
+    original_hash = data_identity_module._sha256_file
+    lock = threading.Lock()
+    active = 0
+    maximum_active = 0
+    hash_calls = 0
+    hashed_paths: list[Path] = []
+
+    def observed_hash(path, **kwargs):
+        nonlocal active, maximum_active, hash_calls
+        with lock:
+            active += 1
+            hash_calls += 1
+            hashed_paths.append(Path(path))
+            maximum_active = max(maximum_active, active)
+        try:
+            time.sleep(0.005)
+            return original_hash(path, **kwargs)
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(data_identity_module, "_sha256_file", observed_hash)
+    parallel = build_robot_video_dataset_manifest(
+        dataset,
+        normalization_stats_path=stats,
+        schema_version=DATA_MANIFEST_V2_SCHEMA_VERSION,
+        text_cache_index_descriptor_path=descriptor_path,
+        hash_workers=4,
+    )
+    assert parallel == serial
+    assert parallel["manifest_sha256"] == serial["manifest_sha256"]
+    assert 1 < maximum_active <= 4
+
+    calls_after_build = hash_calls
+    maximum_active = 0
+    assert validate_robot_video_dataset_manifest(
+        dataset,
+        serial,
+        normalization_stats_path=stats,
+        hash_workers=3,
+    ) == serial
+    assert hash_calls > calls_after_build
+    assert 1 < maximum_active <= 3
+
+    calls_after_full_validation = hash_calls
+    paths_after_full_validation = len(hashed_paths)
+    validate_robot_video_dataset_manifest(
+        dataset,
+        serial,
+        normalization_stats_path=stats,
+        full_content_verify=False,
+        hash_workers=3,
+    )
+    # Fast topology validation still authenticates the compact descriptor file,
+    # but must not hash the selected parquet/video/static inventory.
+    assert hash_calls == calls_after_full_validation + 1
+    assert hashed_paths[paths_after_full_validation:] == [
+        descriptor_path.resolve()
+    ]
+
+
+def test_manifest_hash_plan_is_bounded_and_cleans_up_after_failure(
+    tmp_path,
+    monkeypatch,
+):
+    assert DEFAULT_DATA_MANIFEST_HASH_WORKERS == 32
+    workers = 2
+    plan = data_identity_module._SelectedFileHashPlan(workers)
+    for index in range(20):
+        path = tmp_path / f"{index:03d}.bin"
+        _write(path, f"payload-{index}".encode())
+        info = path.stat()
+        plan.add(
+            entry={"sha256": None},
+            resolved_path=path,
+            expected_stat_identity=data_identity_module._stat_identity(info),
+        )
+
+    original_hash = data_identity_module._sha256_file
+    lock = threading.Lock()
+    active = 0
+    started = 0
+
+    def failing_hash(path, **kwargs):
+        nonlocal active, started
+        with lock:
+            active += 1
+            started += 1
+        try:
+            if path.name == "000.bin":
+                raise OSError("synthetic manifest hash failure")
+            time.sleep(0.02)
+            return original_hash(path, **kwargs)
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(data_identity_module, "_sha256_file", failing_hash)
+    with pytest.raises(OSError, match="synthetic manifest hash failure"):
+        plan.execute()
+
+    assert active == 0
+    assert started <= workers * 2
+    assert plan._work == []
+    assert not any(
+        thread.name.startswith("fastwam-data-manifest-hash")
+        for thread in threading.enumerate()
+    )
 
 
 def test_v2_manifest_requires_exact_selected_prompt_coverage(fake_data, tmp_path):

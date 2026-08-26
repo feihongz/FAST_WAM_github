@@ -13,7 +13,7 @@ from scripts.generate_gate_labels import _resolved_config
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TASK_NAME = "robotwin_stage2_gate_labels_3cam384"
-MANIFEST_PLACEHOLDER = "REPLACE_AFTER_IDENTITY_BUILD"
+MANIFEST_SHA256 = "1190b75b1ef19a7abd949bdff5679da59afa7e51a043eeb43663cf2c4495173c"
 ADAPTER_PLACEHOLDER = "REPLACE_AFTER_STAGE3_ADAPTER_EXPORT"
 
 
@@ -74,7 +74,7 @@ def test_robotwin_stage2_label_task_locks_formal_contract(monkeypatch):
     assert resolved["assets"]["normalization_stats"]["expected_sha256"] == (
         "7a02c46cfc8c5e746c0afbe41fca73f723eda34cbc083f8ca54f76d8f7468095"
     )
-    assert resolved["data_manifest"]["expected_sha256"] == MANIFEST_PLACEHOLDER
+    assert resolved["data_manifest"]["expected_sha256"] == MANIFEST_SHA256
     assert resolved["adapter"] == {
         "checkpoint": ADAPTER_PLACEHOLDER,
         "expected_sha256": ADAPTER_PLACEHOLDER,
@@ -109,14 +109,19 @@ def test_robotwin_stage2_label_task_locks_formal_contract(monkeypatch):
     }
 
 
-def test_robotwin_stage2_label_task_placeholders_fail_closed(monkeypatch):
+def test_robotwin_stage2_label_task_locks_manifest_and_adapter_fails_closed(
+    monkeypatch,
+):
     resolved = _compose(monkeypatch)
-    for value, field in (
-        (resolved["data_manifest"]["expected_sha256"], "manifest"),
-        (resolved["adapter"]["expected_sha256"], "adapter"),
-    ):
-        with pytest.raises(ValueError, match="64 lowercase hex"):
-            require_sha256(value, field=field)
+    assert require_sha256(
+        resolved["data_manifest"]["expected_sha256"],
+        field="manifest",
+    ) == MANIFEST_SHA256
+    with pytest.raises(ValueError, match="64 lowercase hex"):
+        require_sha256(
+            resolved["adapter"]["expected_sha256"],
+            field="adapter",
+        )
 
 
 def test_robotwin_stage2_label_task_requires_durable_output_env(monkeypatch):

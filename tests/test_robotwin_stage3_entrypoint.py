@@ -14,7 +14,7 @@ from fastwam.utils.config_resolvers import register_default_resolvers
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-PLACEHOLDER = "REPLACE_AFTER_IDENTITY_BUILD"
+MANIFEST_SHA256 = "1190b75b1ef19a7abd949bdff5679da59afa7e51a043eeb43663cf2c4495173c"
 TASK_NAME = "robotwin_stage3_alignment_3cam384_1e-4"
 ROBOTWIN_ENVIRONMENT_OVERRIDES = (
     "FASTWAM_ROBOTWIN_STAGE3_BASE_CHECKPOINT",
@@ -133,17 +133,21 @@ def test_robotwin_stage3_locks_base_train_split_and_legal_8gpu_batch(monkeypatch
     ) == 7
 
 
-def test_robotwin_stage3_manifest_placeholder_fails_closed(monkeypatch):
+def test_robotwin_stage3_manifest_identity_is_locked_and_invalid_sha_fails_closed(
+    monkeypatch,
+):
     resolved = _compose_robotwin_stage3(monkeypatch)
     assert resolved["base"]["expected_sha256"] == (
         "368a99ca9575a78d01f4cdcdee8820ec74d30c4528cf7aff07b83361a17cbbda"
     )
-    assert resolved["data_manifest"]["expected_sha256"] == PLACEHOLDER
+    assert resolved["data_manifest"]["expected_sha256"] == MANIFEST_SHA256
 
     accelerator = Accelerator(
         cpu=True,
         step_scheduler_with_optimizer=False,
     )
+    manifest_config = dict(resolved["data_manifest"])
+    manifest_config["expected_sha256"] = "not-a-valid-sha256"
     with pytest.raises(
         RuntimeError,
         match="requires data_manifest.path and data_manifest.expected_sha256",
@@ -151,7 +155,7 @@ def test_robotwin_stage3_manifest_placeholder_fails_closed(monkeypatch):
         _resolve_data_identity(
             accelerator,
             object(),
-            manifest_config=dict(resolved["data_manifest"]),
+            manifest_config=manifest_config,
             normalization_stats_path=resolved["assets"]["normalization_stats"][
                 "path"
             ],
