@@ -12,6 +12,45 @@ from .processors.base_processor import BaseProcessor
 
 logger = get_logger(__name__)
 
+
+def _identity_scalar(value: Any, *, name: str) -> int:
+    if isinstance(value, torch.Tensor):
+        if value.numel() != 1:
+            raise ValueError(f"sample identity {name} must be scalar")
+        value = value.item()
+    elif isinstance(value, np.ndarray):
+        if value.size != 1:
+            raise ValueError(f"sample identity {name} must be scalar")
+        value = value.item()
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"sample identity {name} must be an integer scalar")
+    result = int(value)
+    if result < 0:
+        raise ValueError(f"sample identity {name} must be non-negative")
+    return result
+
+
+def _build_sample_identity(
+    global_sample_index: int,
+    lerobot_sample: Dict[str, Any],
+) -> dict[str, int]:
+    """Capture the current-frame anchor before modality processing."""
+
+    sources = {
+        "global_sample_index": global_sample_index,
+        "dataset_index": lerobot_sample.get("dataset_index"),
+        "episode_index": lerobot_sample.get("episode_index"),
+        "frame_index": lerobot_sample.get("frame_index"),
+        "dataset_frame_index": lerobot_sample.get("index"),
+    }
+    missing = [name for name, value in sources.items() if value is None]
+    if missing:
+        raise KeyError(f"LeRobot sample is missing identity fields: {missing}")
+    return {
+        name: _identity_scalar(value, name=name)
+        for name, value in sources.items()
+    }
+
 MAX_GETITEM_ATTEMPT = 5
 
 class BaseLerobotDataset(torch.utils.data.Dataset):
@@ -35,6 +74,7 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
         global_sample_stride: int = 1,
         video_backend: str | None = None,
         strict_data_mode: bool = False,
+        load_actions: bool = True,
     ):
         assert len(dataset_dirs) > 0, "At least one dataset directory is required"
         assert past_action_size == 0
@@ -46,6 +86,9 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
         self.action_size = action_size
         self.past_action_size = past_action_size
         self.obs_size = obs_size
+        self.load_actions = bool(load_actions)
+        if not self.load_actions and action_size != 0:
+            raise ValueError("action_size must be zero when load_actions is disabled")
         self.processor = None  # Will be set externally
         metas = []
         for ds_dir in dataset_dirs:
@@ -59,9 +102,11 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
         fps = fps_list[0]
         
         self.global_sample_stride = global_sample_stride
+        self.video_backend = video_backend
 
         self.val_set_proportion = val_set_proportion
         self.is_training_set = is_training_set
+        self.seed = seed
         self.strict_data_mode = bool(strict_data_mode)
 
         self.image_meta = shape_meta["images"]
@@ -86,7 +131,8 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
         for meta in self.action_meta:
             key = meta["key"]
             meta["lerobot_key"] = f"action.{key}" if key != "default" else "action"
-            delta_timestamps[meta["lerobot_key"]] = [(t * global_sample_stride) / fps for t in range(-past_action_size, -past_action_size + action_size)]
+            if self.load_actions:
+                delta_timestamps[meta["lerobot_key"]] = [(t * global_sample_stride) / fps for t in range(-past_action_size, -past_action_size + action_size)]
 
         episodes = {}
         if val_set_proportion < 1e-6:
@@ -111,6 +157,20 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
             video_backend=video_backend,
             allow_video_backend_fallback=not self.strict_data_mode,
         )
+        if not self.load_actions:
+            # A current-only Gate reader must not materialize even the anchor
+            # action column. Hugging Face Dataset row access otherwise returns
+            # every parquet column, including features absent from delta queries.
+            for dataset in self.multi_dataset._datasets:
+                action_columns = [
+                    name
+                    for name in dataset.hf_dataset.column_names
+                    if name == "action" or name.startswith("action.")
+                ]
+                if action_columns:
+                    dataset.hf_dataset = dataset.hf_dataset.remove_columns(
+                        action_columns
+                    )
         
         # HACK: lerobot 3.0 will fix this
         episode_data_index = []
@@ -194,6 +254,10 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
             try:
                 lerobot_sample = self.multi_dataset[sample_idx]
                 lerobot_sample = self._split_lerobot_sample(lerobot_sample)
+                sample_identity = _build_sample_identity(
+                    sample_idx,
+                    lerobot_sample,
+                )
                 break
             except Exception as err:
                 if self.strict_data_mode:
@@ -216,23 +280,27 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
             ) from last_exception
 
         # Get data from lerobot, organized in nested dict
+        load_actions = bool(getattr(self, "load_actions", True))
         sample = {
             "idx": sample_idx,
             "task": lerobot_sample["task"],
-            "action": {},
             "state": {},
             "images": {},
         }
+        if load_actions:
+            sample["action"] = {}
         for meta in self.state_meta:
             sample["state"][meta["key"]] = self._get_state(meta, lerobot_sample)
 
-        for meta in self.action_meta:
-            sample["action"][meta["key"]] = self._get_action(meta, lerobot_sample)
+        if load_actions:
+            for meta in self.action_meta:
+                sample["action"][meta["key"]] = self._get_action(meta, lerobot_sample)
 
         for meta in self.image_meta:
             sample["images"][meta["key"]] = self._get_image(meta, lerobot_sample)
 
-        sample["action_is_pad"] = lerobot_sample[f"{self.action_meta[0]['lerobot_key']}_is_pad"]
+        if load_actions:
+            sample["action_is_pad"] = lerobot_sample[f"{self.action_meta[0]['lerobot_key']}_is_pad"]
         sample["state_is_pad"] = lerobot_sample[f"{self.state_meta[0]['lerobot_key']}_is_pad"]
         sample["image_is_pad"] = lerobot_sample[f"{self.image_meta[0]['lerobot_key']}_is_pad"]
 
@@ -246,6 +314,7 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
         # for quick data loading
         if self.processor is not None:
             sample = self.processor.preprocess(sample)
+        sample["sample_identity"] = sample_identity
 
         return sample
 

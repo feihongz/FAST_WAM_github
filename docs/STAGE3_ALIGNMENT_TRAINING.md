@@ -121,4 +121,6 @@ converted safetensors 当前不在机器上，因此在恢复原文件或完成 
 
 Stage 3 Adapter 冻结并完成 closed-loop endpoint eval 后，才重新生成 Stage 2 的
 `E0/E10` 标签并训练 Binary Gate。最终 eval 只路由 `N=0` 或 `N=10`，阈值扫描使用
-`N_eff = 10 * n_w / n_queries` 作为横坐标绘制 success-compute Pareto 图。
+`N_eff = 10 * n_w / n_queries` 作为横坐标绘制 success-compute Pareto 图。完整的
+标签分片、严格合并和 Gate-only 训练命令见
+[Stage 2 Binary Video Gate](./STAGE2_GATE_TRAINING.md)。

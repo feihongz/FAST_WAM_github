@@ -44,7 +44,11 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         override_instruction: Optional[str] = None, # whether to hardcode a specific instruction for all samples, for debugging
         video_backend: str | None = None,
         strict_data_mode: bool = False,
+        save_stats_copy: bool = True,
     ):
+        if not isinstance(save_stats_copy, bool):
+            raise TypeError("save_stats_copy must be bool")
+        self.save_stats_copy = save_stats_copy
         self.lerobot_dataset = BaseLerobotDataset(
             dataset_dirs=dataset_dirs,
             shape_meta=OmegaConf.to_container(shape_meta, resolve=True),
@@ -93,13 +97,17 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             if not pretrained_norm_stats:
                 if not is_training_set:
                     raise ValueError("pretrained_norm_stats must be provided for validation/test sets since we don't want to calculate stats on them.")
-                if PartialState().is_main_process:
+                if self.save_stats_copy and PartialState().is_main_process:
                     logger.info("Calculating dataset stats for normalization...")
                     dataset_stats = self.lerobot_dataset.get_dataset_stats(processor)
                     work_dir = misc.get_work_dir()
                     save_dataset_stats_to_json(dataset_stats, os.path.join(work_dir, "dataset_stats.json"))
                 else:
-                    dataset_stats = None
+                    dataset_stats = (
+                        self.lerobot_dataset.get_dataset_stats(processor)
+                        if not self.save_stats_copy
+                        else None
+                    )
                 if torch.distributed.is_available() and torch.distributed.is_initialized():
                     obj_list = [dataset_stats]
                     torch.distributed.broadcast_object_list(obj_list, src=0)
@@ -107,7 +115,7 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             else:
                 dataset_stats = load_dataset_stats_from_json(pretrained_norm_stats)
                 logger.info(f"Using dataset stats: {pretrained_norm_stats}")
-                if PartialState().is_main_process:
+                if self.save_stats_copy and PartialState().is_main_process:
                     work_dir = misc.get_work_dir()
                     save_dataset_stats_to_json(dataset_stats, os.path.join(work_dir, "dataset_stats.json"))
 
@@ -116,6 +124,13 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         
     def __len__(self):
         return len(self.lerobot_dataset)
+
+    def current_only(self):
+        """Build the strict single-frame input source used for Gate training."""
+
+        from .current_robot_video_dataset import CurrentRobotVideoDataset
+
+        return CurrentRobotVideoDataset(self)
 
     def _get(self, idx):
         sample_idx = idx
@@ -221,6 +236,7 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         instruction = DEFAULT_PROMPT.format(task=task)
 
         context, context_mask = self._get_cached_text_context(instruction)
+        gate_context_mask = context_mask.clone()
         # NOTE: to keep consistent with wan2.2's behavior
         context[~context_mask] = 0.0
         context_mask = torch.ones_like(context_mask)
@@ -232,9 +248,12 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             "prompt": instruction,
             "context": context,
             "context_mask": context_mask,
+            "gate_context_mask": gate_context_mask,
             "image_is_pad": image_is_pad,
             "action_is_pad": sample["action_is_pad"],
+            "action_dim_is_pad": sample["action_dim_is_pad"],
             "proprio_is_pad": sample["proprio_is_pad"],
+            "sample_identity": dict(sample["sample_identity"]),
         }
         return data
 

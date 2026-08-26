@@ -1,0 +1,33 @@
+# @package _global_
+
+label_job_dir: ???
+
+data_manifest:
+  path: ???
+  expected_sha256: ???
+
+episode_split:
+  path: ${label_job_dir}/episode_split.json
+  expected_assignment_sha256: ???
+
+label_contract:
+  path: ${label_job_dir}/label_contract.json
+  expected_sha256: ???
+
+output:
+  directory: ???
+  rows_file: labels.jsonl
+  manifest_file: manifest.json
+  # Leave empty for first publication; set it for a pinned reproducibility run.
+  expected_manifest_sha256: ""
+
+runtime:
+  repo_dir: null
+  require_clean_git: true
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null

@@ -1,0 +1,88 @@
+# @package _global_
+
+defaults:
+  - _self_
+  - data: null
+
+output_dir: ???
+
+data_manifest:
+  path: ???
+  expected_sha256: ???
+
+episode_split:
+  path: ???
+  expected_assignment_sha256: ???
+
+label_contract:
+  path: ???
+  expected_sha256: ???
+
+label_manifest:
+  path: ???
+  expected_sha256: ???
+
+# Hashes only: Gate training never loads the 5B base or Adapter.
+source_identities:
+  base_checkpoint_sha256: ???
+  adapter_checkpoint_sha256: ???
+
+assets:
+  normalization_stats:
+    path: ${oc.env:FASTWAM_NORMALIZATION_STATS,''}
+    expected_sha256: ???
+
+data:
+  train:
+    pretrained_norm_stats: ${oc.env:FASTWAM_NORMALIZATION_STATS,''}
+    strict_data_mode: true
+    video_backend: torchcodec
+    save_stats_copy: false
+
+gate:
+  proprio_dim: ${data.train.processor.proprio_output_dim}
+  context_dim: 4096
+  cnn_channels: [32, 64, 128]
+  context_feature_dim: 128
+  proprio_hidden_dim: 64
+  proprio_feature_dim: 32
+  fusion_hidden_dim: 128
+
+training:
+  seed: 42
+  batch_size: 64
+  num_workers: 0
+  pin_memory: true
+  shuffle: true
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+  max_grad_norm: 1.0
+  # A resume continues to this total, rather than adding this many epochs.
+  num_epochs: 20
+  early_stop_patience: 3
+  min_delta: 0.0
+  threshold: 0.5
+  num_calibration_bins: 10
+
+checkpoint:
+  strict_resume: true
+  resume: null
+  run_identity_file: run_identity.json
+  state_file: training_state.pt
+  best_file: gate_best.pt
+  last_file: gate_last.pt
+  summary_file: summary.json
+
+runtime:
+  repo_dir: null
+  require_clean_git: true
+  device: cuda:0
+  require_cuda: true
+  deterministic_algorithms: true
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null

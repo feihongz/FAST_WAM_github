@@ -1,0 +1,77 @@
+# @package _global_
+
+defaults:
+  - _self_
+  - data: null
+  - model: null
+
+# Supply a durable location shared by all label shards.
+output_dir: ???
+
+base:
+  checkpoint: ???
+  expected_sha256: ???
+
+adapter:
+  checkpoint: ???
+  expected_sha256: ???
+
+assets:
+  vae:
+    path: ???
+    expected_sha256: ???
+  normalization_stats:
+    path: ${oc.env:FASTWAM_NORMALIZATION_STATS,''}
+    expected_sha256: ???
+
+data:
+  train:
+    pretrained_norm_stats: ${oc.env:FASTWAM_NORMALIZATION_STATS,''}
+    strict_data_mode: true
+    video_backend: torchcodec
+    save_stats_copy: false
+
+data_manifest:
+  path: ???
+  expected_sha256: ???
+
+# This command builds the split deterministically. An existing path is accepted
+# only when its JSON exactly matches the recomputed split.
+episode_split:
+  path: ${output_dir}/episode_split.json
+  validation_fraction: 0.1
+  split_seed: 42
+  expected_assignment_sha256: ""
+
+labeling:
+  base_seed: 42
+  num_seed_pairs: 2
+  relative_margin: 0.05
+  relative_gain_epsilon: 1.0e-12
+  num_inference_steps: 10
+  sigma_shift: null
+  rand_device: cpu
+  tiled: false
+  num_shards: 64
+  chunk_size: 64
+  # Null processes all shards; a sorted subset supports independent jobs.
+  # Explicit subsets cannot be combined with torchrun/WORLD_SIZE > 1.
+  shard_indices: null
+  contract_file: label_contract.json
+  runtime_config_file: label_runtime_config.json
+
+runtime:
+  repo_dir: null
+  require_clean_git: true
+  require_cuda: true
+  # LOCAL_RANK selects the index under torchrun.
+  device: cuda
+  mixed_precision: bf16
+  required_environment: {}
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null

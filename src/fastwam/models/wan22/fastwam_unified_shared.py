@@ -271,7 +271,12 @@ class FastWAMUnifiedShared(FastWAM):
 
     @torch.no_grad()
     def infer_action_without_video(self, *args, **kwargs):
-        return FastWAM.infer_action(self, *args, **kwargs)
+        previous_mode = getattr(self, "_unified_inference_mode", "wo")
+        self._unified_inference_mode = "wo"
+        try:
+            return FastWAM.infer_action(self, *args, **kwargs)
+        finally:
+            self._unified_inference_mode = previous_mode
 
     @torch.no_grad()
     def infer_action_with_video(self, *args, **kwargs):

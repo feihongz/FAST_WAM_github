@@ -1,0 +1,486 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+import torch
+
+import fastwam.gating.artifacts as gate_artifacts
+from fastwam.alignment.checkpointing import canonical_json_sha256
+from fastwam.alignment.data_identity import canonical_data_manifest_sha256
+from fastwam.gating.artifacts import (
+    build_label_artifact_context,
+    build_label_contract,
+    load_complete_label_chunk_from_context,
+    shard_for_sample_id,
+)
+from fastwam.gating.contracts import build_episode_split
+from fastwam.gating.inference import PairedActionRollouts
+from fastwam.gating.label_job import (
+    LabelJobDependencies,
+    enumerate_label_samples,
+    plan_label_chunks,
+    run_label_job,
+)
+
+
+def _data_manifest() -> dict:
+    manifest = {
+        "schema_version": 1,
+        "kind": "stage3_libero_data_manifest",
+        "sampling": {},
+        "num_frames": 6,
+        "dataset_roots": [
+            {
+                "dataset_index": 0,
+                "root": "/data/a",
+                "selected_episodes": [2, 5],
+                "num_frames": 6,
+                "episode_boundaries": [
+                    {
+                        "episode_index": 2,
+                        "from": 0,
+                        "to": 2,
+                        "length": 2,
+                    },
+                    {
+                        "episode_index": 5,
+                        "from": 2,
+                        "to": 6,
+                        "length": 4,
+                    },
+                ],
+                "video_keys": [],
+                "files": [],
+            }
+        ],
+        "text_embedding_cache": {},
+        "normalization_stats": {},
+        "decoder": {},
+    }
+    manifest["manifest_sha256"] = canonical_data_manifest_sha256(manifest)
+    return manifest
+
+
+def _context(*, num_shards: int = 2, chunk_size: int = 2):
+    manifest = _data_manifest()
+    split = build_episode_split(
+        manifest,
+        validation_fraction=0.5,
+        split_seed=7,
+    )
+    contract = build_label_contract(
+        data_manifest=manifest,
+        episode_split=split,
+        base_checkpoint_sha256="a" * 64,
+        adapter_checkpoint_sha256="b" * 64,
+        normalization_stats_sha256="c" * 64,
+        data_config_sha256="d" * 64,
+        vae_sha256="f" * 64,
+        label_runtime_config_sha256="1" * 64,
+        git_identity={
+            "commit": "e" * 40,
+            "tracked_dirty": False,
+            "untracked_source_files": [],
+        },
+        base_seed=42,
+        num_seed_pairs=2,
+        relative_margin=0.05,
+        num_shards=num_shards,
+        chunk_size=chunk_size,
+    )
+    return build_label_artifact_context(
+        contract=contract,
+        data_manifest=manifest,
+        episode_split=split,
+    )
+
+
+def _sample(identity) -> dict:
+    return {
+        "video": torch.zeros(3, 5, 16, 16),
+        "action": torch.zeros(4, 3),
+        "proprio": torch.zeros(4, 8),
+        "context": torch.zeros(6, 16),
+        "context_mask": torch.ones(6, dtype=torch.bool),
+        "gate_context_mask": torch.ones(6, dtype=torch.bool),
+        "action_is_pad": torch.zeros(4, dtype=torch.bool),
+        "action_dim_is_pad": torch.zeros(3, dtype=torch.bool),
+        "sample_identity": dict(identity),
+    }
+
+
+class RecordingDataset:
+    def __init__(self, identities) -> None:
+        self.samples = [_sample(sample.identity) for sample in identities]
+        self.requests: list[int] = []
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, index: int) -> dict:
+        self.requests.append(index)
+        return self.samples[index]
+
+
+class FakeRolloutRunner:
+    def __init__(self, *, fail_on_call: int | None = None) -> None:
+        self.calls: list[dict] = []
+        self.fail_on_call = fail_on_call
+
+    def __call__(
+        self,
+        model,
+        sample,
+        *,
+        seeds,
+        num_inference_steps,
+        sigma_shift,
+        rand_device,
+        tiled,
+    ) -> PairedActionRollouts:
+        del model
+        self.calls.append(
+            {
+                "identity": dict(sample["sample_identity"]),
+                "seeds": tuple(seeds),
+                "num_inference_steps": num_inference_steps,
+                "sigma_shift": sigma_shift,
+                "rand_device": rand_device,
+                "tiled": tiled,
+            }
+        )
+        if self.fail_on_call is not None and len(self.calls) == self.fail_on_call:
+            raise RuntimeError("synthetic rollout failure")
+        action = sample["action"]
+        shape = (len(seeds), 1, *action.shape)
+        return PairedActionRollouts(
+            action_wo=torch.ones(shape),
+            action_w=torch.zeros(shape),
+            seeds=tuple(seeds),
+            action_horizon=action.shape[0],
+            num_video_frames=sample["video"].shape[1],
+            num_inference_steps=num_inference_steps,
+        )
+
+
+def _dependencies(runner) -> LabelJobDependencies:
+    return LabelJobDependencies(run_rollouts=runner)
+
+
+def test_plan_is_metadata_only_deterministic_and_fixed_by_shard(tmp_path):
+    context = _context(num_shards=3)
+
+    samples = enumerate_label_samples(context)
+    plans = plan_label_chunks(
+        context=context,
+        output_dir=tmp_path,
+        chunk_size=2,
+    )
+
+    assert [sample.global_sample_index for sample in samples] == list(range(6))
+    assert plans == plan_label_chunks(
+        context=context,
+        output_dir=tmp_path,
+        chunk_size=2,
+    )
+    with pytest.raises(ValueError, match="immutable label contract"):
+        plan_label_chunks(
+            context=context,
+            output_dir=tmp_path,
+            chunk_size=3,
+        )
+    flattened = [sample for plan in plans for sample in plan.samples]
+    assert {sample.sample_id for sample in flattened} == {
+        sample.sample_id for sample in samples
+    }
+    for plan in plans:
+        assert 1 <= len(plan.samples) <= 2
+        assert plan.planned_sample_ids == tuple(sorted(plan.planned_sample_ids))
+        assert plan.path == (
+            Path(tmp_path).resolve()
+            / f"shard-{plan.shard_index:05d}"
+            / f"chunk-{plan.chunk_index:08d}.json"
+        )
+        assert all(
+            shard_for_sample_id(
+                sample.sample_id,
+                num_shards=context.contract["num_shards"],
+            )
+            == plan.shard_index
+            for sample in plan.samples
+        )
+    with pytest.raises(TypeError):
+        samples[0].identity["global_sample_index"] = 99
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_run_writes_complete_chunks_then_resumes_without_dataset_reads(tmp_path):
+    context = _context(num_shards=2)
+    identities = enumerate_label_samples(context)
+    dataset = RecordingDataset(identities)
+    runner = FakeRolloutRunner()
+    plans = plan_label_chunks(
+        context=context,
+        output_dir=tmp_path,
+        chunk_size=2,
+    )
+
+    first = run_label_job(
+        object(),
+        dataset,
+        context=context,
+        output_dir=tmp_path,
+        chunk_size=2,
+        dependencies=_dependencies(runner),
+    )
+
+    assert first.written_chunk_count == first.planned_chunk_count == len(plans)
+    assert first.resumed_chunk_count == 0
+    assert first.inferred_sample_count == first.planned_sample_count == 6
+    assert dataset.requests == [
+        sample.global_sample_index for plan in plans for sample in plan.samples
+    ]
+    before = {path: path.read_bytes() for path in first.chunk_paths}
+    for plan in plans:
+        chunk = load_complete_label_chunk_from_context(
+            plan.path,
+            context=context,
+            planned_sample_ids=plan.planned_sample_ids,
+        )
+        assert chunk["shard_index"] == plan.shard_index
+        assert chunk["chunk_index"] == plan.chunk_index
+        assert chunk["row_count"] == len(plan.samples)
+    assert not list(tmp_path.rglob("*.tmp"))
+
+    resumed_dataset = RecordingDataset(identities)
+
+    def forbidden_rollout(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("a complete chunk must skip inference")
+
+    second = run_label_job(
+        object(),
+        resumed_dataset,
+        context=context,
+        output_dir=tmp_path,
+        chunk_size=2,
+        dependencies=_dependencies(forbidden_rollout),
+    )
+
+    assert second.written_chunk_count == 0
+    assert second.resumed_chunk_count == second.planned_chunk_count == len(plans)
+    assert second.inferred_sample_count == 0
+    assert resumed_dataset.requests == []
+    assert {path: path.read_bytes() for path in second.chunk_paths} == before
+
+
+def test_dataset_identity_mismatch_fails_before_rollout_or_publish(tmp_path):
+    context = _context(num_shards=2, chunk_size=3)
+    identities = enumerate_label_samples(context)
+    all_plans = plan_label_chunks(
+        context=context,
+        output_dir=tmp_path,
+        chunk_size=3,
+    )
+    first_plan = all_plans[0]
+    first_sample = first_plan.samples[0]
+    dataset = RecordingDataset(identities)
+    other = identities[(first_sample.global_sample_index + 1) % len(identities)]
+    dataset.samples[first_sample.global_sample_index]["sample_identity"] = dict(
+        other.identity
+    )
+    runner = FakeRolloutRunner()
+
+    with pytest.raises(ValueError, match="dataset sample_identity disagrees"):
+        run_label_job(
+            object(),
+            dataset,
+            context=context,
+            output_dir=tmp_path,
+            chunk_size=3,
+            shard_indices=[first_plan.shard_index],
+            dependencies=_dependencies(runner),
+        )
+
+    assert runner.calls == []
+    assert not first_plan.path.exists()
+
+
+def test_corrupt_existing_chunk_is_never_silently_overwritten(tmp_path):
+    context = _context(num_shards=2)
+    identities = enumerate_label_samples(context)
+    plan = plan_label_chunks(
+        context=context,
+        output_dir=tmp_path,
+        chunk_size=2,
+    )[0]
+    plan.path.parent.mkdir(parents=True)
+    corrupt = b'{"interrupted":'
+    plan.path.write_bytes(corrupt)
+    dataset = RecordingDataset(identities)
+
+    def forbidden_rollout(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("corrupt resume must fail before inference")
+
+    with pytest.raises(ValueError, match="unreadable or incomplete"):
+        run_label_job(
+            object(),
+            dataset,
+            context=context,
+            output_dir=tmp_path,
+            chunk_size=2,
+            shard_indices=[plan.shard_index],
+            dependencies=_dependencies(forbidden_rollout),
+        )
+
+    assert plan.path.read_bytes() == corrupt
+    assert dataset.requests == []
+
+
+def test_failed_inference_publishes_no_partial_chunk_and_retry_is_atomic(tmp_path):
+    context = _context(num_shards=1, chunk_size=99)
+    identities = enumerate_label_samples(context)
+    plan = plan_label_chunks(
+        context=context,
+        output_dir=tmp_path,
+        chunk_size=99,
+    )[0]
+    failing_dataset = RecordingDataset(identities)
+
+    with pytest.raises(RuntimeError, match="synthetic rollout failure"):
+        run_label_job(
+            object(),
+            failing_dataset,
+            context=context,
+            output_dir=tmp_path,
+            chunk_size=99,
+            dependencies=_dependencies(FakeRolloutRunner(fail_on_call=2)),
+        )
+
+    assert not plan.path.exists()
+    assert not list(tmp_path.rglob("*.tmp"))
+
+    retry = run_label_job(
+        object(),
+        RecordingDataset(identities),
+        context=context,
+        output_dir=tmp_path,
+        chunk_size=99,
+        dependencies=_dependencies(FakeRolloutRunner()),
+    )
+    assert retry.written_chunk_count == 1
+    assert retry.resumed_chunk_count == 0
+    assert load_complete_label_chunk_from_context(
+        plan.path,
+        context=context,
+        planned_sample_ids=plan.planned_sample_ids,
+    )["row_count"] == 6
+    assert not list(tmp_path.rglob("*.tmp"))
+
+
+def test_publish_race_with_identical_complete_winner_resumes(tmp_path, monkeypatch):
+    context = _context(num_shards=1, chunk_size=99)
+    identities = enumerate_label_samples(context)
+    dataset = RecordingDataset(identities)
+    original_link = gate_artifacts.os.link
+    link_calls = 0
+
+    def identical_winner_first(source, destination):
+        nonlocal link_calls
+        link_calls += 1
+        # Simulate another worker atomically publishing this exact complete
+        # candidate immediately before our own create-if-absent operation.
+        original_link(source, destination)
+        return original_link(source, destination)
+
+    monkeypatch.setattr(gate_artifacts.os, "link", identical_winner_first)
+    result = run_label_job(
+        object(),
+        dataset,
+        context=context,
+        output_dir=tmp_path,
+        chunk_size=99,
+        dependencies=_dependencies(FakeRolloutRunner()),
+    )
+
+    assert link_calls == 1
+    assert result.written_chunk_count == 0
+    assert result.resumed_chunk_count == result.planned_chunk_count == 1
+    assert result.inferred_sample_count == 6
+    assert load_complete_label_chunk_from_context(
+        result.chunk_paths[0],
+        context=context,
+        planned_sample_ids=plan_label_chunks(
+            context=context,
+            output_dir=tmp_path,
+            chunk_size=99,
+        )[0].planned_sample_ids,
+    )["row_count"] == 6
+    assert not list(tmp_path.rglob("*.tmp"))
+
+
+@pytest.mark.parametrize(
+    ("winner_kind", "message"),
+    [
+        ("different", "coordinates"),
+        ("corrupt", "unreadable or incomplete"),
+    ],
+)
+def test_publish_race_never_overwrites_different_or_corrupt_winner(
+    tmp_path,
+    monkeypatch,
+    winner_kind,
+    message,
+):
+    context = _context(num_shards=1, chunk_size=99)
+    identities = enumerate_label_samples(context)
+    dataset = RecordingDataset(identities)
+    original_link = gate_artifacts.os.link
+    winner_bytes: dict[str, bytes] = {}
+
+    def competing_winner_first(source, destination):
+        candidate = Path(source)
+        destination = Path(destination)
+        if winner_kind == "different":
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+            payload["chunk_index"] += 1
+            unhashed = dict(payload)
+            unhashed.pop("chunk_sha256")
+            payload["chunk_sha256"] = canonical_json_sha256(unhashed)
+            content = (
+                json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=True)
+                + "\n"
+            ).encode("utf-8")
+        else:
+            content = b'{"interrupted":'
+        competitor = destination.with_name(".competing-worker.tmp")
+        competitor.write_bytes(content)
+        original_link(competitor, destination)
+        competitor.unlink()
+        winner_bytes["value"] = content
+        return original_link(candidate, destination)
+
+    monkeypatch.setattr(gate_artifacts.os, "link", competing_winner_first)
+    with pytest.raises(ValueError, match=message):
+        run_label_job(
+            object(),
+            dataset,
+            context=context,
+            output_dir=tmp_path,
+            chunk_size=99,
+            dependencies=_dependencies(FakeRolloutRunner()),
+        )
+
+    plan = plan_label_chunks(
+        context=context,
+        output_dir=tmp_path,
+        chunk_size=99,
+    )[0]
+    assert plan.path.read_bytes() == winner_bytes["value"]
+    assert dataset.requests == [
+        sample.global_sample_index for sample in plan.samples
+    ]
+    assert not list(tmp_path.rglob("*.tmp"))

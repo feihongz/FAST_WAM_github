@@ -49,6 +49,7 @@ WAN22_MODEL_REGISTRY = [
         "model_name": "wan_video_vae",
         "model_class": WanVideoVAE38,
         "state_dict_converter": wan_video_vae_state_dict_converter,
+        "strict_load": True,
     },
 ]
 
@@ -117,7 +118,10 @@ def _load_registered_model(
     if state_dict_converter is not None:
         state_dict = state_dict_converter(state_dict)
 
-    model.load_state_dict(state_dict, strict=False)
+    model.load_state_dict(
+        state_dict,
+        strict=bool(matched_config.get("strict_load", False)),
+    )
     model = model.to(device=device, dtype=torch_dtype)
     return model
 
