@@ -25,24 +25,29 @@ metadata、normalization stats、decoder 和采样配置，并读取所有选中
 ```bash
 python scripts/build_stage3_data_manifest.py \
   task=libero_stage3_alignment_2cam224_1e-4 \
-  data_manifest.path=/absolute/path/libero_stage3_data_manifest.json
+  runtime.expected_dataset_length=273465 \
+  runtime.expected_dataset_episodes=1693 \
+  +data.train.save_stats_copy=false \
+  data_manifest.path=/root/feihong/FastWAM/formal_runs/contracts/stage3/libero_current_273465f_1693e/libero_stage3_data_manifest.json
 ```
 
 当前机器上的 LIBERO 数据是 `273465` frames / `1693` episodes；2026-07-01 base
-训练记录与 stats 是 `277713` frames / `1712` episodes。任务配置默认锁后者，所以
-当前数据会被拒绝。必须先二选一：恢复原数据；或明确接受当前数据，并在生成 manifest
-和训练时同时覆盖：
+训练记录与 stats 是 `277713` frames / `1712` episodes。2026-08-26 已明确接受当前
+数据用于 Stage 3，同时继续锁定 base 对应的 normalization stats。任务配置默认绑定：
 
 ```text
-runtime.expected_dataset_length=273465
-runtime.expected_dataset_episodes=1693
+path=/root/feihong/FastWAM/formal_runs/contracts/stage3/libero_current_273465f_1693e/libero_stage3_data_manifest.json
+canonical_sha256=08da49109a57b55c67f3fa4ac31fbfa44e44dd541a194a5d3420838537d0d320
+frames=273465
+episodes=1693
 ```
 
-生成器输出 canonical SHA256。正式训练还必须传入：
+若在另一台机器使用内容完全相同的 manifest 副本，可通过环境变量同时覆盖路径与
+canonical SHA256：
 
 ```text
-data_manifest.path=/absolute/path/libero_stage3_data_manifest.json
-data_manifest.expected_sha256=<generator 输出的 canonical_sha256>
+FASTWAM_STAGE3_DATA_MANIFEST=/absolute/path/libero_stage3_data_manifest.json
+FASTWAM_STAGE3_DATA_MANIFEST_SHA256=08da49109a57b55c67f3fa4ac31fbfa44e44dd541a194a5d3420838537d0d320
 ```
 
 ## 当前 LIBERO 训练配置
@@ -51,9 +56,7 @@ data_manifest.expected_sha256=<generator 输出的 canonical_sha256>
 accelerate launch \
   --config_file scripts/accelerate_configs/accelerate_stage3_single_gpu.yaml \
   scripts/train_stage3_alignment.py \
-  task=libero_stage3_alignment_2cam224_1e-4 \
-  data_manifest.path=/absolute/path/libero_stage3_data_manifest.json \
-  data_manifest.expected_sha256=<canonical_sha256>
+  task=libero_stage3_alignment_2cam224_1e-4
 ```
 
 多卡 ZeRO-2 使用专用配置：

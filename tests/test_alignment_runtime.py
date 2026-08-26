@@ -53,11 +53,18 @@ def test_libero_stage3_hydra_contract_resolves():
         "expected_sha256",
         "full_content_verify",
     }
+    assert resolved["data_manifest"]["path"] == (
+        "/root/feihong/FastWAM/formal_runs/contracts/stage3/"
+        "libero_current_273465f_1693e/libero_stage3_data_manifest.json"
+    )
+    assert resolved["data_manifest"]["expected_sha256"] == (
+        "08da49109a57b55c67f3fa4ac31fbfa44e44dd541a194a5d3420838537d0d320"
+    )
     assert resolved["data_manifest"]["full_content_verify"] is True
     assert resolved["data"]["train"]["video_backend"] == "torchcodec"
     assert resolved["data"]["train"]["strict_data_mode"] is True
-    assert int(resolved["runtime"]["expected_dataset_length"]) == 277713
-    assert int(resolved["runtime"]["expected_dataset_episodes"]) == 1712
+    assert int(resolved["runtime"]["expected_dataset_length"]) == 273465
+    assert int(resolved["runtime"]["expected_dataset_episodes"]) == 1693
 
 
 def test_runtime_environment_contract_is_fail_closed(monkeypatch):

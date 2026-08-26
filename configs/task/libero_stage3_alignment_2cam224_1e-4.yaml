@@ -19,6 +19,11 @@ assets:
     path: ${data.train.pretrained_norm_stats}
     expected_sha256: 30f81ad7d5076e97323e3328bce003e01a04cb21327b5bacd21bb72846768638
 
+data_manifest:
+  path: ${oc.env:FASTWAM_STAGE3_DATA_MANIFEST,/root/feihong/FastWAM/formal_runs/contracts/stage3/libero_current_273465f_1693e/libero_stage3_data_manifest.json}
+  expected_sha256: ${oc.env:FASTWAM_STAGE3_DATA_MANIFEST_SHA256,08da49109a57b55c67f3fa4ac31fbfa44e44dd541a194a5d3420838537d0d320}
+  full_content_verify: true
+
 data:
   train:
     pretrained_norm_stats: ${oc.env:FASTWAM_LIBERO_STATS,/root/feihong/FastWAM/formal_runs/FAST_WAM_github/libero_unified_shared_2cam224_1e-4/2026-07-01_00-44-20/dataset_stats.json}
@@ -32,11 +37,11 @@ model:
   action_dit_pretrained_path: null
 
 runtime:
-  # The 2026-07-01 base run used 277713 frames / 1712 episodes. The current
-  # local dataset is smaller, so the formal launcher intentionally fails until
-  # the original data is restored or this contract is explicitly revised.
-  expected_dataset_length: ${oc.env:FASTWAM_STAGE3_EXPECTED_DATASET_LENGTH,277713}
-  expected_dataset_episodes: ${oc.env:FASTWAM_STAGE3_EXPECTED_DATASET_EPISODES,1712}
+  # Accepted on 2026-08-26 and bound by data_manifest above. The 2026-07-01
+  # base used 277713 frames / 1712 episodes; keep its normalization stats while
+  # training Stage 3 on the explicitly selected current subset.
+  expected_dataset_length: ${oc.env:FASTWAM_STAGE3_EXPECTED_DATASET_LENGTH,273465}
+  expected_dataset_episodes: ${oc.env:FASTWAM_STAGE3_EXPECTED_DATASET_EPISODES,1693}
   required_environment:
     DIFFSYNTH_MODEL_BASE_PATH: /root/feihong/FastWAM/checkpoints
     DIFFSYNTH_SKIP_DOWNLOAD: "true"
