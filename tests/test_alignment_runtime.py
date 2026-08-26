@@ -5,8 +5,10 @@ from types import SimpleNamespace
 from accelerate import Accelerator
 from hydra import compose, initialize_config_dir
 import pytest
+import torch
 
 from fastwam.alignment.runtime import (
+    _activate_accelerator_cuda_device,
     _all_rank_value,
     _canonicalize_data_paths,
     _main_rank_value,
@@ -89,6 +91,57 @@ def test_runtime_environment_contract_is_fail_closed(monkeypatch):
         _validate_required_environment(
             {"required_environment": {"STAGE3_TEST_ENV": "locked"}}
         )
+
+
+def test_activate_accelerator_cuda_device_resolves_unindexed_single_gpu(
+    monkeypatch,
+):
+    selected = []
+    monkeypatch.setattr("torch.cuda.current_device", lambda: 2)
+    monkeypatch.setattr("torch.cuda.set_device", selected.append)
+
+    assert _activate_accelerator_cuda_device(torch.device("cuda")) == torch.device(
+        "cuda:2"
+    )
+    assert selected == [2]
+
+
+def test_activate_accelerator_cuda_device_preserves_explicit_index(monkeypatch):
+    selected = []
+    monkeypatch.setattr(
+        "torch.cuda.current_device",
+        lambda: pytest.fail("explicit CUDA device must not query current_device"),
+    )
+    monkeypatch.setattr("torch.cuda.set_device", selected.append)
+
+    assert _activate_accelerator_cuda_device(torch.device("cuda:5")) == torch.device(
+        "cuda:5"
+    )
+    assert selected == [5]
+
+
+def test_activate_accelerator_cuda_device_requires_rank_local_multi_gpu_index(
+    monkeypatch,
+):
+    selected = []
+    monkeypatch.setattr("torch.cuda.device_count", lambda: 8)
+    monkeypatch.setattr("torch.cuda.set_device", selected.append)
+
+    assert _activate_accelerator_cuda_device(
+        torch.device("cuda:3"),
+        num_processes=8,
+        local_process_index=3,
+    ) == torch.device("cuda:3")
+    assert selected == [3]
+
+    for device in (torch.device("cuda"), torch.device("cuda:0")):
+        with pytest.raises(RuntimeError, match="rank-local device"):
+            _activate_accelerator_cuda_device(
+                device,
+                num_processes=8,
+                local_process_index=3,
+            )
+    assert selected == [3]
 
 
 def test_runtime_hashes_both_external_assets(tmp_path):

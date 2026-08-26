@@ -140,6 +140,35 @@ def _resolved_config(config: DictConfig | dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _activate_accelerator_cuda_device(
+    device: torch.device | str,
+    *,
+    num_processes: int = 1,
+    local_process_index: int = 0,
+) -> torch.device:
+    """Select Accelerate's CUDA device, including its single-GPU ``cuda`` form."""
+
+    resolved = torch.device(device)
+    if resolved.type != "cuda":
+        raise ValueError("accelerator device must be CUDA")
+    device_index = resolved.index
+    if num_processes > 1:
+        device_count = torch.cuda.device_count()
+        if device_count <= 0:
+            raise RuntimeError("distributed CUDA runtime has no visible devices")
+        expected_index = local_process_index % device_count
+        if device_index != expected_index:
+            raise RuntimeError(
+                "Accelerate CUDA device does not match the rank-local device: "
+                f"device={resolved}, local_process_index={local_process_index}, "
+                f"visible_device_count={device_count}"
+            )
+    elif device_index is None:
+        device_index = int(torch.cuda.current_device())
+    torch.cuda.set_device(device_index)
+    return torch.device("cuda", device_index)
+
+
 def _all_rank_value(
     accelerator: Accelerator,
     operation: Callable[[], dict[str, Any]],
@@ -495,7 +524,11 @@ def run_stage3_alignment_training(
         ):
             raise RuntimeError("formal Stage 3 training requires a CUDA device")
         if accelerator.device.type == "cuda":
-            torch.cuda.set_device(accelerator.device)
+            _activate_accelerator_cuda_device(
+                accelerator.device,
+                num_processes=accelerator.num_processes,
+                local_process_index=accelerator.local_process_index,
+            )
         return environment
 
     environment_identity = _run_all_rank_phase(
