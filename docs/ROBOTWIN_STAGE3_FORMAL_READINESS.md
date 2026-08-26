@@ -9,7 +9,8 @@ RoboTwin 2.0 已有独立 Stage 3 Hydra 入口
 schema-v2 text-cache index/descriptor 与 data manifest 已发布，Stage 3 和 Stage 2 task
 均默认锁定 canonical manifest SHA
 `1190b75b1ef19a7abd949bdff5679da59afa7e51a043eeb43663cf2c4495173c`。数据身份门槛已
-完成；正式长训练前仍需完成真实 5B CUDA 单卡和 8 卡 save/resume smoke。
+完成，真实单卡 H100 一步训练和严格 save/resume 也已通过；正式长训练前只剩 8 卡
+ZeRO-2 save/resume smoke。
 
 ## 已确认的真实数据与资产
 
@@ -93,13 +94,20 @@ accelerate launch \
   training.max_steps=1
 ```
 
-随后跑 8 卡至少两个 optimizer step，并验证 Adapter-only save/resume。本文没有声称这些
-GPU 项已经完成。
+提交 `001ba776ad8d06ea471e60c781ccca72d21cd3a1` 上的真实单卡 H100 smoke 已完成：batch 1、
+accumulation 1 的一步训练得到 loss `0.000199`、grad norm `0.206138`，训练计算约 `8.4s`；
+`COMPLETE`、Adapter-only export 和完整恢复 state 均已发布。随后从独立进程严格恢复到
+`step=1 epoch=0 batch=1`，model、optimizer、scheduler、sampler 和 RNG 全部加载成功，恢复前后
+Adapter SHA256 均为
+`4686621e6eda37133a63506839772786275da3fdd473af68aefeefedfe79aec2`，training contract SHA256
+均为 `216ea9a6b7567415b84a7aaf6fccc4168fdb7cac422d8f96a23488d8ff7a5d0f`。该 export 仅是
+smoke 证据，不能用于正式 Stage 2 标签。尚需在正式 8 卡环境跑至少两个 optimizer step，
+并用相同 world size 验证 ZeRO-2 save/resume。
 
 ## 与 LIBERO 对齐后的顺序
 
-RoboTwin 的 index/manifest 已完成；单卡一步和 8 卡 smoke 通过后，才与 LIBERO 同时启动
-两个独立 Stage 3 run。各自 Adapter 冻结并通过 endpoint eval 后，再分别开始 Stage 2：
+RoboTwin 的 index/manifest 和单卡 smoke 已完成；8 卡 smoke 通过后，才与 LIBERO 同时
+启动两个独立 Stage 3 run。各自 Adapter 冻结并通过 endpoint eval 后，再分别开始 Stage 2：
 生成标签、严格 merge、训练 Gate。RoboTwin Stage 2 task 当前只保留无效 Adapter
 placeholder；在 Stage 3 最终 export 与真实 SHA 出现前不会启动。两个 benchmark 绝不共享
 Adapter、label contract、label manifest 或 Gate checkpoint。

@@ -166,9 +166,10 @@ accumulation boundary、scheduler/global step、base/assets 和运行合同。
 CPU contract/unit tests 已覆盖 Adapter-only optimizer/checkpoint、mid-epoch 与 epoch-tail
 严格恢复、RNG、分布式 tail 分片算法、10-step 接入、strict data mode，以及 schema-v2
 descriptor/index 的生成、验证和 runtime loader binding。RoboTwin 已用真实 formal train
-样本通过 strict TorchCodec AV1/data-shape smoke，真实 index/manifest 也已发布；尚未完成
-的项目包括真实 5B CUDA 单步、单卡 save→resume 和真实 8 进程 ZeRO-2 恢复。不要把
-数据 smoke 写成 GPU 训练 smoke。
+样本通过 strict TorchCodec AV1/data-shape smoke，真实 index/manifest 也已发布；单卡 H100
+真实 5B CUDA 一步和严格 save→resume 已在提交 `001ba77` 上通过。尚未完成的项目是相同
+world size 下的真实 8 进程 ZeRO-2 save→resume；单卡 smoke export 不得当作正式 Stage 3
+最终 Adapter 使用。
 
 本链锁定的 official Wan2.2 VAE PTH 可保证本次 Stage 3 自身稳定；原 base 日志使用的
 converted safetensors 当前不在机器上，因此在恢复原文件或完成 tensor digest 对比前，
