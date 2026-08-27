@@ -1,0 +1,92 @@
+# @package _global_
+
+defaults:
+  - override /data: libero_2cam
+  - override /model: fastwam_unified_aligned
+  - _self_
+
+# All ranks in one label job must resolve this environment variable to the same
+# durable directory. There is intentionally no local fallback.
+output_dir: ${oc.env:FASTWAM_LIBERO_STAGE2_LABEL_JOB}
+
+base:
+  checkpoint: ${oc.env:FASTWAM_LIBERO_STAGE3_BASE_CHECKPOINT,/root/feihong/FastWAM/formal_runs/FAST_WAM_github/libero_unified_shared_2cam224_1e-4/2026-07-01_00-44-20/checkpoints/weights/latest.pt}
+  expected_sha256: ${oc.env:FASTWAM_LIBERO_STAGE3_BASE_SHA256,17a5588cc2b8d162219c9daf818614f614ee4a7921933a4a26c5d678111330e9}
+
+# Stage 2 must use the Adapter-only export produced by LIBERO's completed
+# Stage 3 run. These defaults deliberately fail until that export is frozen.
+adapter:
+  checkpoint: ${oc.env:FASTWAM_LIBERO_STAGE3_ADAPTER,REPLACE_AFTER_STAGE3_ADAPTER_EXPORT}
+  expected_sha256: ${oc.env:FASTWAM_LIBERO_STAGE3_ADAPTER_SHA256,REPLACE_AFTER_STAGE3_ADAPTER_EXPORT}
+
+assets:
+  vae:
+    path: ${oc.env:FASTWAM_LIBERO_STAGE3_VAE,/root/feihong/FastWAM/checkpoints/Wan-AI/Wan2.2-TI2V-5B/Wan2.2_VAE.pth}
+    expected_sha256: 20eb789667fa5e60e7516bf509512f6cb61f01b0aa0695eadaea930c13892b36
+  normalization_stats:
+    path: ${data.train.pretrained_norm_stats}
+    expected_sha256: 30f81ad7d5076e97323e3328bce003e01a04cb21327b5bacd21bb72846768638
+
+# Reuse the exact schema-v1 selected-data identity accepted for LIBERO Stage 3.
+data_manifest:
+  path: ${oc.env:FASTWAM_LIBERO_STAGE3_DATA_MANIFEST,/root/feihong/FastWAM/formal_runs/contracts/stage3/libero_current_273465f_1693e/libero_stage3_data_manifest.json}
+  expected_sha256: ${oc.env:FASTWAM_LIBERO_STAGE3_DATA_MANIFEST_SHA256,08da49109a57b55c67f3fa4ac31fbfa44e44dd541a194a5d3420838537d0d320}
+
+data:
+  train:
+    # Explicitly reproduce the train-only Stage 3 subset.
+    val_set_proportion: 0.0
+    is_training_set: true
+    seed: 42
+    pretrained_norm_stats: ${oc.env:FASTWAM_LIBERO_STATS,/root/feihong/FastWAM/formal_runs/FAST_WAM_github/libero_unified_shared_2cam224_1e-4/2026-07-01_00-44-20/dataset_stats.json}
+    video_backend: torchcodec
+    strict_data_mode: true
+    save_stats_copy: false
+  val: null
+
+model:
+  skip_dit_load_from_pretrain: true
+  redirect_common_files: false
+  mot_checkpoint_mixed_attn: false
+  action_dit_pretrained_path: null
+
+# These fields are immutable once any label artifact has been published.
+episode_split:
+  validation_fraction: 0.1
+  split_seed: 42
+  expected_assignment_sha256: ""
+
+labeling:
+  base_seed: 42
+  num_seed_pairs: 2
+  relative_margin: 0.05
+  relative_gain_epsilon: 1.0e-12
+  num_inference_steps: 10
+  sigma_shift: null
+  rand_device: cpu
+  tiled: false
+  num_shards: 64
+  chunk_size: 64
+  shard_indices: null
+  contract_file: label_contract.json
+  runtime_config_file: label_runtime_config.json
+
+runtime:
+  require_clean_git: true
+  require_cuda: true
+  device: cuda
+  mixed_precision: bf16
+  required_environment:
+    DIFFSYNTH_MODEL_BASE_PATH: /root/feihong/FastWAM/checkpoints
+    DIFFSYNTH_SKIP_DOWNLOAD: "true"
+    HF_HUB_OFFLINE: "1"
+    TRANSFORMERS_OFFLINE: "1"
+
+hydra:
+  job:
+    env_set:
+      DIFFSYNTH_MODEL_BASE_PATH: /root/feihong/FastWAM/checkpoints
+      DIFFSYNTH_SKIP_DOWNLOAD: "true"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True

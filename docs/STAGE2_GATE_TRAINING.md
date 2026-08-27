@@ -74,6 +74,27 @@ cache 和 stats 也必须与 data manifest 完全一致。
 
 ## 第一步：生成 E0/E10 标签分片
 
+LIBERO 正式运行优先使用已锁定的专用 task。它内置 schema-v1 manifest
+`08da49109a57b55c67f3fa4ac31fbfa44e44dd541a194a5d3420838537d0d320`、base、VAE、
+normalization stats、两相机 224 配置和严格标签合同；durable 输出目录没有 fallback，最终
+Stage 3 Adapter 路径/SHA 在冻结前保持 fail-closed placeholder：
+
+```bash
+export FASTWAM_LIBERO_STAGE2_LABEL_JOB=/absolute/durable/path/libero/label_job
+export FASTWAM_LIBERO_STAGE3_ADAPTER=/absolute/path/libero_stage3_adapter.pt
+export FASTWAM_LIBERO_STAGE3_ADAPTER_SHA256=REAL_LIBERO_ADAPTER_SHA256
+
+torchrun --standalone --nproc_per_node=8 \
+  scripts/generate_gate_labels.py \
+  task=libero_stage2_gate_labels_2cam224
+```
+
+只有显式迁移已锁资产时，才覆盖对应的
+`FASTWAM_LIBERO_STAGE3_BASE_{CHECKPOINT,SHA256}`、
+`FASTWAM_LIBERO_STAGE3_DATA_MANIFEST{,_SHA256}`、`FASTWAM_LIBERO_STAGE3_VAE` 和
+`FASTWAM_LIBERO_STATS` 环境变量；VAE 与 stats 的 SHA 仍由 task 固定。下面的长 override 入口
+保留给自定义路径、单进程诊断和旧部署迁移；其合同语义与专用 task 相同。
+
 单进程入口：
 
 ```bash
@@ -304,7 +325,7 @@ resume 才能继续。
 ## 已验证边界
 
 本链路的 schema-v1/v2 contract、标签数学、分片/合并、current-only Gate dataset、Gate
-optimizer、严格恢复和 RoboTwin Hydra task 由 CPU 单元与入口测试覆盖。RoboTwin 的真实
+optimizer、严格恢复和 LIBERO/RoboTwin Hydra task 由 CPU 单元与入口测试覆盖。RoboTwin 的真实
 AV1/data-shape smoke 已通过，但本文没有声称完成任一 benchmark 的真实 5B H100 端到端
 标签生成或 Gate GPU 验收。正式长任务前仍需分别完成 CUDA 短标签分片、merge 和 Gate
 save→resume 验收。
