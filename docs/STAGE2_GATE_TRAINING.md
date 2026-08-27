@@ -136,7 +136,6 @@ chunk size 64、BF16 和 strict TorchCodec：
 
 ```bash
 export FASTWAM_ROBOTWIN_STAGE2_LABEL_JOB=/absolute/durable/path/robotwin/label_job
-export FASTWAM_ROBOTWIN_STAGE3_DATA_MANIFEST_SHA256=REAL_SCHEMA_V2_MANIFEST_SHA256
 export FASTWAM_ROBOTWIN_STAGE3_ADAPTER=/absolute/path/robotwin_stage3_adapter.pt
 export FASTWAM_ROBOTWIN_STAGE3_ADAPTER_SHA256=REAL_ROBOTWIN_ADAPTER_SHA256
 
@@ -145,11 +144,13 @@ torchrun --standalone --nproc_per_node=8 \
   task=robotwin_stage2_gate_labels_3cam384
 ```
 
-task 中 manifest SHA 和 Adapter 路径/SHA 的默认值都是故意无效的 placeholder；未提供
-真实值会 fail closed。`FASTWAM_ROBOTWIN_STAGE2_LABEL_JOB` 没有本地 fallback，避免 8 个
-rank 因时间戳或工作目录漂移写到不同任务。`label_contract.json` 的 `contract_sha256` 只能
-在所有身份和运行环境确定后计算，因此它不是预填输入：由该步骤原子发布，再由 merge 和
-Gate 配置显式锁定。
+task 已内置正式 schema-v2 manifest SHA，只有 Adapter 路径/SHA 的默认值仍是故意无效的
+placeholder；最终 Stage 3 export 尚未冻结时会 fail closed。只有显式迁移或重新生成数据
+身份时，才应连同 manifest 路径一起覆盖
+`FASTWAM_ROBOTWIN_STAGE3_DATA_MANIFEST_SHA256`。`FASTWAM_ROBOTWIN_STAGE2_LABEL_JOB` 没有
+本地 fallback，避免 8 个 rank 因时间戳或工作目录漂移写到不同任务。
+`label_contract.json` 的 `contract_sha256` 只能在所有身份和运行环境确定后计算，因此它不是
+预填输入：由该步骤原子发布，再由 merge 和 Gate 配置显式锁定。
 
 `NUM_GPUS` 不能大于 `labeling.num_shards`。也可让独立作业显式传递已排序且互不重叠的
 `labeling.shard_indices='[0,1,...]'`；显式 subset 只能用于 `WORLD_SIZE=1` 的独立

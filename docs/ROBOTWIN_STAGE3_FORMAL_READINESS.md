@@ -104,6 +104,11 @@ Adapter SHA256 均为
 smoke 证据，不能用于正式 Stage 2 标签。尚需在正式 8 卡环境跑至少两个 optimizer step，
 并用相同 world size 验证 ZeRO-2 save/resume。
 
+另在提交 `4946d17` 上用正式每卡合同 `batch_size=2`、accumulation 3 跑完一个 optimizer
+step：loss `0.004577`、grad norm `0.198295`、三次 micro-batch 计算共 `24.0s`。对 H100
+每 `0.5s` 采样得到峰值显存 `15957 MiB`、峰值利用率 83%，因此无需把正式合同降到
+batch 1 / accumulation 6；仍须在 8 卡 smoke 中为 NCCL/ZeRO 通信复核实际余量。
+
 ## 与 LIBERO 对齐后的顺序
 
 RoboTwin 的 index/manifest 和单卡 smoke 已完成；8 卡 smoke 通过后，才与 LIBERO 同时
