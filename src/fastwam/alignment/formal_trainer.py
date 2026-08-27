@@ -31,6 +31,8 @@ from fastwam.utils.samplers import ResumableEpochSampler
 from .checkpointing import (
     BaseCheckpointIdentity,
     GitIdentity,
+    STRICT_RESUME_PROVENANCE_KIND,
+    STRICT_RESUME_PROVENANCE_SCHEMA_VERSION,
     TRAINING_STATE_KIND,
     TRAINING_STATE_SCHEMA_VERSION,
     canonical_json_sha256,
@@ -362,6 +364,7 @@ class Stage3AlignmentTrainer:
                 raise RuntimeError(
                     "Stage 3 does not support split_batches=true"
                 )
+            self.strict_resume_provenance = None
             self.resume_contract = {
                 "base_checkpoint_sha256": self.base_identity.sha256,
                 "training_contract_sha256": self.training_contract_sha256,
@@ -622,7 +625,9 @@ class Stage3AlignmentTrainer:
         if not wrapped_state or not all(name.startswith(prefix) for name in wrapped_state):
             raise RuntimeError("wrapped Adapter state_dict has unexpected keys")
         state = {
-            name[len(prefix) :]: value
+            name[len(prefix) :]: value.detach()
+            .to(device="cpu", dtype=torch.float32)
+            .contiguous()
             for name, value in wrapped_state.items()
         }
         expected = set(
@@ -653,6 +658,7 @@ class Stage3AlignmentTrainer:
             "base_checkpoint_size_bytes": self.base_identity.size_bytes,
             "alignment_config": self.model.alignment_adapter.config(),
             "training_contract": self.contract_payload,
+            "strict_resume_provenance": self.strict_resume_provenance,
             **self.resume_contract,
             "files": {},
         }
@@ -851,12 +857,18 @@ class Stage3AlignmentTrainer:
             )
             checkpoint_identity = {
                 "manifest_sha256": sha256_file(state_path / "manifest.json"),
+                "complete_sha256": sha256_file(state_path / "COMPLETE"),
                 "global_step": int(manifest["global_step"]),
                 "epoch": int(manifest["epoch"]),
                 "batch_in_epoch": int(manifest["batch_in_epoch"]),
                 "scheduler_last_epoch": int(
                     manifest["scheduler_last_epoch"]
                 ),
+                "training_contract_sha256": str(
+                    manifest["training_contract_sha256"]
+                ),
+                "world_size": int(manifest["world_size"]),
+                "zero_stage": int(manifest["zero_stage"]),
             }
             return state_path, manifest, checkpoint_identity
 
@@ -864,7 +876,7 @@ class Stage3AlignmentTrainer:
             validate_local_state,
             phase="resume validation",
         )
-        self._require_all_rank_identical(
+        checkpoint_identity = self._require_all_rank_identical(
             checkpoint_identity,
             phase="resume checkpoint",
         )
@@ -887,6 +899,27 @@ class Stage3AlignmentTrainer:
                 raise RuntimeError(
                     "Stage 3 scheduler state did not restore exactly"
                 )
+            self.strict_resume_provenance = {
+                "schema_version": STRICT_RESUME_PROVENANCE_SCHEMA_VERSION,
+                "kind": STRICT_RESUME_PROVENANCE_KIND,
+                "source_manifest_sha256": checkpoint_identity[
+                    "manifest_sha256"
+                ],
+                "source_complete_sha256": checkpoint_identity[
+                    "complete_sha256"
+                ],
+                "source_global_step": checkpoint_identity["global_step"],
+                "source_epoch": checkpoint_identity["epoch"],
+                "source_batch_in_epoch": checkpoint_identity["batch_in_epoch"],
+                "source_scheduler_last_epoch": checkpoint_identity[
+                    "scheduler_last_epoch"
+                ],
+                "source_training_contract_sha256": checkpoint_identity[
+                    "training_contract_sha256"
+                ],
+                "source_world_size": checkpoint_identity["world_size"],
+                "source_zero_stage": checkpoint_identity["zero_stage"],
+            }
 
         self._run_all_rank_phase(
             restore_cursor_and_validate,

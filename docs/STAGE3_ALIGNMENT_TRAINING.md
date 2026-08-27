@@ -172,19 +172,42 @@ accelerate launch \
   checkpoint.resume=/absolute/smoke/uninterrupted/checkpoints/states/step_000001
 ```
 
-两个 step-2 export 的原始文件 SHA 不一定相同，因为 `torch.save` 容器字节不保证确定性；
-必须比较完整 metadata 和每个 Adapter tensor：
+新 writer 使用 training-state schema v2。fresh step 1/2 的 `strict_resume_provenance` 为
+`null`；恢复后的 step 2 必须记录所加载 step 1 的 manifest/COMPLETE SHA、cursor、training
+contract、world size 和 ZeRO stage。旧 schema-v1 state 仍可恢复，但缺少 lineage，不能作为
+新的正式验收产物。
+
+两个 step-2 export 的原始文件 SHA 不一定相同，因为 `torch.save` 容器字节不保证确定性。
+正式验收同时传入三个 state 和两个外部 export；下面三个 SHA 必须替换为本 benchmark 的
+锁定值，其中 training contract SHA 从 fresh run 的 state manifest 读取：
 
 ```bash
-python scripts/compare_stage3_adapter_exports.py \
+python scripts/verify_stage3_resume_equivalence.py \
+  /absolute/smoke/uninterrupted/checkpoints/states/step_000002 \
+  /absolute/smoke/uninterrupted/checkpoints/states/step_000001 \
+  /absolute/smoke/resume_from_step1/checkpoints/states/step_000002 \
   /absolute/smoke/uninterrupted/checkpoints/exports/step_000002.pt \
   /absolute/smoke/resume_from_step1/checkpoints/exports/step_000002.pt \
-  --expected-step 2
+  --expected-final-step 2 \
+  --expected-resume-step 1 \
+  --expected-world-size 8 \
+  --expected-zero-stage 2 \
+  --expected-batch-size-per-rank 2 \
+  --expected-gradient-accumulation-steps 3 \
+  --expected-base-checkpoint-sha256 REAL_BASE_SHA256 \
+  --expected-data-manifest-sha256 REAL_DATA_MANIFEST_SHA256 \
+  --expected-training-contract-sha256 REAL_TRAINING_CONTRACT_SHA256 \
+  --expected-git-commit REAL_40_OR_64_HEX_GIT_COMMIT
 ```
 
-验收还要求两条路径都有 `step_000002/COMPLETE`，state manifest 固定 world size 8、ZeRO-2、
-每卡 batch 2、accumulation 3，且包含 8 份 random state。LIBERO 使用相同流程，只替换 task
-和独立输出目录；两个 benchmark 的产物不得交叉复用。
+验收器会重新验证三个 `COMPLETE`、manifest/file inventory、training/DeepSpeed 内部 SHA、
+world size 8、ZeRO-2、每卡 batch 2、accumulation 3、8 份可加载 random state、外部 export
+与 state 内 export 的绑定，以及恢复 step 2 对指定 step 1 的精确 provenance。最后才比较
+完整 metadata 和 16 个 Adapter tensor。LIBERO 使用相同流程，只替换 task、锁定 SHA 和独立
+输出目录；两个 benchmark 的产物不得交叉复用。
+
+运行验收器的 shell 必须保持保存时的 8 张 GPU 全部可见；不要把
+`CUDA_VISIBLE_DEVICES` 缩窄到单卡，否则 CUDA RNG device-count 校验会按设计拒绝该 state。
 
 ## Checkpoint 与恢复
 

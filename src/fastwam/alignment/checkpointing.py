@@ -15,8 +15,29 @@ import numpy as np
 import torch
 
 
-TRAINING_STATE_SCHEMA_VERSION = 1
+LEGACY_TRAINING_STATE_SCHEMA_VERSION = 1
+TRAINING_STATE_SCHEMA_VERSION = 2
+SUPPORTED_TRAINING_STATE_SCHEMA_VERSIONS = frozenset(
+    {LEGACY_TRAINING_STATE_SCHEMA_VERSION, TRAINING_STATE_SCHEMA_VERSION}
+)
 TRAINING_STATE_KIND = "stage3_alignment_training_state"
+STRICT_RESUME_PROVENANCE_SCHEMA_VERSION = 1
+STRICT_RESUME_PROVENANCE_KIND = "stage3_strict_resume_provenance"
+STRICT_RESUME_PROVENANCE_KEYS = frozenset(
+    {
+        "schema_version",
+        "kind",
+        "source_manifest_sha256",
+        "source_complete_sha256",
+        "source_global_step",
+        "source_epoch",
+        "source_batch_in_epoch",
+        "source_scheduler_last_epoch",
+        "source_training_contract_sha256",
+        "source_world_size",
+        "source_zero_stage",
+    }
+)
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -220,6 +241,65 @@ def validate_rng_state_files(
             ) from error
 
 
+def validate_strict_resume_provenance(value: Any) -> dict[str, Any] | None:
+    """Validate the immediate source of a successfully restored state.
+
+    ``None`` denotes a fresh run.  A non-null value is path-independent and
+    binds the saved state to the exact source manifest and COMPLETE marker.
+    """
+
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or set(value) != STRICT_RESUME_PROVENANCE_KEYS:
+        raise ValueError("training state strict resume provenance schema is invalid")
+    if (
+        value.get("schema_version") != STRICT_RESUME_PROVENANCE_SCHEMA_VERSION
+        or value.get("kind") != STRICT_RESUME_PROVENANCE_KIND
+    ):
+        raise ValueError("training state strict resume provenance header is invalid")
+    for field in (
+        "source_manifest_sha256",
+        "source_complete_sha256",
+        "source_training_contract_sha256",
+    ):
+        if not isinstance(value.get(field), str) or not _SHA256_PATTERN.fullmatch(
+            value[field]
+        ):
+            raise ValueError(
+                f"training state strict resume provenance {field} is invalid"
+            )
+    for field in (
+        "source_global_step",
+        "source_epoch",
+        "source_batch_in_epoch",
+        "source_scheduler_last_epoch",
+        "source_zero_stage",
+    ):
+        field_value = value.get(field)
+        if (
+            isinstance(field_value, bool)
+            or not isinstance(field_value, int)
+            or field_value < 0
+        ):
+            raise ValueError(
+                f"training state strict resume provenance {field} is invalid"
+            )
+    world_size = value.get("source_world_size")
+    if isinstance(world_size, bool) or not isinstance(world_size, int) or world_size <= 0:
+        raise ValueError(
+            "training state strict resume provenance source_world_size is invalid"
+        )
+    if value["source_zero_stage"] not in {0, 1, 2}:
+        raise ValueError(
+            "training state strict resume provenance source_zero_stage is invalid"
+        )
+    if value["source_scheduler_last_epoch"] != value["source_global_step"]:
+        raise ValueError(
+            "training state strict resume provenance scheduler/step mismatch"
+        )
+    return dict(value)
+
+
 def validate_training_state(
     state_dir: str | Path,
     *,
@@ -238,20 +318,31 @@ def validate_training_state(
         complete = json.loads(complete_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as error:
         raise ValueError("training state COMPLETE marker is invalid") from error
+    complete_schema_version = (
+        complete.get("schema_version") if isinstance(complete, dict) else None
+    )
     if (
         not isinstance(complete, dict)
-        or complete.get("schema_version") != TRAINING_STATE_SCHEMA_VERSION
+        or complete_schema_version not in SUPPORTED_TRAINING_STATE_SCHEMA_VERSIONS
         or complete.get("kind") != TRAINING_STATE_KIND
         or complete.get("manifest_sha256") != sha256_file(manifest_path)
     ):
         raise ValueError("training state manifest SHA256 does not match COMPLETE")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_schema_version = manifest.get("schema_version")
     if (
-        manifest.get("schema_version") != TRAINING_STATE_SCHEMA_VERSION
+        manifest_schema_version != complete_schema_version
+        or manifest_schema_version not in SUPPORTED_TRAINING_STATE_SCHEMA_VERSIONS
         or manifest.get("kind") != TRAINING_STATE_KIND
         or manifest.get("complete") is not True
     ):
         raise ValueError("unsupported or incomplete Stage 3 training state")
+    if manifest_schema_version == TRAINING_STATE_SCHEMA_VERSION:
+        if "strict_resume_provenance" not in manifest:
+            raise ValueError("training state v2 is missing strict resume provenance")
+        validate_strict_resume_provenance(manifest["strict_resume_provenance"])
+    elif "strict_resume_provenance" in manifest:
+        raise ValueError("training state v1 cannot contain strict resume provenance")
     for key, expected_value in expected_contract.items():
         if manifest.get(key) != expected_value:
             raise ValueError(
@@ -280,6 +371,60 @@ def validate_training_state(
         raise ValueError("training state is not on an accumulation boundary")
     if manifest.get("scheduler_last_epoch") != global_step:
         raise ValueError("training state scheduler/global_step mismatch")
+    training_contract = manifest.get("training_contract")
+    training_contract_sha256 = manifest.get("training_contract_sha256")
+    if (
+        not isinstance(training_contract, Mapping)
+        or not isinstance(training_contract_sha256, str)
+        or not _SHA256_PATTERN.fullmatch(training_contract_sha256)
+        or canonical_json_sha256(training_contract) != training_contract_sha256
+    ):
+        raise ValueError("training state training contract SHA256 does not match")
+    zero_stage = manifest.get("zero_stage")
+    if isinstance(zero_stage, bool) or not isinstance(zero_stage, int):
+        raise ValueError("training state zero_stage must be an integer")
+    if zero_stage not in {0, 1, 2}:
+        raise ValueError("training state zero_stage must be 0, 1, or 2")
+    effective_deepspeed_config = training_contract.get(
+        "effective_deepspeed_config"
+    )
+    deepspeed_config_sha256 = manifest.get("deepspeed_config_sha256")
+    if effective_deepspeed_config is None:
+        if zero_stage != 0 or deepspeed_config_sha256 is not None:
+            raise ValueError("non-DeepSpeed state has a DeepSpeed config identity")
+    else:
+        if (
+            not isinstance(effective_deepspeed_config, Mapping)
+            or not isinstance(deepspeed_config_sha256, str)
+            or not _SHA256_PATTERN.fullmatch(deepspeed_config_sha256)
+            or canonical_json_sha256(effective_deepspeed_config)
+            != deepspeed_config_sha256
+        ):
+            raise ValueError("training state DeepSpeed config SHA256 does not match")
+        zero_optimization = effective_deepspeed_config.get("zero_optimization")
+        if (
+            not isinstance(zero_optimization, Mapping)
+            or zero_optimization.get("stage") != zero_stage
+        ):
+            raise ValueError("training state DeepSpeed zero stage does not match")
+        batch_size = manifest.get("batch_size_per_rank")
+        accumulation = manifest.get("gradient_accumulation_steps")
+        world_size = manifest.get("world_size")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            for value in (batch_size, accumulation, world_size)
+        ):
+            raise ValueError("training state distributed batch contract is invalid")
+        expected_deepspeed_batches = {
+            "train_micro_batch_size_per_gpu": batch_size,
+            "gradient_accumulation_steps": accumulation,
+            "train_batch_size": batch_size * accumulation * world_size,
+        }
+        for key, expected_value in expected_deepspeed_batches.items():
+            if effective_deepspeed_config.get(key) != expected_value:
+                raise ValueError(
+                    f"training state DeepSpeed batch contract mismatch for {key}"
+                )
     expected_files = manifest.get("files")
     if not isinstance(expected_files, dict) or not expected_files:
         raise ValueError("training state manifest has no file inventory")
@@ -300,7 +445,7 @@ def validate_training_state(
     export_path = directory / "adapter_export.pt"
     if not export_path.is_file():
         raise ValueError("training state is missing its Adapter export")
-    export = torch.load(export_path, map_location="cpu", weights_only=False)
+    export = torch.load(export_path, map_location="cpu", weights_only=True)
     if (
         not isinstance(export, dict)
         or export.get("kind") != "stage3_alignment_export"

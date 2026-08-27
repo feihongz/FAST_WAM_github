@@ -7,6 +7,9 @@ import pytest
 import torch
 
 from fastwam.alignment.checkpointing import (
+    LEGACY_TRAINING_STATE_SCHEMA_VERSION,
+    STRICT_RESUME_PROVENANCE_KIND,
+    STRICT_RESUME_PROVENANCE_SCHEMA_VERSION,
     TRAINING_STATE_KIND,
     TRAINING_STATE_SCHEMA_VERSION,
     canonical_json_sha256,
@@ -15,6 +18,7 @@ from fastwam.alignment.checkpointing import (
     resolve_base_checkpoint,
     sha256_file,
     validate_rng_state_files,
+    validate_strict_resume_provenance,
     validate_training_state,
     write_json_atomic,
 )
@@ -56,14 +60,15 @@ def _write_state(tmp_path):
         accelerator / "random_states_0.pkl",
     )
     (accelerator / "model.safetensors").write_bytes(b"adapter-only")
+    training_contract = {"effective_deepspeed_config": None}
     contract = {
         "base_checkpoint_sha256": "a" * 64,
-        "training_contract_sha256": "b" * 64,
+        "training_contract_sha256": canonical_json_sha256(training_contract),
         "world_size": 1,
     }
     torch.save(
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "kind": "stage3_alignment_export",
             "global_step": 1,
             "base_checkpoint_sha256": contract["base_checkpoint_sha256"],
@@ -85,6 +90,10 @@ def _write_state(tmp_path):
         "micro_step_in_accumulation": 0,
         "scheduler_last_epoch": 1,
         "device_type": "cpu",
+        "zero_stage": 0,
+        "deepspeed_config_sha256": None,
+        "training_contract": training_contract,
+        "strict_resume_provenance": None,
         **contract,
     }
     manifest["files"] = hash_state_tree(state)
@@ -132,6 +141,122 @@ def test_training_state_rejects_manifest_tampering(tmp_path):
     write_json_atomic(state / "manifest.json", manifest)
 
     with pytest.raises(ValueError, match="manifest SHA256"):
+        validate_training_state(state, expected_contract=contract)
+
+
+def test_training_state_accepts_legacy_v1_without_provenance(tmp_path):
+    state, contract = _write_state(tmp_path)
+    manifest_path = state / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = LEGACY_TRAINING_STATE_SCHEMA_VERSION
+    del manifest["strict_resume_provenance"]
+    write_json_atomic(manifest_path, manifest)
+    write_json_atomic(
+        state / "COMPLETE",
+        {
+            "schema_version": LEGACY_TRAINING_STATE_SCHEMA_VERSION,
+            "kind": TRAINING_STATE_KIND,
+            "manifest_sha256": sha256_file(manifest_path),
+        },
+    )
+
+    assert validate_training_state(state, expected_contract=contract)[
+        "schema_version"
+    ] == LEGACY_TRAINING_STATE_SCHEMA_VERSION
+
+
+def _valid_provenance():
+    return {
+        "schema_version": STRICT_RESUME_PROVENANCE_SCHEMA_VERSION,
+        "kind": STRICT_RESUME_PROVENANCE_KIND,
+        "source_manifest_sha256": "1" * 64,
+        "source_complete_sha256": "2" * 64,
+        "source_global_step": 3,
+        "source_epoch": 1,
+        "source_batch_in_epoch": 2,
+        "source_scheduler_last_epoch": 3,
+        "source_training_contract_sha256": "3" * 64,
+        "source_world_size": 8,
+        "source_zero_stage": 2,
+    }
+
+
+def test_strict_resume_provenance_requires_exact_valid_schema():
+    valid = _valid_provenance()
+    assert validate_strict_resume_provenance(valid) == valid
+    assert validate_strict_resume_provenance(None) is None
+
+    for field, invalid_value in (
+        ("source_manifest_sha256", "not-a-sha"),
+        ("source_global_step", True),
+        ("source_epoch", -1),
+        ("source_world_size", 0),
+        ("source_zero_stage", 3),
+        ("source_scheduler_last_epoch", 4),
+    ):
+        invalid = {**valid, field: invalid_value}
+        with pytest.raises(ValueError, match="strict resume provenance"):
+            validate_strict_resume_provenance(invalid)
+
+    missing = dict(valid)
+    del missing["source_complete_sha256"]
+    with pytest.raises(ValueError, match="schema is invalid"):
+        validate_strict_resume_provenance(missing)
+
+
+def test_training_state_rejects_training_contract_hash_drift(tmp_path):
+    state, contract = _write_state(tmp_path)
+    manifest_path = state / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["training_contract"]["tampered"] = True
+    write_json_atomic(manifest_path, manifest)
+    write_json_atomic(
+        state / "COMPLETE",
+        {
+            "schema_version": TRAINING_STATE_SCHEMA_VERSION,
+            "kind": TRAINING_STATE_KIND,
+            "manifest_sha256": sha256_file(manifest_path),
+        },
+    )
+
+    with pytest.raises(ValueError, match="training contract SHA256"):
+        validate_training_state(state, expected_contract=contract)
+
+
+def test_training_state_rejects_deepspeed_cross_field_drift(tmp_path):
+    state, contract = _write_state(tmp_path)
+    manifest_path = state / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    effective = {
+        "zero_optimization": {"stage": 1},
+        "train_micro_batch_size_per_gpu": 1,
+        "gradient_accumulation_steps": 1,
+        "train_batch_size": 1,
+    }
+    manifest.update(
+        {
+            "zero_stage": 2,
+            "batch_size_per_rank": 1,
+            "gradient_accumulation_steps": 1,
+            "training_contract": {"effective_deepspeed_config": effective},
+            "deepspeed_config_sha256": canonical_json_sha256(effective),
+        }
+    )
+    manifest["training_contract_sha256"] = canonical_json_sha256(
+        manifest["training_contract"]
+    )
+    contract["training_contract_sha256"] = manifest["training_contract_sha256"]
+    write_json_atomic(manifest_path, manifest)
+    write_json_atomic(
+        state / "COMPLETE",
+        {
+            "schema_version": TRAINING_STATE_SCHEMA_VERSION,
+            "kind": TRAINING_STATE_KIND,
+            "manifest_sha256": sha256_file(manifest_path),
+        },
+    )
+
+    with pytest.raises(ValueError, match="zero stage does not match"):
         validate_training_state(state, expected_contract=contract)
 
 

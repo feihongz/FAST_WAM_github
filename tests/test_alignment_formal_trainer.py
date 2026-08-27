@@ -13,6 +13,10 @@ from torch import nn
 from fastwam.alignment.checkpointing import (
     BaseCheckpointIdentity,
     GitIdentity,
+    STRICT_RESUME_PROVENANCE_KIND,
+    STRICT_RESUME_PROVENANCE_SCHEMA_VERSION,
+    TRAINING_STATE_SCHEMA_VERSION,
+    sha256_file,
 )
 from fastwam.alignment.formal_trainer import Stage3AlignmentTrainer
 from fastwam.alignment.losses import Stage3LossOutput
@@ -296,6 +300,8 @@ def test_checkpoint_and_export_contain_adapter_but_no_base_weights(tmp_path):
     assert manifest["base_checkpoint"] == "/frozen/base-checkpoint.pt"
     assert manifest["base_checkpoint_size_bytes"] == 5_000_000_000
     assert manifest["data_manifest_sha256"] == DATA_MANIFEST_SHA256
+    assert manifest["schema_version"] == TRAINING_STATE_SCHEMA_VERSION
+    assert manifest["strict_resume_provenance"] is None
     assert payload["schema_version"] == 2
     assert payload["data_manifest_sha256"] == DATA_MANIFEST_SHA256
     assert all("base-checkpoint.pt" not in name for name in manifest["files"])
@@ -308,6 +314,30 @@ def test_checkpoint_and_export_contain_adapter_but_no_base_weights(tmp_path):
         expected_data_manifest_sha256=DATA_MANIFEST_SHA256,
     )
     _assert_state_equal(restored.state_dict(), model.alignment_adapter.state_dict())
+
+
+def test_adapter_export_state_normalizes_deepspeed_bf16_to_cpu_fp32(
+    tmp_path,
+    monkeypatch,
+):
+    trainer, model, accelerator = _make_trainer(tmp_path)
+    bf16_state = {
+        f"adapter.{name}": value.detach().to(dtype=torch.bfloat16)
+        for name, value in model.alignment_adapter.state_dict().items()
+    }
+    monkeypatch.setattr(
+        accelerator,
+        "get_state_dict",
+        lambda module: bf16_state,
+    )
+
+    exported = trainer._adapter_export_state()
+
+    assert set(exported) == set(model.alignment_adapter.state_dict())
+    assert all(tensor.device.type == "cpu" for tensor in exported.values())
+    assert all(tensor.dtype == torch.float32 for tensor in exported.values())
+    assert all(tensor.layout == torch.strided for tensor in exported.values())
+    assert all(tensor.is_contiguous() for tensor in exported.values())
 
 
 def test_strict_resume_restores_adapter_optimizer_position_and_step(tmp_path):
@@ -359,6 +389,52 @@ def test_strict_resume_restores_adapter_optimizer_position_and_step(tmp_path):
         if "step" in state
     )
     assert resumed_optimizer_step == expected_optimizer_step
+    assert trainer.strict_resume_provenance == {
+        "schema_version": STRICT_RESUME_PROVENANCE_SCHEMA_VERSION,
+        "kind": STRICT_RESUME_PROVENANCE_KIND,
+        "source_manifest_sha256": sha256_file(state_dir / "manifest.json"),
+        "source_complete_sha256": sha256_file(state_dir / "COMPLETE"),
+        "source_global_step": 1,
+        "source_epoch": 2,
+        "source_batch_in_epoch": 1,
+        "source_scheduler_last_epoch": 1,
+        "source_training_contract_sha256": trainer.training_contract_sha256,
+        "source_world_size": 1,
+        "source_zero_stage": 0,
+    }
+
+
+def test_resume_provenance_is_persisted_in_new_state_manifest(tmp_path):
+    source, _, _ = _make_trainer(tmp_path / "source")
+    source.optimizer.step()
+    source.scheduler.step()
+    source.global_step = 1
+    source.epoch = 0
+    source.batch_in_epoch = 1
+    source_state = source.save_checkpoint()
+
+    resumed, _, _ = _make_trainer(
+        tmp_path / "resumed",
+        resume=source_state,
+    )
+    resumed_state = resumed.save_checkpoint()
+    manifest = json.loads(
+        (resumed_state / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert manifest["strict_resume_provenance"] == {
+        "schema_version": STRICT_RESUME_PROVENANCE_SCHEMA_VERSION,
+        "kind": STRICT_RESUME_PROVENANCE_KIND,
+        "source_manifest_sha256": sha256_file(source_state / "manifest.json"),
+        "source_complete_sha256": sha256_file(source_state / "COMPLETE"),
+        "source_global_step": 1,
+        "source_epoch": 0,
+        "source_batch_in_epoch": 1,
+        "source_scheduler_last_epoch": 1,
+        "source_training_contract_sha256": source.training_contract_sha256,
+        "source_world_size": 1,
+        "source_zero_stage": 0,
+    }
 
 
 def test_train_accumulates_two_microbatches_per_optimizer_step(tmp_path):
