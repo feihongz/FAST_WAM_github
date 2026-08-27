@@ -111,8 +111,9 @@ batch 1 / accumulation 6；仍须在 8 卡 smoke 中为 NCCL/ZeRO 通信复核�
 
 ## 与 LIBERO 对齐后的顺序
 
-RoboTwin 的 index/manifest 和单卡 smoke 已完成；8 卡 smoke 通过后，才与 LIBERO 同时
+RoboTwin 的 index/manifest 和单卡 smoke 已完成；LIBERO 的 manifest、专用 Stage 2 task 和
+单卡 Stage 3 save/resume 也已完成。下一步分别跑相同合同的 8 卡 ZeRO-2 smoke，通过后再
 启动两个独立 Stage 3 run。各自 Adapter 冻结并通过 endpoint eval 后，再分别开始 Stage 2：
-生成标签、严格 merge、训练 Gate。RoboTwin Stage 2 task 当前只保留无效 Adapter
-placeholder；在 Stage 3 最终 export 与真实 SHA 出现前不会启动。两个 benchmark 绝不共享
-Adapter、label contract、label manifest 或 Gate checkpoint。
+生成标签、严格 merge、训练 Gate。两个 Stage 2 task 当前都保留无效 Adapter placeholder；
+在各自 Stage 3 最终 export 与真实 SHA 出现前不会启动。两个 benchmark 绝不共享 Adapter、
+label contract、label manifest 或 Gate checkpoint。

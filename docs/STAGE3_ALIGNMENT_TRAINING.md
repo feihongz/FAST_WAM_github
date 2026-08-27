@@ -217,8 +217,17 @@ descriptor/index 的生成、验证和 runtime loader binding。RoboTwin 已用�
 样本通过 strict TorchCodec AV1/data-shape smoke，真实 index/manifest 也已发布；单卡 H100
 真实 5B CUDA 一步和严格 save→resume 已在提交 `001ba77` 上通过，正式 per-rank
 batch 2 / accumulation 3 也在提交 `4946d17` 上通过，实测峰值显存 `15957 MiB`。RoboTwin
-尚未完成相同 world size 下的真实 8 进程 ZeRO-2 save→resume；LIBERO 尚未完成真实单卡
-save→resume。任一单卡 smoke export 都不得当作正式 Stage 3 最终 Adapter 使用。
+尚未完成相同 world size 下的真实 8 进程 ZeRO-2 save→resume。
+
+LIBERO 在提交 `fa1cc80` 上以 `batch_size=2`、accumulation 1 完成真实 H100 一步训练：loss
+`0.000263`、grad norm `0.040719`、计算 `2.3s`。随后从该 state 严格恢复到
+`step=1 epoch=0 batch=1`，model、optimizer、scheduler、sampler 和 RNG 全部加载成功。
+恢复前后 Adapter export 的 SHA256 均为
+`96ebb1a5d172505f77daf2566d5f09ccbdeca48e212b198096f8cd2c12cac37d`；16 个 tensor、
+`1577479` 个参数逐值相等，training contract SHA256 均为
+`2dd0e0f2a23337e4f6018df4f8d9775f6cd8591e2e83cd8831d7b62c980a79c5`。LIBERO 同样只剩
+8 进程 ZeRO-2 save→resume 验收。任一单卡 smoke export 都不得当作正式 Stage 3 最终
+Adapter 使用。
 
 本链锁定的 official Wan2.2 VAE PTH 可保证本次 Stage 3 自身稳定；原 base 日志使用的
 converted safetensors 当前不在机器上，因此在恢复原文件或完成 tensor digest 对比前，
