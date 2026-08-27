@@ -138,6 +138,54 @@ split、episode/file topology、size、prompt set 与 decoder，并验证 descri
 manifest 固定的不可变 cache identity 绑定到 dataset。所有 rank 完成这些步骤后，才允许
 加载 cache payload 和训练。
 
+## 8 卡 smoke 的可重复验收
+
+每个 benchmark 单独跑一次不间断的两个 optimizer step，保留 step 1 和 step 2：
+
+```bash
+accelerate launch \
+  --config_file scripts/accelerate_configs/accelerate_stage3_zero2.yaml \
+  --num_processes 8 \
+  scripts/train_stage3_alignment.py \
+  task=robotwin_stage3_alignment_3cam384_1e-4 \
+  output_dir=/absolute/smoke/uninterrupted \
+  training.max_steps=2 \
+  checkpoint.save_every=1 \
+  checkpoint.keep_last=2 \
+  checkpoint.save_final=true
+```
+
+`max_steps` 属于严格训练合同，恢复运行必须仍为 2。`LATEST` 此时已经指向 step 2，因此要
+显式从 step 1 恢复到独立输出目录，使恢复路径重新执行且只执行第二个 optimizer step：
+
+```bash
+accelerate launch \
+  --config_file scripts/accelerate_configs/accelerate_stage3_zero2.yaml \
+  --num_processes 8 \
+  scripts/train_stage3_alignment.py \
+  task=robotwin_stage3_alignment_3cam384_1e-4 \
+  output_dir=/absolute/smoke/resume_from_step1 \
+  training.max_steps=2 \
+  checkpoint.save_every=1 \
+  checkpoint.keep_last=2 \
+  checkpoint.save_final=true \
+  checkpoint.resume=/absolute/smoke/uninterrupted/checkpoints/states/step_000001
+```
+
+两个 step-2 export 的原始文件 SHA 不一定相同，因为 `torch.save` 容器字节不保证确定性；
+必须比较完整 metadata 和每个 Adapter tensor：
+
+```bash
+python scripts/compare_stage3_adapter_exports.py \
+  /absolute/smoke/uninterrupted/checkpoints/exports/step_000002.pt \
+  /absolute/smoke/resume_from_step1/checkpoints/exports/step_000002.pt \
+  --expected-step 2
+```
+
+验收还要求两条路径都有 `step_000002/COMPLETE`，state manifest 固定 world size 8、ZeRO-2、
+每卡 batch 2、accumulation 3，且包含 8 份 random state。LIBERO 使用相同流程，只替换 task
+和独立输出目录；两个 benchmark 的产物不得交叉复用。
+
 ## Checkpoint 与恢复
 
 每个保存点包含两种轻量产物：
