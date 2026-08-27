@@ -140,6 +140,17 @@ manifest 固定的不可变 cache identity 绑定到 dataset。所有 rank 完�
 
 ## 8 卡 smoke 的可重复验收
 
+极核上优先使用 benchmark 对应的一键脚本。它会自动创建唯一输出目录，连续完成 fresh
+两步训练、从 step 1 恢复到独立目录、严格比较两个 step-2 Adapter，并保存 JSON 验收回执：
+
+```bash
+bash scripts/jihe/run_libero_stage3_smoke_8xh100.sh
+bash scripts/jihe/run_robotwin_stage3_smoke_8xh100.sh
+```
+
+只有 8 张 H100 时应顺序提交这两个任务。下面的命令是脚本内部执行的等价手工流程，正常
+启动不需要再填写这些参数。
+
 每个 benchmark 单独跑一次不间断的两个 optimizer step，保留 step 1 和 step 2：
 
 ```bash
