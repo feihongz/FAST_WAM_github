@@ -242,15 +242,19 @@ descriptor/index 的生成、验证和 runtime loader binding。RoboTwin 已用�
 batch 2 / accumulation 3 也在提交 `4946d17` 上通过，实测峰值显存 `15957 MiB`。RoboTwin
 尚未完成相同 world size 下的真实 8 进程 ZeRO-2 save→resume。
 
-LIBERO 在提交 `fa1cc80` 上以 `batch_size=2`、accumulation 1 完成真实 H100 一步训练：loss
-`0.000263`、grad norm `0.040719`、计算 `2.3s`。随后从该 state 严格恢复到
-`step=1 epoch=0 batch=1`，model、optimizer、scheduler、sampler 和 RNG 全部加载成功。
-恢复前后 Adapter export 的 SHA256 均为
-`96ebb1a5d172505f77daf2566d5f09ccbdeca48e212b198096f8cd2c12cac37d`；16 个 tensor、
+LIBERO 在提交 `83345ba` 上以 `batch_size=2`、accumulation 1 完成真实 H100 schema-v2
+两步连续训练，并从连续 run 的 `step_000001` 恢复到独立目录、只重放第二步。恢复日志确认
+model、optimizer、scheduler、sampler 和 RNG 全部加载，游标为
+`step=1 epoch=0 batch=1`。正式验收器同时核验 fresh step 1、fresh step 2、resumed step 2
+及两份外部 export，结果为 `status=ok`；恢复 provenance 精确绑定 source manifest、
+`COMPLETE`、cursor、training contract、world size 1 和 ZeRO stage 0。两条路径的 step-2
+Adapter export SHA256 均为
+`309acf72066cca2a6dbc02e6d80dd2cbb6e426f49c6058decf65aeb267f0c0cc`，16 个 tensor、
 `1577479` 个参数逐值相等，training contract SHA256 均为
-`2dd0e0f2a23337e4f6018df4f8d9775f6cd8591e2e83cd8831d7b62c980a79c5`。LIBERO 同样只剩
-8 进程 ZeRO-2 save→resume 验收。任一单卡 smoke export 都不得当作正式 Stage 3 最终
-Adapter 使用。
+`4416aff2f3a54d74abcc40b78e67b8053a834eac005325790f9fa7dbf4a24c59`。产物位于
+`formal_runs/smokes/stage3/libero_single_replay_83345ba_001`。LIBERO 同样只剩 8 进程
+ZeRO-2、每卡 batch 2、accumulation 3 的 save→resume 验收。任一单卡 smoke export 都不得
+当作正式 Stage 3 最终 Adapter 使用。
 
 本链锁定的 official Wan2.2 VAE PTH 可保证本次 Stage 3 自身稳定；原 base 日志使用的
 converted safetensors 当前不在机器上，因此在恢复原文件或完成 tensor digest 对比前，

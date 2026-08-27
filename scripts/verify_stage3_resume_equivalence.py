@@ -16,9 +16,12 @@ from fastwam.alignment.checkpointing import (
     sha256_file,
     validate_training_state,
 )
-from scripts.compare_stage3_adapter_exports import (
-    compare_stage3_adapter_exports,
-)
+if __package__:
+    from .compare_stage3_adapter_exports import (
+        compare_stage3_adapter_exports,
+    )
+else:
+    from compare_stage3_adapter_exports import compare_stage3_adapter_exports
 
 
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")

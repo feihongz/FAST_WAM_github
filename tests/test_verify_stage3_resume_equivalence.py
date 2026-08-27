@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 import random
 import shutil
+import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -35,6 +39,27 @@ ASSET_SHA256 = "e" * 64
 STATS_SHA256 = "f" * 64
 TRAINING_CONTRACT = {"effective_deepspeed_config": None, "name": "formal-test"}
 TRAINING_SHA256 = canonical_json_sha256(TRAINING_CONTRACT)
+
+
+def test_direct_cli_help_is_runnable(tmp_path):
+    repo_root = Path(__file__).resolve().parents[1]
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "verify_stage3_resume_equivalence.py"),
+            "--help",
+        ],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(repo_root / "src")},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "verify_stage3_resume_equivalence.py" in result.stdout
+    assert "--expected-final-step" in result.stdout
 
 
 def _adapter() -> VideoActionResidualAdapter:
