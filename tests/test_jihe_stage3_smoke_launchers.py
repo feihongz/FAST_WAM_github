@@ -104,3 +104,81 @@ def test_smoke_launcher_refuses_existing_campaign_root(tmp_path: Path) -> None:
     assert result.returncode != 0
     assert "SMOKE_ROOT already exists" in result.stderr
     assert list(smoke_root.iterdir()) == []
+
+
+def _fake_missing_ffmpeg_environment(tmp_path: Path) -> tuple[dict[str, str], Path]:
+    fake_environment = tmp_path / "venv"
+    fake_bin = tmp_path / "bin"
+    marker = tmp_path / "ffmpeg-installed"
+    apt_log = tmp_path / "apt.log"
+    (fake_environment / "bin").mkdir(parents=True)
+    fake_bin.mkdir()
+
+    fake_python = fake_environment / "bin" / "python"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\n"
+        "[[ -f \"${FAKE_FFMPEG_MARKER}\" ]] || exit 1\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    fake_apt = fake_bin / "apt-get"
+    fake_apt.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '%s\\n' \"$*\" >> \"${FAKE_APT_LOG}\"\n"
+        "for argument in \"$@\"; do\n"
+        "  if [[ \"${argument}\" == install ]]; then\n"
+        "    touch \"${FAKE_FFMPEG_MARKER}\"\n"
+        "  fi\n"
+        "done\n",
+        encoding="utf-8",
+    )
+    fake_apt.chmod(0o755)
+
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "FASTWAM_ENV": str(fake_environment),
+            "FAKE_FFMPEG_MARKER": str(marker),
+            "FAKE_APT_LOG": str(apt_log),
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+        }
+    )
+    return environment, apt_log
+
+
+def test_torchcodec_runtime_bootstraps_missing_ffmpeg(tmp_path: Path) -> None:
+    environment, apt_log = _fake_missing_ffmpeg_environment(tmp_path)
+    helper = JIHE_DIR / "ensure_torchcodec_runtime.sh"
+    result = subprocess.run(
+        ["bash", "-c", 'source "$1"', "bash", str(helper)],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = apt_log.read_text(encoding="utf-8")
+    assert "Acquire::Retries=3 update" in calls
+    assert "Acquire::Retries=3 install -y --no-install-recommends ffmpeg" in calls
+    assert "installing the Ubuntu ffmpeg runtime" in result.stdout
+
+
+def test_torchcodec_runtime_can_disable_automatic_install(tmp_path: Path) -> None:
+    environment, apt_log = _fake_missing_ffmpeg_environment(tmp_path)
+    environment["FASTWAM_AUTO_INSTALL_FFMPEG"] = "0"
+    helper = JIHE_DIR / "ensure_torchcodec_runtime.sh"
+    result = subprocess.run(
+        ["bash", "-c", 'source "$1"', "bash", str(helper)],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "automatic installation is disabled" in result.stderr
+    assert not apt_log.exists()

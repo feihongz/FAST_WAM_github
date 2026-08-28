@@ -114,11 +114,9 @@ cd "${FASTWAM_REPO_DIR}"
 [[ -x "${FASTWAM_ENV}/bin/accelerate" ]] || fail "Missing accelerate: ${FASTWAM_ENV}/bin/accelerate"
 [[ -f scripts/accelerate_configs/accelerate_stage3_zero2.yaml ]] || fail "Missing Stage3 Accelerate config"
 [[ -f scripts/ds_configs/ds_stage3_zero2_config.json ]] || fail "Missing Stage3 ZeRO-2 config"
-"${FASTWAM_ENV}/bin/python" - <<'PY'
-import torchcodec
-from torchcodec.decoders import VideoDecoder
-print(f"[video] torchcodec={torchcodec.__version__} import=ok")
-PY
+[[ -f scripts/jihe/ensure_torchcodec_runtime.sh ]] || fail "Missing TorchCodec runtime helper"
+# shellcheck source=ensure_torchcodec_runtime.sh
+source scripts/jihe/ensure_torchcodec_runtime.sh
 [[ -f /root/feihong/FastWAM/formal_runs/FAST_WAM_github/libero_unified_shared_2cam224_1e-4/2026-07-01_00-44-20/checkpoints/weights/latest.pt ]] || fail "Missing locked LIBERO base checkpoint"
 [[ -f /root/feihong/FastWAM/formal_runs/FAST_WAM_github/libero_unified_shared_2cam224_1e-4/2026-07-01_00-44-20/dataset_stats.json ]] || fail "Missing locked LIBERO normalization stats"
 [[ -f /root/feihong/FastWAM/checkpoints/Wan-AI/Wan2.2-TI2V-5B/Wan2.2_VAE.pth ]] || fail "Missing locked Wan2.2 VAE"
