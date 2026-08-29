@@ -79,6 +79,45 @@ def test_public_smoke_launcher_rejects_hydra_arguments() -> None:
     assert "takes no arguments" in result.stderr
 
 
+@pytest.mark.parametrize(
+    "launcher",
+    (
+        "train_libero_stage3_alignment_8xh100.sh",
+        "train_robotwin_stage3_alignment_8xh100.sh",
+    ),
+)
+@pytest.mark.parametrize(
+    "auto_variable",
+    ("NPROC_PER_NODE", "SENSECORE_ACCELERATE_DEVICE_COUNT"),
+)
+def test_stage3_launcher_resolves_jihe_auto_device_count(
+    launcher: str,
+    auto_variable: str,
+) -> None:
+    environment = os.environ.copy()
+    environment.pop("NPROC_PER_NODE", None)
+    environment.pop("SENSECORE_ACCELERATE_DEVICE_COUNT", None)
+    environment.update(
+        {
+            "FASTWAM_DRY_RUN": "1",
+            "RUN_ID": "pytest-auto-device-count",
+            auto_variable: "auto",
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(JIHE_DIR / launcher), "training.max_steps=200"],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "world_size=8" in result.stdout
+    assert "--num_processes 8" in result.stdout
+
+
 def test_smoke_launcher_refuses_existing_campaign_root(tmp_path: Path) -> None:
     storage_root = tmp_path / "persistent"
     smoke_root = storage_root / "FastWAM" / "smoke-already-exists"

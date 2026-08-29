@@ -8,6 +8,11 @@ DEFAULT_REPO_DIR="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
 FASTWAM_REPO_DIR="${FASTWAM_REPO_DIR:-${DEFAULT_REPO_DIR}}"
 FASTWAM_ENV="${FASTWAM_ENV:-/root/.venvs/fastwam}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-${SENSECORE_ACCELERATE_DEVICE_COUNT:-8}}"
+if [[ "${NPROC_PER_NODE,,}" == "auto" ]]; then
+  # JiHe may advertise automatic device discovery with the literal "auto".
+  # This launcher has an intentionally fixed 8-GPU topology.
+  NPROC_PER_NODE="8"
+fi
 MASTER_PORT="${MASTER_PORT:-29531}"
 RUN_ID="${RUN_ID:-$(date -u +%Y-%m-%d_%H-%M-%S)}"
 FASTWAM_STORAGE_ROOT="${FASTWAM_STORAGE_ROOT:-/root/feihong}"
