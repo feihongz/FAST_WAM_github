@@ -88,25 +88,31 @@ def test_public_smoke_launcher_rejects_hydra_arguments() -> None:
         "steps_per_epoch",
         "save_every",
         "keep_last",
+        "data_exposure",
+        "expected_wall_time",
     ),
     (
         (
             "run_libero_stage3_full_8xh100.sh",
             "LIBERO",
             "libero_stage3_alignment_2cam224_1e-4",
-            "56970",
+            "30000",
             "5697",
-            "1899",
-            "32",
+            "1000",
+            "31",
+            "5.266 epochs / 1,440,000 windows",
+            "19-23 hours",
         ),
         (
             "run_robotwin_stage3_full_8xh100.sh",
             "RoboTwin-2.0",
             "robotwin_stage3_alignment_3cam384_1e-4",
-            "20000",
+            "40000",
             "125241",
             "500",
             "41",
+            "0.3194 epoch / 1,920,000 windows",
+            "168-192 hours",
         ),
     ),
 )
@@ -118,6 +124,8 @@ def test_full_stage3_launcher_dry_run_locks_formal_contract(
     steps_per_epoch: str,
     save_every: str,
     keep_last: str,
+    data_exposure: str,
+    expected_wall_time: str,
 ) -> None:
     environment = os.environ.copy()
     environment.pop("RESUME_STATE", None)
@@ -151,6 +159,8 @@ def test_full_stage3_launcher_dry_run_locks_formal_contract(
     assert f"benchmark={benchmark}" in output
     assert f"max_steps={max_steps}" in output
     assert f"steps_per_epoch={steps_per_epoch}" in output
+    assert f"data_exposure={data_exposure}" in output
+    assert f"expected_wall_time={expected_wall_time}" in output
     assert f"output_dir={expected_output}" in output
     assert f"training.max_steps={max_steps}" in output
     assert "training.num_epochs=10" in output

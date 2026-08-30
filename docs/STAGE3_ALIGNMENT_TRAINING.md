@@ -88,12 +88,13 @@ health smoke 均已通过。现在同时启动两个独立的正式 Stage 3 run�
 
 | benchmark | optimizer steps | 数据暴露 | checkpoint | 8×H100 预计耗时 |
 | --- | ---: | ---: | ---: | ---: |
-| LIBERO | `56,970` | 10 epochs / 2,734,560 windows | 每 1,899 步，保留 32 份 | 36–43 小时 |
-| RoboTwin 2.0 | `20,000` | 0.1597 epoch / 960,000 windows | 每 500 步，保留 41 份 | 84–96 小时 |
+| LIBERO | `30,000` | 5.266 epochs / 1,440,000 windows | 每 1,000 步，保留全部 30 个周期点 | 19–23 小时 |
+| RoboTwin 2.0 | `40,000` | 0.3194 epoch / 1,920,000 windows | 每 500 步，保留最后 41 份（20k–40k） | 168–192 小时 |
 
-LIBERO 的一个 epoch 是 5,697 optimizer steps，因此沿用 task 原本的 10-epoch
-训练语义。RoboTwin 的一个 epoch 是 125,241 steps，按 pilot 吞吐约 21.5 天；禁止让
-`max_steps=null` 落入默认 10 epochs，正式预算显式截为 20,000 steps。
+LIBERO 的一个 epoch 是 5,697 optimizer steps；正式预算显式锁为 30,000 steps，避免把
+原任务的 10-epoch 语义在更小的 global batch 下机械放大为 56,970 次 Adapter 更新。
+RoboTwin 的一个 epoch 是 125,241 steps，按 pilot 吞吐约 21.5 天；禁止让
+`max_steps=null` 落入默认 10 epochs，正式预算显式锁为 40,000 steps。
 
 两边均锁定 8×H100、每卡 batch 2、gradient accumulation 3、有效 global batch 48、
 BF16、AdamW `lr=1e-4` / `betas=(0.9,0.95)` / `weight_decay=1e-4`、gradient clip 1.0、
@@ -112,7 +113,9 @@ bash scripts/jihe/run_robotwin_stage3_full_8xh100.sh
 ```
 
 200-step pilot 的 scheduler/strict-resume 合同已经在 step 200 结束，不能作为正式 run
-的 resume 起点。正式 run 必须 fresh 启动；若正式任务中断，可用同一正式合同的完整
+的 resume 起点。此前按旧预算产生的 LIBERO 56,970-step 或 RoboTwin 20,000-step full state
+也不能续入新的 30k/40k 合同，因为 `max_steps` 和 scheduler 都属于严格训练合同。
+本轮两个新合同必须 fresh 启动；之后若同一合同中断，可用对应的完整
 `states/step_*` 或 `states/LATEST` 启动新 attempt：
 
 ```bash
