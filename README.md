@@ -21,6 +21,7 @@ This repository contains the training and evaluation code for FastWAM on LIBERO 
 - [Dataset Download](#dataset-download)
 - [Inference with Released Checkpoints](#inference-with-released-checkpoints)
 - [Training](#training)
+- [Stage 3 Endpoint Evaluation](docs/STAGE3_ENDPOINT_EVAL.md)
 - [Incremental Unified Variants](#incremental-unified-variants)
 - [Inference with Your Trained Checkpoints](#inference-with-your-trained-checkpoints)
 - [Acknowledgements](#acknowledgements)

@@ -242,3 +242,40 @@ def test_wo_dispatch_forces_wo_and_restores_previous_mode(monkeypatch, raise_err
     else:
         assert model.infer_action_without_video(marker=7) == {"marker": 7}
     assert model._unified_inference_mode == "w"
+
+
+@pytest.mark.parametrize(("requested_mode", "active_mode"), [("wo", "wo"), ("W", "w")])
+@pytest.mark.parametrize("raise_error", [False, True])
+def test_joint_mode_dispatch_scopes_mode_and_always_restores_previous_mode(
+    monkeypatch,
+    requested_mode,
+    active_mode,
+    raise_error,
+):
+    model = torch.nn.Module.__new__(FastWAMUnifiedShared)
+    torch.nn.Module.__init__(model)
+    model._unified_inference_mode = "previous-mode"
+    observed_modes = []
+
+    def fake_infer_joint(instance, **kwargs):
+        observed_modes.append(instance._unified_inference_mode)
+        assert instance._unified_inference_mode == active_mode
+        if raise_error:
+            raise RuntimeError("expected joint test failure")
+        return kwargs
+
+    monkeypatch.setattr(FastWAMJoint, "infer_joint", fake_infer_joint)
+    if raise_error:
+        with pytest.raises(RuntimeError, match="expected joint test failure"):
+            model.infer_joint_mode(
+                marker=11,
+                inference_mode=requested_mode,
+            )
+    else:
+        assert model.infer_joint_mode(
+            marker=11,
+            inference_mode=requested_mode,
+        ) == {"marker": 11}
+
+    assert observed_modes == [active_mode]
+    assert model._unified_inference_mode == "previous-mode"

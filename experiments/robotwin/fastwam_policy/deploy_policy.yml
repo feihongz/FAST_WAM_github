@@ -14,6 +14,12 @@ sim_cfg_name: sim_robotwin.yaml
 mixed_precision: bf16
 device: cuda
 dataset_stats_path: null
+stage3_adapter_path: null
+stage3_adapter_sha256: null
+stage3_base_sha256: null
+stage3_data_manifest_sha256: null
+stage3_training_contract_sha256: null
+stage3_global_step: null
 action_horizon: null
 replan_steps: 8
 num_inference_steps: 10

@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import sys
@@ -26,6 +27,11 @@ if str(SRC_ROOT) not in sys.path:
 from fastwam.datasets.lerobot.processors.fastwam_processor import FastWAMProcessor
 from fastwam.datasets.lerobot.robot_video_dataset import DEFAULT_PROMPT
 from fastwam.datasets.lerobot.utils.normalizer import load_dataset_stats_from_json
+from fastwam.alignment.eval_loading import (
+    inspect_aligned_model_artifacts,
+    load_prepared_aligned_model,
+    verify_aligned_runtime_asset,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +135,161 @@ def _resolve_dataset_stats_path(dataset_stats_path: Optional[str]) -> Path:
     return resolved
 
 
+def _optional_text(value: Any) -> Optional[str]:
+    if _is_none_like(value):
+        return None
+    return str(value).strip()
+
+
+def _first_text(*values: Any) -> Optional[str]:
+    for value in values:
+        text = _optional_text(value)
+        if text is not None:
+            return text
+    return None
+
+
+def _write_stage3_endpoint_identity(
+    output_dir: str,
+    *,
+    model_artifact_identity: dict[str, Any],
+    evaluation_runtime: dict[str, Any],
+) -> Path:
+    destination_dir = Path(output_dir).expanduser().resolve()
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    destination = destination_dir / "stage3_endpoint_model_identity.json"
+    temporary = destination.with_name(
+        f".{destination.name}.{os.getpid()}.tmp"
+    )
+    payload = {
+        "schema_version": 1,
+        "kind": "stage3_endpoint_model_identity",
+        "model_artifact_identity": model_artifact_identity,
+        "evaluation_runtime": evaluation_runtime,
+    }
+    try:
+        temporary.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
+
+
+def _prepare_stage3_eval_artifacts(
+    usr_args: Dict[str, Any],
+    cfg: DictConfig,
+    *,
+    checkpoint_path: str,
+    dataset_stats_path: Path,
+) -> Optional[dict[str, Any]]:
+    aligned_target = "fastwam.runtime.create_fastwam_unified_aligned"
+    model_target = _optional_text(OmegaConf.select(cfg, "model._target_"))
+    adapter_path = _first_text(
+        usr_args.get("stage3_adapter_path"),
+        cfg.EVALUATION.get("stage3_adapter_path"),
+    )
+    adapter_sha256 = _first_text(
+        usr_args.get("stage3_adapter_sha256"),
+        cfg.EVALUATION.get("stage3_adapter_sha256"),
+    )
+    if adapter_path is None:
+        if model_target == aligned_target:
+            raise ValueError(
+                "Aligned RoboTwin endpoint eval requires stage3_adapter_path "
+                "and stage3_adapter_sha256"
+            )
+        companion_fields = {
+            name: _first_text(
+                usr_args.get(name),
+                cfg.EVALUATION.get(name),
+            )
+            for name in (
+                "stage3_adapter_sha256",
+                "stage3_base_sha256",
+                "stage3_data_manifest_sha256",
+                "stage3_training_contract_sha256",
+                "stage3_global_step",
+            )
+        }
+        companion_fields = {
+            name: value
+            for name, value in companion_fields.items()
+            if value is not None
+        }
+        if companion_fields:
+            raise ValueError(
+                "Stage 3 identity fields require stage3_adapter_path: "
+                f"{sorted(companion_fields)}"
+            )
+        return None
+    if adapter_sha256 is None:
+        raise ValueError(
+            "stage3_adapter_sha256 is required when loading a Stage 3 Adapter"
+        )
+
+    if model_target != aligned_target:
+        raise ValueError(
+            "Stage 3 endpoint eval requires "
+            "sim_task=robotwin_stage3_alignment_3cam384_1e-4"
+        )
+    base_sha256 = _first_text(
+        usr_args.get("stage3_base_sha256"),
+        cfg.EVALUATION.get("stage3_base_sha256"),
+        OmegaConf.select(cfg, "base.expected_sha256"),
+    )
+    data_manifest_sha256 = _first_text(
+        usr_args.get("stage3_data_manifest_sha256"),
+        cfg.EVALUATION.get("stage3_data_manifest_sha256"),
+        OmegaConf.select(cfg, "data_manifest.expected_sha256"),
+    )
+    if base_sha256 is None or data_manifest_sha256 is None:
+        raise ValueError(
+            "Stage 3 endpoint eval requires locked base and data-manifest SHA256 "
+            "values from the selected Stage 3 task or explicit overrides"
+        )
+
+    vae_path = _optional_text(OmegaConf.select(cfg, "assets.vae.path"))
+    vae_sha256 = _optional_text(
+        OmegaConf.select(cfg, "assets.vae.expected_sha256")
+    )
+    stats_sha256 = _optional_text(
+        OmegaConf.select(cfg, "assets.normalization_stats.expected_sha256")
+    )
+    if vae_path is None or vae_sha256 is None or stats_sha256 is None:
+        raise ValueError(
+            "Stage 3 endpoint eval requires locked VAE and normalization-stats "
+            "asset identities from the selected Stage 3 task"
+        )
+
+    return inspect_aligned_model_artifacts(
+        base_checkpoint_path=checkpoint_path,
+        expected_base_checkpoint_sha256=base_sha256,
+        alignment_export_path=adapter_path,
+        expected_alignment_export_sha256=adapter_sha256,
+        expected_data_manifest_sha256=data_manifest_sha256,
+        expected_training_contract_sha256=_first_text(
+            usr_args.get("stage3_training_contract_sha256"),
+            cfg.EVALUATION.get("stage3_training_contract_sha256"),
+        ),
+        expected_global_step=_parse_optional_int(
+            usr_args.get("stage3_global_step")
+            if not _is_none_like(usr_args.get("stage3_global_step"))
+            else cfg.EVALUATION.get("stage3_global_step")
+        ),
+        asset_paths={
+            "vae": vae_path,
+            "normalization_stats": dataset_stats_path,
+        },
+        expected_asset_sha256={
+            "vae": vae_sha256,
+            "normalization_stats": stats_sha256,
+        },
+    )
+
+
 def _resize_rgb(image: np.ndarray, size_wh: tuple[int, int]) -> np.ndarray:
     pil_image = Image.fromarray(image.astype(np.uint8), mode="RGB")
     resized = pil_image.resize(size_wh, resample=Image.BILINEAR)
@@ -156,17 +317,43 @@ class WorldActionRobotWinPolicy:
         timing_enabled: bool,
         num_video_frames: int,
         inference_mode: str = "wo",
+        stage3_artifact_identity: Optional[dict[str, Any]] = None,
     ) -> None:
         model_cfg_copy = OmegaConf.create(OmegaConf.to_container(model_cfg, resolve=True))
         model_cfg_copy.load_text_encoder = True
 
-        self.model = instantiate(model_cfg_copy, model_dtype=model_dtype, device=device)
-        self.model.load_checkpoint(checkpoint_path)
+        instantiate_kwargs: dict[str, Any] = {
+            "model_dtype": model_dtype,
+            "device": device,
+        }
+        if stage3_artifact_identity is not None:
+            instantiate_kwargs["alignment_config"] = stage3_artifact_identity[
+                "alignment_export"
+            ]["export_metadata"]["alignment_config"]
+        self.model = instantiate(model_cfg_copy, **instantiate_kwargs)
+        if stage3_artifact_identity is None:
+            self.model.load_checkpoint(checkpoint_path)
+            self.model_artifact_identity = None
+        else:
+            self.model_artifact_identity = load_prepared_aligned_model(
+                self.model,
+                stage3_artifact_identity,
+            )
+            logger.info(
+                "Loaded strict Stage 3 endpoint model: %s",
+                json.dumps(self.model_artifact_identity, sort_keys=True),
+            )
         self.model = self.model.to(device).eval()
 
         self.processor: FastWAMProcessor = instantiate(processor_cfg).eval()
         dataset_stats = load_dataset_stats_from_json(str(dataset_stats_path))
         self.processor.set_normalizer_from_stats(dataset_stats)
+        if stage3_artifact_identity is not None:
+            verify_aligned_runtime_asset(
+                stage3_artifact_identity,
+                "normalization_stats",
+                phase="while normalization stats were being loaded",
+            )
 
         self.action_horizon = int(action_horizon)
         self.replan_steps = int(max(1, min(replan_steps, action_horizon)))
@@ -353,6 +540,12 @@ def get_model(usr_args: Dict[str, Any]):
     dataset_stats_path = _resolve_dataset_stats_path(
         dataset_stats_path=usr_args.get("dataset_stats_path"),
     )
+    stage3_artifact_identity = _prepare_stage3_eval_artifacts(
+        usr_args,
+        cfg,
+        checkpoint_path=str(checkpoint_path),
+        dataset_stats_path=dataset_stats_path,
+    )
 
     action_horizon = _parse_optional_int(usr_args.get("action_horizon"))
     if action_horizon is None:
@@ -402,7 +595,36 @@ def get_model(usr_args: Dict[str, Any]):
         timing_enabled=timing_enabled,
         num_video_frames=(int(cfg.data.train.num_frames) - 1) // int(cfg.data.train.action_video_freq_ratio) + 1,
         inference_mode=inference_mode,
+        stage3_artifact_identity=stage3_artifact_identity,
     )
+    if policy.model_artifact_identity is not None:
+        eval_output_dir = _first_text(usr_args.get("eval_output_dir"))
+        if eval_output_dir is None:
+            raise ValueError(
+                "Stage 3 RoboTwin endpoint eval requires eval_output_dir "
+                "for the model identity receipt"
+            )
+        receipt_path = _write_stage3_endpoint_identity(
+            eval_output_dir,
+            model_artifact_identity=policy.model_artifact_identity,
+            evaluation_runtime={
+                "task_name": _first_text(usr_args.get("task_name")),
+                "task_config": _first_text(usr_args.get("task_config")),
+                "instruction_type": _first_text(
+                    usr_args.get("instruction_type")
+                ),
+                "inference_mode": inference_mode,
+                "action_horizon": action_horizon,
+                "replan_steps": replan_steps,
+                "num_inference_steps": num_inference_steps,
+                "sigma_shift": sigma_shift,
+                "seed": seed,
+            },
+        )
+        logger.info(
+            "Wrote Stage 3 endpoint model identity receipt: %s",
+            receipt_path,
+        )
     return policy
 
 

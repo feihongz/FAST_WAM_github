@@ -1,4 +1,21 @@
-# JiHe 8xH100 formal launch scripts
+# JiHe launch scripts
+
+## Stage 3 endpoint pilot smoke (1xH100)
+
+Stage 3 200-step pilot endpoint connectivity smokes use two independent
+one-H100 jobs:
+
+```bash
+bash scripts/jihe/eval_libero_stage3_pilot_endpoint_1xh100.sh
+bash scripts/jihe/eval_robotwin_stage3_pilot_endpoint_1xh100.sh
+```
+
+They run one closed-loop episode with `inference_mode=w` and strict
+base/Adapter/data/VAE/stats identity checks. These are pilot connectivity
+checks, not formal benchmark evaluations. See
+`docs/STAGE3_ENDPOINT_EVAL.md`.
+
+## Formal training (8xH100)
 
 Four independent bash entrypoints:
 

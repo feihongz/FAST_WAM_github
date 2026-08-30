@@ -48,6 +48,16 @@ EVALUATION:
   dataset_stats_path: null
   device: cuda
 
+  # Optional Stage 3 endpoint artifact. `ckpt` remains the frozen base.
+  # When stage3_adapter_path is set, Adapter SHA is mandatory; base/data
+  # identities default to the selected Stage 3 task contract.
+  stage3_adapter_path: null
+  stage3_adapter_sha256: null
+  stage3_base_sha256: null
+  stage3_data_manifest_sha256: null
+  stage3_training_contract_sha256: null
+  stage3_global_step: null
+
 MULTIRUN:
   create_only: false
   task_file: null

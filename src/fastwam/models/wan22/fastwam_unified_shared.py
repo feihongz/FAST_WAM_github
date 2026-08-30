@@ -295,3 +295,17 @@ class FastWAMUnifiedShared(FastWAM):
         if mode == "w":
             return self.infer_action_with_video(*args, **kwargs)
         raise ValueError(f"Unknown inference_mode: {inference_mode}")
+
+    @torch.no_grad()
+    def infer_joint_mode(self, *args, inference_mode: str = "wo", **kwargs):
+        """Run joint action/video inference under an explicit routing mode."""
+
+        mode = str(inference_mode).lower()
+        if mode not in {"wo", "w"}:
+            raise ValueError(f"Unknown inference_mode: {inference_mode}")
+        previous_mode = getattr(self, "_unified_inference_mode", "wo")
+        self._unified_inference_mode = mode
+        try:
+            return FastWAMJoint.infer_joint(self, *args, **kwargs)
+        finally:
+            self._unified_inference_mode = previous_mode

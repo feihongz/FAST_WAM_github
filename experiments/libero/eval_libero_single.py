@@ -46,6 +46,7 @@ from experiments.libero.libero_utils import (
     save_prediction_video,
     save_rollout_video,
 )
+from experiments.libero.init_state_compat import load_libero_task_init_states
 from fastwam.datasets.lerobot.processors.fastwam_processor import FastWAMProcessor
 from fastwam.datasets.lerobot.utils.normalizer import load_dataset_stats_from_json
 from fastwam.utils.pytorch_utils import set_global_seed
@@ -67,6 +68,12 @@ except ModuleNotFoundError as exc:
     from libero import benchmark
 
 from action_ensembler import ActionEnsembler
+
+from fastwam.alignment.eval_loading import (
+    inspect_aligned_model_artifacts,
+    load_prepared_aligned_model,
+    verify_aligned_runtime_asset,
+)
 
 OmegaConf.register_new_resolver("eval", eval)
 OmegaConf.register_new_resolver("max", lambda x: max(x))
@@ -140,42 +147,149 @@ def _resolve_dataset_stats_path(cfg: DictConfig) -> Path:
     raise FileNotFoundError(msg)
 
 
-def _load_model_checkpoint(model: torch.nn.Module, ckpt: str) -> None:
+def _optional_text(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text == "" or text.lower() in {"none", "null"}:
+        return None
+    return text
+
+
+def _stage3_expected_value(
+    cfg: DictConfig,
+    *,
+    evaluation_key: str,
+    fallback_key: str,
+) -> Optional[str]:
+    explicit = _optional_text(cfg.EVALUATION.get(evaluation_key))
+    if explicit is not None:
+        return explicit
+    return _optional_text(OmegaConf.select(cfg, fallback_key))
+
+
+def _prepare_stage3_eval_artifacts(
+    cfg: DictConfig,
+    *,
+    dataset_stats_path: Path,
+) -> Optional[dict[str, Any]]:
+    aligned_target = "fastwam.runtime.create_fastwam_unified_aligned"
+    model_target = _optional_text(OmegaConf.select(cfg, "model._target_"))
+    adapter_path = _optional_text(cfg.EVALUATION.get("stage3_adapter_path"))
+    adapter_sha256 = _optional_text(
+        cfg.EVALUATION.get("stage3_adapter_sha256")
+    )
+    if adapter_path is None:
+        if model_target == aligned_target:
+            raise ValueError(
+                "Aligned LIBERO endpoint eval requires "
+                "EVALUATION.stage3_adapter_path and "
+                "EVALUATION.stage3_adapter_sha256"
+            )
+        companion_fields = {
+            name: cfg.EVALUATION.get(name)
+            for name in (
+                "stage3_adapter_sha256",
+                "stage3_base_sha256",
+                "stage3_data_manifest_sha256",
+                "stage3_training_contract_sha256",
+                "stage3_global_step",
+            )
+            if _optional_text(cfg.EVALUATION.get(name)) is not None
+        }
+        if companion_fields:
+            raise ValueError(
+                "Stage 3 identity fields require "
+                "EVALUATION.stage3_adapter_path: "
+                f"{sorted(companion_fields)}"
+            )
+        return None
+    if adapter_sha256 is None:
+        raise ValueError(
+            "EVALUATION.stage3_adapter_sha256 is required when loading "
+            "a Stage 3 Adapter"
+        )
+
+    if model_target != aligned_target:
+        raise ValueError(
+            "Stage 3 endpoint eval requires "
+            "task=libero_stage3_alignment_2cam224_1e-4"
+        )
+    base_sha256 = _stage3_expected_value(
+        cfg,
+        evaluation_key="stage3_base_sha256",
+        fallback_key="base.expected_sha256",
+    )
+    data_manifest_sha256 = _stage3_expected_value(
+        cfg,
+        evaluation_key="stage3_data_manifest_sha256",
+        fallback_key="data_manifest.expected_sha256",
+    )
+    if base_sha256 is None or data_manifest_sha256 is None:
+        raise ValueError(
+            "Stage 3 endpoint eval requires locked base and data-manifest SHA256 "
+            "values from the selected Stage 3 task or explicit EVALUATION overrides"
+        )
+
+    vae_path = _optional_text(OmegaConf.select(cfg, "assets.vae.path"))
+    vae_sha256 = _optional_text(
+        OmegaConf.select(cfg, "assets.vae.expected_sha256")
+    )
+    stats_sha256 = _optional_text(
+        OmegaConf.select(cfg, "assets.normalization_stats.expected_sha256")
+    )
+    if vae_path is None or vae_sha256 is None or stats_sha256 is None:
+        raise ValueError(
+            "Stage 3 endpoint eval requires locked VAE and normalization-stats "
+            "asset identities from the selected Stage 3 task"
+        )
+
+    expected_global_step = cfg.EVALUATION.get("stage3_global_step")
+    if _optional_text(expected_global_step) is None:
+        expected_global_step = None
+    else:
+        expected_global_step = int(expected_global_step)
+    return inspect_aligned_model_artifacts(
+        base_checkpoint_path=str(cfg.ckpt),
+        expected_base_checkpoint_sha256=base_sha256,
+        alignment_export_path=adapter_path,
+        expected_alignment_export_sha256=adapter_sha256,
+        expected_data_manifest_sha256=data_manifest_sha256,
+        expected_training_contract_sha256=_optional_text(
+            cfg.EVALUATION.get("stage3_training_contract_sha256")
+        ),
+        expected_global_step=expected_global_step,
+        asset_paths={
+            "vae": vae_path,
+            "normalization_stats": dataset_stats_path,
+        },
+        expected_asset_sha256={
+            "vae": vae_sha256,
+            "normalization_stats": stats_sha256,
+        },
+    )
+
+
+def _load_model_checkpoint(
+    model: torch.nn.Module,
+    ckpt: str,
+    *,
+    stage3_artifact_identity: Optional[dict[str, Any]] = None,
+) -> Optional[dict[str, Any]]:
+    if stage3_artifact_identity is not None:
+        identity = load_prepared_aligned_model(
+            model,
+            stage3_artifact_identity,
+        )
+        logging.info(
+            "Loaded strict Stage 3 endpoint model: %s",
+            json.dumps(identity, sort_keys=True),
+        )
+        return identity
+
     model.load_checkpoint(ckpt)
     logging.info("Loaded checkpoint via model.load_checkpoint: %s", ckpt)
-    return
-
-    # deprecated legacy checkpoint loading
-    payload = torch.load(ckpt, map_location="cpu")
-    if not isinstance(payload, dict):
-        raise ValueError(f"Legacy checkpoint payload must be dict, got: {type(payload)}")
-
-    if "mot" in payload and hasattr(model, "mot"):
-        missing, unexpected = model.mot.load_state_dict(payload["mot"], strict=False)
-        logging.warning(
-            "Loaded fallback `mot` state_dict with strict=False. Missing=%d Unexpected=%d",
-            len(missing),
-            len(unexpected),
-        )
-        return
-
-    state_dict = None
-    for key in ("model_state_dict", "state_dict", "model"):
-        value = payload.get(key)
-        if isinstance(value, dict):
-            state_dict = value
-            break
-    if state_dict is None and all(torch.is_tensor(v) for v in payload.values()):
-        state_dict = payload
-    if state_dict is None:
-        raise ValueError(f"Cannot parse legacy checkpoint keys from: {ckpt}")
-
-    missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    logging.warning(
-        "Loaded fallback model state_dict with strict=False. Missing=%d Unexpected=%d",
-        len(missing),
-        len(unexpected),
-    )
+    return None
 
 
 def _center_crop_resize(image: np.ndarray, width: int, height: int) -> np.ndarray:
@@ -479,7 +593,18 @@ def _predict_action_chunk(
 
     with torch.no_grad():
         if visualize_future_video:
-            pred = model.infer_joint(**infer_kwargs)
+            if hasattr(model, "infer_joint_mode"):
+                pred = model.infer_joint_mode(
+                    **infer_kwargs,
+                    inference_mode=inference_mode,
+                )
+            else:
+                if inference_mode != "wo":
+                    raise ValueError(
+                        f"Model {type(model).__name__} does not support "
+                        f"joint inference_mode={inference_mode}"
+                    )
+                pred = model.infer_joint(**infer_kwargs)
             predicted_future_frames = _select_predicted_future_frames(pred["video"], cfg)
         elif hasattr(model, "infer_action_mode"):
             pred = model.infer_action_mode(**infer_kwargs, inference_mode=inference_mode)
@@ -830,17 +955,39 @@ def eval_single_process(cfg: DictConfig):
             "Use run_libero_manager/run_libero_parallel_test.sh for multi-GPU task parallelism."
         )
 
-    model_device = _resolve_eval_device(cfg)
-    model_dtype = _mixed_precision_to_model_dtype(cfg.get("mixed_precision", "bf16"))
-    model = instantiate(cfg.model, model_dtype=model_dtype, device=model_device)
-    _load_model_checkpoint(model, str(cfg.ckpt))
-    model = model.to(model_device).eval()
-
     dataset_stats_path = _resolve_dataset_stats_path(cfg)
+    stage3_artifact_identity = _prepare_stage3_eval_artifacts(
+        cfg,
+        dataset_stats_path=dataset_stats_path,
+    )
     dataset_stats = load_dataset_stats_from_json(str(dataset_stats_path))
     processor: FastWAMProcessor = instantiate(cfg.data.train.processor).eval()
     processor.set_normalizer_from_stats(dataset_stats)
+    if stage3_artifact_identity is not None:
+        verify_aligned_runtime_asset(
+            stage3_artifact_identity,
+            "normalization_stats",
+            phase="while normalization stats were being loaded",
+        )
     logging.info("Using dataset stats: %s", dataset_stats_path)
+
+    model_device = _resolve_eval_device(cfg)
+    model_dtype = _mixed_precision_to_model_dtype(cfg.get("mixed_precision", "bf16"))
+    instantiate_kwargs: dict[str, Any] = {
+        "model_dtype": model_dtype,
+        "device": model_device,
+    }
+    if stage3_artifact_identity is not None:
+        instantiate_kwargs["alignment_config"] = stage3_artifact_identity[
+            "alignment_export"
+        ]["export_metadata"]["alignment_config"]
+    model = instantiate(cfg.model, **instantiate_kwargs)
+    model_artifact_identity = _load_model_checkpoint(
+        model,
+        str(cfg.ckpt),
+        stage3_artifact_identity=stage3_artifact_identity,
+    )
+    model = model.to(model_device).eval()
 
     action_horizon_cfg = cfg.EVALUATION.get("action_horizon", None)
     if action_horizon_cfg is None:
@@ -870,7 +1017,11 @@ def eval_single_process(cfg: DictConfig):
     benchmark_dict = benchmark.get_benchmark_dict()
     task_suite = benchmark_dict[cfg.EVALUATION.task_suite_name]()
     task = task_suite.get_task(cfg.EVALUATION.task_id)
-    initial_states = task_suite.get_task_init_states(cfg.EVALUATION.task_id)
+    initial_states = load_libero_task_init_states(
+        task_suite,
+        int(cfg.EVALUATION.task_id),
+        init_states_root=benchmark.get_libero_path("init_states"),
+    )
 
     while len(initial_states) < int(cfg.EVALUATION.num_trials):
         initial_states.extend(initial_states[: (int(cfg.EVALUATION.num_trials) - len(initial_states))])
@@ -903,6 +1054,8 @@ def eval_single_process(cfg: DictConfig):
         model_device=model_device,
     )
     results.update(task_results)
+    if model_artifact_identity is not None:
+        results["model_artifact_identity"] = model_artifact_identity
 
     results["duration"] = time.time() - start_time
     output_dir = Path(cfg.EVALUATION.output_dir) / cfg.EVALUATION.task_suite_name

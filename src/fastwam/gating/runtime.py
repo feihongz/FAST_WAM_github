@@ -13,25 +13,20 @@ import json
 from pathlib import Path
 from typing import Any
 
-import torch
-
-from fastwam.alignment.checkpointing import resolve_base_checkpoint, sha256_file
+from fastwam.alignment.eval_loading import (
+    inspect_alignment_export,
+    load_frozen_aligned_model,
+)
 from fastwam.alignment.data_identity import validate_data_manifest
 from fastwam.alignment.text_cache_binding import (
     bind_validated_text_cache_integrity,
 )
-from fastwam.models.wan22.video_action_alignment import (
-    ALIGNMENT_CHECKPOINT_SCHEMA_VERSION,
-    load_alignment_checkpoint,
-)
+from fastwam.models.wan22.video_action_alignment import load_alignment_checkpoint
 
 from .contracts import require_sha256
-
-
 STAGE2_LABEL_MODEL_IDENTITY_SCHEMA_VERSION = 1
 STAGE2_LABEL_MODEL_IDENTITY_KIND = "stage2_label_model_identity"
 STAGE2_LABEL_DATA_IDENTITY_KIND = "stage2_label_data_identity"
-_ALIGNMENT_EXPORT_KIND = "stage3_alignment_export"
 
 
 def _json_copy(value: Any, *, field: str) -> Any:
@@ -41,134 +36,6 @@ def _json_copy(value: Any, *, field: str) -> Any:
         return json.loads(json.dumps(value, sort_keys=True, ensure_ascii=True))
     except (TypeError, ValueError) as error:
         raise ValueError(f"{field} must be JSON serializable") from error
-
-
-def _optional_string(value: Any, *, field: str) -> str | None:
-    if value is not None and not isinstance(value, str):
-        raise TypeError(f"alignment export {field} must be a string or null")
-    return value
-
-
-def _validated_export_metadata(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, Mapping):
-        raise ValueError("alignment export must be a mapping")
-    if (
-        payload.get("schema_version") != ALIGNMENT_CHECKPOINT_SCHEMA_VERSION
-        or payload.get("kind") != _ALIGNMENT_EXPORT_KIND
-    ):
-        raise ValueError("unsupported alignment export")
-    if not isinstance(payload.get("adapter"), Mapping):
-        raise ValueError("alignment export is missing Adapter state")
-
-    base_checkpoint = payload.get("base_checkpoint")
-    if not isinstance(base_checkpoint, str) or not base_checkpoint:
-        raise ValueError("alignment export base_checkpoint must be non-empty")
-    base_sha256 = require_sha256(
-        payload.get("base_checkpoint_sha256"),
-        field="alignment export base_checkpoint_sha256",
-    )
-    data_sha256 = require_sha256(
-        payload.get("data_manifest_sha256"),
-        field="alignment export data_manifest_sha256",
-    )
-    alignment_config = payload.get("alignment_config")
-    if not isinstance(alignment_config, Mapping):
-        raise ValueError("alignment export alignment_config must be a mapping")
-
-    global_step = payload.get("global_step")
-    if global_step is not None and (
-        isinstance(global_step, bool)
-        or not isinstance(global_step, int)
-        or global_step < 0
-    ):
-        raise ValueError("alignment export global_step must be non-negative or null")
-    training_contract_sha256 = payload.get("training_contract_sha256")
-    if training_contract_sha256 is not None:
-        training_contract_sha256 = require_sha256(
-            training_contract_sha256,
-            field="alignment export training_contract_sha256",
-        )
-    asset_identities = payload.get("asset_identities", {})
-    if not isinstance(asset_identities, Mapping):
-        raise ValueError("alignment export asset_identities must be a mapping")
-
-    metadata = {
-        "schema_version": ALIGNMENT_CHECKPOINT_SCHEMA_VERSION,
-        "kind": _ALIGNMENT_EXPORT_KIND,
-        "base_checkpoint": base_checkpoint,
-        "base_checkpoint_sha256": base_sha256,
-        "data_manifest_sha256": data_sha256,
-        "alignment_config": dict(alignment_config),
-        "global_step": global_step,
-        "git_commit": _optional_string(payload.get("git_commit"), field="git_commit"),
-        "training_contract_sha256": training_contract_sha256,
-        "asset_identities": dict(asset_identities),
-    }
-    return _json_copy(metadata, field="alignment export metadata")
-
-
-def inspect_alignment_export(
-    path: str | Path,
-    *,
-    expected_sha256: str,
-    expected_base_checkpoint_sha256: str | None = None,
-    expected_data_manifest_sha256: str | None = None,
-) -> dict[str, Any]:
-    """Inspect an Adapter export without constructing or mutating a model.
-
-    The file hash is verified before deserialization.  Optional base/data
-    expectations let a future factory or CLI reject the wrong export before it
-    allocates the 5B model.
-    """
-
-    expected_sha256 = require_sha256(
-        expected_sha256,
-        field="expected alignment export SHA256",
-    )
-    if expected_base_checkpoint_sha256 is not None:
-        expected_base_checkpoint_sha256 = require_sha256(
-            expected_base_checkpoint_sha256,
-            field="expected base checkpoint SHA256",
-        )
-    if expected_data_manifest_sha256 is not None:
-        expected_data_manifest_sha256 = require_sha256(
-            expected_data_manifest_sha256,
-            field="expected data manifest SHA256",
-        )
-
-    source = Path(path).expanduser().resolve()
-    actual_sha256 = sha256_file(source)
-    if actual_sha256 != expected_sha256:
-        raise ValueError(
-            "alignment export SHA256 mismatch: "
-            f"expected={expected_sha256}, actual={actual_sha256}, path={source}"
-        )
-    size_bytes = source.stat().st_size
-    payload = torch.load(source, map_location="cpu", weights_only=False)
-    metadata = _validated_export_metadata(payload)
-    if (
-        expected_base_checkpoint_sha256 is not None
-        and metadata["base_checkpoint_sha256"]
-        != expected_base_checkpoint_sha256
-    ):
-        raise ValueError("alignment export base checkpoint hash mismatch")
-    if (
-        expected_data_manifest_sha256 is not None
-        and metadata["data_manifest_sha256"] != expected_data_manifest_sha256
-    ):
-        raise ValueError("alignment export data manifest hash mismatch")
-
-    # Detect replacement during inspection rather than reporting a stale
-    # identity for a different file.
-    if source.stat().st_size != size_bytes or sha256_file(source) != actual_sha256:
-        raise RuntimeError("alignment export changed while it was being inspected")
-    identity = {
-        "path": str(source),
-        "sha256": actual_sha256,
-        "size_bytes": size_bytes,
-        "export_metadata": metadata,
-    }
-    return _json_copy(identity, field="alignment export identity")
 
 
 def load_stage2_label_model(
@@ -187,84 +54,22 @@ def load_stage2_label_model(
     the final inference-only freeze have completed.
     """
 
-    # Keep Gate-only training/imports independent from the 5B WAM module. The
-    # aligned implementation is needed only by offline label generation, so
-    # import it at the point where that path is actually used.
-    from fastwam.models.wan22.fastwam_unified_aligned import (
-        FastWAMUnifiedAligned,
-    )
-
-    if not isinstance(model, FastWAMUnifiedAligned):
-        raise TypeError("Stage 2 labels require FastWAMUnifiedAligned")
-    expected_base_checkpoint_sha256 = require_sha256(
-        expected_base_checkpoint_sha256,
-        field="expected base checkpoint SHA256",
-    )
-    expected_alignment_export_sha256 = require_sha256(
-        expected_alignment_export_sha256,
-        field="expected alignment export SHA256",
-    )
-    expected_data_manifest_sha256 = require_sha256(
-        expected_data_manifest_sha256,
-        field="expected data manifest SHA256",
-    )
-
-    # Finish all artifact/config checks before either loader mutates the model.
-    base_identity = resolve_base_checkpoint(
-        base_checkpoint_path,
-        expected_sha256=expected_base_checkpoint_sha256,
-    )
-    export_identity = inspect_alignment_export(
-        alignment_export_path,
-        expected_sha256=expected_alignment_export_sha256,
-        expected_base_checkpoint_sha256=base_identity.sha256,
+    aligned_identity = load_frozen_aligned_model(
+        model,
+        base_checkpoint_path=base_checkpoint_path,
+        expected_base_checkpoint_sha256=expected_base_checkpoint_sha256,
+        alignment_export_path=alignment_export_path,
+        expected_alignment_export_sha256=expected_alignment_export_sha256,
         expected_data_manifest_sha256=expected_data_manifest_sha256,
+        _alignment_loader=load_alignment_checkpoint,
     )
-    adapter = getattr(model, "alignment_adapter", None)
-    if adapter is None or not callable(getattr(adapter, "config", None)):
-        raise TypeError("aligned model must expose a configured alignment_adapter")
-    model_config = _json_copy(
-        adapter.config(),
-        field="model alignment Adapter config",
-    )
-    export_metadata = export_identity["export_metadata"]
-    if export_metadata["alignment_config"] != model_config:
-        raise ValueError("alignment export config does not match model Adapter")
-
-    base_metadata = model.load_frozen_base_checkpoint(base_identity.path)
-    if not isinstance(base_metadata, Mapping):
-        raise TypeError("base checkpoint loader must return metadata mapping")
-    load_alignment_checkpoint(
-        export_identity["path"],
-        adapter,
-        expected_base_checkpoint_sha256=base_identity.sha256,
-        expected_data_manifest_sha256=expected_data_manifest_sha256,
-        map_location="cpu",
-    )
-
-    model.eval()
-    model.requires_grad_(False)
-    if any(module.training for module in model.modules()):
-        raise RuntimeError("Stage 2 label model did not enter eval mode")
-    if any(parameter.requires_grad for parameter in model.parameters()):
-        raise RuntimeError("Stage 2 label model is not fully frozen")
-
-    # Recheck both artifacts after their loaders return.  This closes the
-    # inspect/load time-of-check gap and prevents a mixed identity report.
-    if sha256_file(base_identity.path) != base_identity.sha256:
-        raise RuntimeError("base checkpoint changed while it was being loaded")
-    if sha256_file(export_identity["path"]) != export_identity["sha256"]:
-        raise RuntimeError("alignment export changed while it was being loaded")
-
     identity = {
         "schema_version": STAGE2_LABEL_MODEL_IDENTITY_SCHEMA_VERSION,
         "kind": STAGE2_LABEL_MODEL_IDENTITY_KIND,
-        "model_class": (
-            f"{model.__class__.__module__}.{model.__class__.__qualname__}"
-        ),
-        "base_checkpoint": base_identity.as_dict(),
-        "alignment_export": export_identity,
-        "data_manifest_sha256": expected_data_manifest_sha256,
+        "model_class": aligned_identity["model_class"],
+        "base_checkpoint": aligned_identity["base_checkpoint"],
+        "alignment_export": aligned_identity["alignment_export"],
+        "data_manifest_sha256": aligned_identity["data_manifest_sha256"],
     }
     return _json_copy(identity, field="Stage 2 label model identity")
 

@@ -11,7 +11,8 @@ Features:
 Common arguments:
 - `ckpt`: path to the FastWAM checkpoint (required).
 - `EVALUATION.task_name`: task name to evaluate (required).
-- `gpu_id`: sets `CUDA_VISIBLE_DEVICES`.
+- `gpu_id`: selects a logical device from the inherited
+  `CUDA_VISIBLE_DEVICES` allocation.
 
 Examples:
 1) Minimal run
@@ -52,12 +53,19 @@ def _resolve_path(path_str: str, *, base: Path) -> Path:
 
 
 def _resolve_optional_path(path_value: Any, *, base: Path) -> Path | None:
-    if path_value is None:
-        return None
-    text = str(path_value).strip()
-    if text == "" or text.lower() in {"none", "null"}:
+    text = _optional_text(path_value)
+    if text is None:
         return None
     return _resolve_path(text, base=base)
+
+
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text == "" or text.lower() in {"none", "null"}:
+        return None
+    return text
 
 
 def _resolve_dataset_stats_path(cfg: DictConfig, ckpt_path: Path) -> Path:
@@ -146,6 +154,29 @@ def _append_override(overrides: list[str], key: str, value: Any, *, skip_none: b
     overrides.extend([f"--{key}", _format_override_value(value)])
 
 
+def _select_cuda_visible_device(gpu_id: Any) -> str:
+    """Select one device without escaping the caller's GPU allocation."""
+
+    try:
+        logical_index = int(gpu_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"gpu_id must be a non-negative integer, got {gpu_id!r}") from exc
+    if logical_index < 0:
+        raise ValueError(f"gpu_id must be a non-negative integer, got {gpu_id!r}")
+
+    inherited = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if inherited is None or not inherited.strip():
+        return str(logical_index)
+
+    visible_devices = [item.strip() for item in inherited.split(",") if item.strip()]
+    if logical_index >= len(visible_devices):
+        raise ValueError(
+            "gpu_id selects a logical device outside the inherited "
+            f"CUDA_VISIBLE_DEVICES={inherited!r}: {logical_index}"
+        )
+    return visible_devices[logical_index]
+
+
 @hydra.main(version_base="1.3", config_path="../../configs", config_name="sim_robotwin.yaml")
 def main(cfg: DictConfig):
     if cfg.ckpt is None:
@@ -156,7 +187,54 @@ def main(cfg: DictConfig):
     ckpt_path = _resolve_path(str(cfg.ckpt), base=PROJECT_ROOT)
     if not ckpt_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
-    ckpt_tag = _resolve_ckpt_tag(ckpt_path)
+    stage3_adapter_path = _resolve_optional_path(
+        cfg.EVALUATION.stage3_adapter_path,
+        base=PROJECT_ROOT,
+    )
+    stage3_adapter_sha256 = _optional_text(
+        cfg.EVALUATION.stage3_adapter_sha256
+    )
+    aligned_target = "fastwam.runtime.create_fastwam_unified_aligned"
+    model_target = _optional_text(OmegaConf.select(cfg, "model._target_"))
+    if stage3_adapter_path is None:
+        if model_target == aligned_target:
+            raise ValueError(
+                "Aligned RoboTwin endpoint eval requires "
+                "EVALUATION.stage3_adapter_path and "
+                "EVALUATION.stage3_adapter_sha256"
+            )
+        companion_fields = {
+            name: cfg.EVALUATION.get(name)
+            for name in (
+                "stage3_adapter_sha256",
+                "stage3_base_sha256",
+                "stage3_data_manifest_sha256",
+                "stage3_training_contract_sha256",
+                "stage3_global_step",
+            )
+            if _optional_text(cfg.EVALUATION.get(name)) is not None
+        }
+        if companion_fields:
+            raise ValueError(
+                "Stage 3 identity fields require "
+                "EVALUATION.stage3_adapter_path: "
+                f"{sorted(companion_fields)}"
+            )
+    else:
+        if stage3_adapter_sha256 is None:
+            raise ValueError(
+                "EVALUATION.stage3_adapter_sha256 is required when loading "
+                "a Stage 3 Adapter"
+            )
+        if model_target != aligned_target:
+            raise ValueError(
+                "Stage 3 endpoint eval requires "
+                "task=robotwin_stage3_alignment_3cam384_1e-4"
+            )
+        if not stage3_adapter_path.is_file():
+            raise FileNotFoundError(
+                f"Stage 3 Adapter not found: {stage3_adapter_path}"
+            )
 
     robotwin_root = _resolve_path(str(cfg.EVALUATION.robotwin_root), base=PROJECT_ROOT)
     if not robotwin_root.exists():
@@ -168,29 +246,15 @@ def main(cfg: DictConfig):
 
     _ensure_policy_symlink(robotwin_root=robotwin_root, policy_source_dir=policy_source_dir)
 
-    output_dir = _resolve_path(str(cfg.EVALUATION.output_dir), base=PROJECT_ROOT)
-    run_ts = output_dir.name
-    if run_ts == "":
-        raise ValueError(f"Invalid EVALUATION.output_dir (missing run_ts): {output_dir}")
-    run_output_dir = (
-        PROJECT_ROOT
-        / "evaluate_results"
-        / "robotwin"
-        / ckpt_tag
-        / run_ts
+    run_output_dir = _resolve_path(
+        str(cfg.EVALUATION.output_dir),
+        base=PROJECT_ROOT,
     )
     run_output_dir.mkdir(parents=True, exist_ok=True)
     log_file = run_output_dir / (
         f"eval_{str(cfg.EVALUATION.task_name)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     )
-    robotwin_eval_base = (
-        PROJECT_ROOT
-        / "evaluate_results"
-        / "robotwin"
-        / ckpt_tag
-        / run_ts
-        / str(cfg.EVALUATION.task_name)
-    )
+    robotwin_eval_base = run_output_dir / str(cfg.EVALUATION.task_name)
 
     sim_cfg_path = (PROJECT_ROOT / "configs" / "sim_robotwin.yaml").resolve()
     sim_task = HydraConfig.get().runtime.choices.get("task")
@@ -212,6 +276,36 @@ def main(cfg: DictConfig):
     _append_override(overrides, "mixed_precision", cfg.mixed_precision)
     _append_override(overrides, "device", cfg.EVALUATION.device)
     _append_override(overrides, "dataset_stats_path", str(dataset_stats_path))
+    _append_override(
+        overrides,
+        "stage3_adapter_path",
+        None if stage3_adapter_path is None else str(stage3_adapter_path),
+    )
+    _append_override(
+        overrides,
+        "stage3_adapter_sha256",
+        stage3_adapter_sha256,
+    )
+    _append_override(
+        overrides,
+        "stage3_base_sha256",
+        cfg.EVALUATION.stage3_base_sha256,
+    )
+    _append_override(
+        overrides,
+        "stage3_data_manifest_sha256",
+        cfg.EVALUATION.stage3_data_manifest_sha256,
+    )
+    _append_override(
+        overrides,
+        "stage3_training_contract_sha256",
+        cfg.EVALUATION.stage3_training_contract_sha256,
+    )
+    _append_override(
+        overrides,
+        "stage3_global_step",
+        cfg.EVALUATION.stage3_global_step,
+    )
     _append_override(overrides, "action_horizon", cfg.EVALUATION.action_horizon)
     _append_override(overrides, "replan_steps", cfg.EVALUATION.replan_steps)
     _append_override(overrides, "inference_mode", cfg.EVALUATION.inference_mode)
@@ -239,7 +333,7 @@ def main(cfg: DictConfig):
     ]
 
     env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = str(cfg.gpu_id)
+    env["CUDA_VISIBLE_DEVICES"] = _select_cuda_visible_device(cfg.gpu_id)
     env["PYTHONUNBUFFERED"] = "1"
 
     with open(log_file, "w", encoding="utf-8") as log_f:
