@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# JiHe/HyperTrain: one node with exactly 8 H100s.
+# JiHe/HyperTrain: one 8-H100 smoke node or two 8-H100 formal nodes.
 TASK_NAME="robotwin_stage3_alignment_3cam384_1e-4"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 DEFAULT_REPO_DIR="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
@@ -14,11 +14,18 @@ if [[ "${NPROC_PER_NODE,,}" == "auto" ]]; then
   NPROC_PER_NODE="8"
 fi
 MASTER_PORT="${MASTER_PORT:-29532}"
+NNODES="${NNODES:-1}"
+NODE_RANK="${NODE_RANK:-${MACHINE_RANK:-${GROUP_RANK:-0}}}"
+MASTER_ADDR="${MASTER_ADDR:-${MASTER_IP:-}}"
 RUN_ID="${RUN_ID:-$(date -u +%Y-%m-%d_%H-%M-%S)}"
 FASTWAM_STORAGE_ROOT="${FASTWAM_STORAGE_ROOT:-/root/feihong}"
 FASTWAM_OUTPUT_BASE="${FASTWAM_OUTPUT_BASE:-${FASTWAM_STORAGE_ROOT}/FastWAM/formal_runs/FAST_WAM_github}"
 OUTPUT_DIR="${OUTPUT_DIR:-${FASTWAM_OUTPUT_BASE}/${TASK_NAME}/${RUN_ID}}"
-LOG_FILE="${LOG_FILE:-${OUTPUT_DIR}/launch.log}"
+if [[ "${NNODES}" == "2" ]]; then
+  LOG_FILE="${LOG_FILE:-${OUTPUT_DIR}/launch.node${NODE_RANK}.log}"
+else
+  LOG_FILE="${LOG_FILE:-${OUTPUT_DIR}/launch.log}"
+fi
 RESUME_STATE="${RESUME_STATE:-}"
 FASTWAM_DRY_RUN="${FASTWAM_DRY_RUN:-0}"
 
@@ -34,9 +41,26 @@ print_command() {
 }
 
 [[ "${NPROC_PER_NODE}" == "8" ]] || fail "NPROC_PER_NODE must be exactly 8, got ${NPROC_PER_NODE}"
-[[ "${NNODES:-1}" == "1" ]] || fail "This launcher supports one 8-GPU JiHe instance only"
-[[ "${NODE_RANK:-0}" == "0" ]] || fail "NODE_RANK must be 0 for a single-node job"
+[[ "${MASTER_PORT}" =~ ^[0-9]+$ && "${MASTER_PORT}" -ge 1 && "${MASTER_PORT}" -le 65535 ]] ||
+  fail "MASTER_PORT must be in [1, 65535]"
+[[ "${NNODES}" == "1" || "${NNODES}" == "2" ]] || fail "NNODES must be 1 or 2"
+[[ "${NODE_RANK}" =~ ^[0-9]+$ && "${NODE_RANK}" -lt "${NNODES}" ]] ||
+  fail "NODE_RANK must be in [0, $((NNODES - 1))]"
+if [[ "${NNODES}" == "1" ]]; then
+  [[ "${NODE_RANK}" == "0" ]] || fail "NODE_RANK must be 0 for a single-node job"
+else
+  [[ -n "${MASTER_ADDR}" ]] || fail "two-node training requires MASTER_ADDR"
+  if [[ "${FASTWAM_DRY_RUN}" != "1" ]]; then
+    case "${MASTER_ADDR,,}" in
+      127.0.0.1|localhost)
+        fail "two-node training requires a non-loopback MASTER_ADDR"
+        ;;
+    esac
+  fi
+fi
 [[ "${OUTPUT_DIR}" == /* ]] || fail "OUTPUT_DIR must be an absolute persistent-storage path"
+
+WORLD_SIZE="$((NNODES * NPROC_PER_NODE))"
 
 for override in "$@"; do
   case "${override}" in
@@ -88,9 +112,17 @@ HYDRA_ARGS+=("$@")
 COMMAND=(
   "${FASTWAM_ENV}/bin/accelerate" launch
   --config_file scripts/accelerate_configs/accelerate_stage3_zero2.yaml
-  --num_machines 1
-  --machine_rank 0
-  --num_processes 8
+  --num_machines "${NNODES}"
+  --machine_rank "${NODE_RANK}"
+  --num_processes "${WORLD_SIZE}"
+)
+if [[ "${NNODES}" == "2" ]]; then
+  COMMAND+=(
+    --main_process_ip "${MASTER_ADDR}"
+    --deepspeed_multinode_launcher standard
+  )
+fi
+COMMAND+=(
   --main_process_port "${MASTER_PORT}"
   scripts/train_stage3_alignment.py
   "${HYDRA_ARGS[@]}"
@@ -100,12 +132,15 @@ cat <<EOF
 [stage3]
   benchmark=RoboTwin-2.0
   task=${TASK_NAME}
-  world_size=8
+  nnodes=${NNODES}
+  node_rank=${NODE_RANK}
+  world_size=${WORLD_SIZE}
   per_rank_batch=2
   gradient_accumulation_steps=3
-  global_batch=48
+  global_batch=$((WORLD_SIZE * 2 * 3))
   zero_stage=2
   output_dir=${OUTPUT_DIR}
+  log_file=${LOG_FILE}
   resume_state=${RESUME_STATE:-null}
 EOF
 print_command "${COMMAND[@]}"
@@ -148,12 +183,26 @@ if any("H100" not in name.upper() for name in names):
     raise SystemExit(f"expected 8 H100 GPUs, found {names}")
 PY
 
-mkdir -p "$(dirname -- "${OUTPUT_DIR}")"
-mkdir "${OUTPUT_DIR}" ||
-  fail "OUTPUT_DIR already exists; choose a new OUTPUT_DIR: ${OUTPUT_DIR}"
+READY_DIR="${OUTPUT_DIR}/.launcher-ready"
+if [[ "${NODE_RANK}" == "0" ]]; then
+  mkdir -p "$(dirname -- "${OUTPUT_DIR}")"
+  mkdir "${OUTPUT_DIR}" ||
+    fail "OUTPUT_DIR already exists; choose a new OUTPUT_DIR: ${OUTPUT_DIR}"
+  mkdir "${READY_DIR}"
+else
+  READY_TIMEOUT_SECONDS="${READY_TIMEOUT_SECONDS:-600}"
+  [[ "${READY_TIMEOUT_SECONDS}" =~ ^[0-9]+$ ]] ||
+    fail "READY_TIMEOUT_SECONDS must be numeric"
+  ready_deadline="$((SECONDS + READY_TIMEOUT_SECONDS))"
+  while [[ ! -d "${READY_DIR}" && "${SECONDS}" -lt "${ready_deadline}" ]]; do
+    sleep 1
+  done
+  [[ -d "${READY_DIR}" ]] ||
+    fail "timed out waiting for rank 0 output readiness: ${READY_DIR}"
+fi
 mkdir -p "$(dirname -- "${LOG_FILE}")"
 exec > >(tee -a "${LOG_FILE}") 2>&1
-echo "[stage3] started_at=$(date -Is) repo=${FASTWAM_REPO_DIR} git=$(git rev-parse HEAD)"
+echo "[stage3] started_at=$(date -Is) node_rank=${NODE_RANK} repo=${FASTWAM_REPO_DIR} git=$(git rev-parse HEAD)"
 nvidia-smi -L
 print_command "${COMMAND[@]}"
 exec "${COMMAND[@]}"

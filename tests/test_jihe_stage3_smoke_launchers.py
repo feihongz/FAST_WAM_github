@@ -90,6 +90,9 @@ def test_public_smoke_launcher_rejects_hydra_arguments() -> None:
         "keep_last",
         "data_exposure",
         "expected_wall_time",
+        "nnodes",
+        "world_size",
+        "global_batch",
     ),
     (
         (
@@ -102,17 +105,23 @@ def test_public_smoke_launcher_rejects_hydra_arguments() -> None:
             "31",
             "5.266 epochs / 1,440,000 windows",
             "19-23 hours",
+            "1",
+            "8",
+            "48",
         ),
         (
             "run_robotwin_stage3_full_8xh100.sh",
             "RoboTwin-2.0",
             "robotwin_stage3_alignment_3cam384_1e-4",
-            "40000",
-            "125241",
-            "500",
+            "20000",
+            "62620",
+            "250",
             "41",
             "0.3194 epoch / 1,920,000 windows",
-            "168-192 hours",
+            "90-110 hours",
+            "2",
+            "16",
+            "96",
         ),
     ),
 )
@@ -126,9 +135,15 @@ def test_full_stage3_launcher_dry_run_locks_formal_contract(
     keep_last: str,
     data_exposure: str,
     expected_wall_time: str,
+    nnodes: str,
+    world_size: str,
+    global_batch: str,
 ) -> None:
     environment = os.environ.copy()
     environment.pop("RESUME_STATE", None)
+    environment.pop("MACHINE_RANK", None)
+    environment.pop("GROUP_RANK", None)
+    environment.pop("MASTER_IP", None)
     environment.update(
         {
             "FASTWAM_DRY_RUN": "1",
@@ -139,8 +154,14 @@ def test_full_stage3_launcher_dry_run_locks_formal_contract(
             "FASTWAM_OUTPUT_BASE": "/tmp/poisoned-output-base",
             "OUTPUT_DIR": "/tmp/poisoned-output-dir",
             "LOG_FILE": "/tmp/poisoned-log",
+            "NNODES": nnodes,
+            "NODE_RANK": "0",
         }
     )
+    if nnodes == "2":
+        environment["MASTER_ADDR"] = "10.0.0.1"
+    else:
+        environment.pop("MASTER_ADDR", None)
     result = subprocess.run(
         ["bash", str(JIHE_DIR / launcher)],
         cwd=REPO_ROOT,
@@ -161,6 +182,9 @@ def test_full_stage3_launcher_dry_run_locks_formal_contract(
     assert f"steps_per_epoch={steps_per_epoch}" in output
     assert f"data_exposure={data_exposure}" in output
     assert f"expected_wall_time={expected_wall_time}" in output
+    assert f"topology={nnodes}x8" in output
+    assert f"world_size={world_size}" in output
+    assert f"global_batch={global_batch}" in output
     assert f"output_dir={expected_output}" in output
     assert f"training.max_steps={max_steps}" in output
     assert "training.num_epochs=10" in output
@@ -179,8 +203,55 @@ def test_full_stage3_launcher_dry_run_locks_formal_contract(
     assert f"checkpoint.keep_last={keep_last}" in output
     assert "checkpoint.save_final=true" in output
     assert "runtime.log_every=100" in output
-    assert "--num_processes 8" in output
+    assert f"--num_machines {nnodes}" in output
+    assert "--machine_rank 0" in output
+    assert f"--num_processes {world_size}" in output
+    if nnodes == "2":
+        assert "--main_process_ip 10.0.0.1" in output
+        assert "--deepspeed_multinode_launcher standard" in output
+        assert f"log_file={expected_output}/launch.node0.log" in output
+    else:
+        assert "--deepspeed_multinode_launcher" not in output
+        assert f"log_file={expected_output}/launch.log" in output
     assert "/tmp/poisoned" not in output
+
+
+def test_robotwin_full_stage3_rank1_dry_run_uses_shared_output_and_node_log() -> None:
+    environment = os.environ.copy()
+    environment.pop("MACHINE_RANK", None)
+    environment.pop("GROUP_RANK", None)
+    environment.pop("MASTER_IP", None)
+    environment.update(
+        {
+            "FASTWAM_DRY_RUN": "1",
+            "FASTWAM_STORAGE_ROOT": "/tmp/fastwam-persistent",
+            "RUN_ID": "pytest-full-rank1",
+            "NPROC_PER_NODE": "8",
+            "NNODES": "2",
+            "NODE_RANK": "1",
+            "MASTER_ADDR": "10.0.0.1",
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(JIHE_DIR / "run_robotwin_stage3_full_8xh100.sh")],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    expected_output = (
+        "/tmp/fastwam-persistent/FastWAM/formal_runs/stage3/full/"
+        "robotwin_stage3_alignment_3cam384_1e-4/pytest-full-rank1"
+    )
+    assert "node_rank=1" in result.stdout
+    assert "--machine_rank 1" in result.stdout
+    assert "--num_processes 16" in result.stdout
+    assert "--deepspeed_multinode_launcher standard" in result.stdout
+    assert f"output_dir={expected_output}" in result.stdout
+    assert f"log_file={expected_output}/launch.node1.log" in result.stdout
 
 
 @pytest.mark.parametrize(

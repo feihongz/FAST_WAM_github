@@ -46,7 +46,9 @@ model:
   action_dit_pretrained_path: null
 
 training:
-  # Eight H100s: floor(6011575 / (8 * 2)) == 375723, divisible by 3.
+  # The 8-H100 smoke topology has complete accumulation groups. The formal
+  # 16-H100 full run stops at 20k steps, before its first incomplete epoch
+  # tail; the formal trainer preflight enforces that boundary.
   batch_size: 2
   gradient_accumulation_steps: 3
 

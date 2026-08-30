@@ -81,26 +81,35 @@ canonical manifest SHA
 ## 训练配置与启动顺序
 
 两类 8×H100 save/resume smoke、200-step pilot 和单 episode `w` 分支 endpoint
-health smoke 均已通过。现在同时启动两个独立的正式 Stage 3 run；不要先生成 Stage 2
-标签，标签合同必须绑定各自最终冻结的 Stage 3 Adapter。
+health smoke 均已通过。现在同时启动两个独立的正式 Stage 3 run：LIBERO 使用单节点
+8×H100，RoboTwin 2.0 使用双节点、每节点 8×H100。不要先生成 Stage 2 标签，标签合同
+必须绑定各自最终冻结的 Stage 3 Adapter。
 
 ### 锁定的正式预算
 
-| benchmark | optimizer steps | 数据暴露 | checkpoint | 8×H100 预计耗时 |
-| --- | ---: | ---: | ---: | ---: |
-| LIBERO | `30,000` | 5.266 epochs / 1,440,000 windows | 每 1,000 步，保留全部 30 个周期点 | 19–23 小时 |
-| RoboTwin 2.0 | `40,000` | 0.3194 epoch / 1,920,000 windows | 每 500 步，保留最后 41 份（20k–40k） | 168–192 小时 |
+| benchmark | optimizer steps | 数据暴露 | checkpoint | 正式拓扑 | 预计耗时 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| LIBERO | `30,000` | 5.266 epochs / 1,440,000 windows | 每 1,000 步，保留全部 30 个周期点 | 单节点 8×H100 | 19–23 小时 |
+| RoboTwin 2.0 | `20,000` | 0.3194 epoch / 1,920,000 windows | 每 250 步，保留最后 41 份（10k–20k） | 双节点 × 8 H100 | 理想 84–96 小时；调度预留 90–110 小时 |
 
 LIBERO 的一个 epoch 是 5,697 optimizer steps；正式预算显式锁为 30,000 steps，避免把
 原任务的 10-epoch 语义在更小的 global batch 下机械放大为 56,970 次 Adapter 更新。
-RoboTwin 的一个 epoch 是 125,241 steps，按 pilot 吞吐约 21.5 天；禁止让
-`max_steps=null` 落入默认 10 epochs，正式预算显式锁为 40,000 steps。
+RoboTwin 的 16-GPU formal epoch 包含 187,861 个完整 global microbatch，可组成 62,620
+个完整 optimizer steps，之后剩一个不完整 accumulation microbatch。正式预算显式锁为
+20,000 steps，在第一个不完整 epoch tail 之前停止；禁止让 `max_steps=null` 落入默认
+10 epochs。
 
-两边均锁定 8×H100、每卡 batch 2、gradient accumulation 3、有效 global batch 48、
-BF16、AdamW `lr=1e-4` / `betas=(0.9,0.95)` / `weight_decay=1e-4`、gradient clip 1.0、
-5% linear warmup 后 cosine 到 `1e-6`、seed 42，以及现有 N=10、margin 和 loss 权重。
+LIBERO 锁定 8×H100、每卡 batch 2、gradient accumulation 3、有效 global batch 48；
+RoboTwin 锁定双节点 × 8 H100、每卡 batch 2、gradient accumulation 3、有效 global
+batch 96。两边均使用 BF16、AdamW `lr=1e-4` / `betas=(0.9,0.95)` /
+`weight_decay=1e-4`、gradient clip 1.0、5% linear warmup 后 cosine 到 `1e-6`、seed 42，
+以及现有 N=10、margin 和 loss 权重。
 日志每 100 个成功 optimizer steps 输出一次，指标是该窗口内全部 accumulation
 microbatch 的跨 rank 均值，而不是最后一个 microbatch 的瞬时值。
+
+RoboTwin 的新合同与旧 8-GPU、global batch 48、40,000-step 合同同为 1,920,000 个
+训练窗口，因此样本暴露等价；但它把两倍样本聚合到一次 optimizer update，并使用独立的
+20,000-step scheduler，所以二者的优化轨迹不严格等价。
 
 正式提交只使用下面两个零参数入口，分别作为两个独立极核任务：
 
@@ -112,10 +121,16 @@ bash scripts/jihe/run_libero_stage3_full_8xh100.sh
 bash scripts/jihe/run_robotwin_stage3_full_8xh100.sh
 ```
 
+RoboTwin 的两个节点执行同一条零参数命令。极核调度环境必须向两边提供 `NNODES=2`、各自
+的 `NODE_RANK=0/1` 和同一个非 loopback `MASTER_ADDR`；launcher 通过 TCPStore 同步
+`RUN_ID`，rank 0 创建共享输出目录，rank 1 等待 ready marker，两边分别写
+`launch.node0.log` 和 `launch.node1.log`。
+
 200-step pilot 的 scheduler/strict-resume 合同已经在 step 200 结束，不能作为正式 run
-的 resume 起点。此前按旧预算产生的 LIBERO 56,970-step 或 RoboTwin 20,000-step full state
-也不能续入新的 30k/40k 合同，因为 `max_steps` 和 scheduler 都属于严格训练合同。
-本轮两个新合同必须 fresh 启动；之后若同一合同中断，可用对应的完整
+的 resume 起点。此前按旧预算产生的 LIBERO 56,970-step state，或 RoboTwin 8-GPU、
+global batch 48、40,000-step state，也不能续入当前正式合同，因为 `max_steps`、scheduler、
+world size 和有效 batch 都属于严格训练合同。本轮两个正式 run 必须 fresh 启动；之后若
+同一合同中断，可用对应的完整
 `states/step_*` 或 `states/LATEST` 启动新 attempt：
 
 ```bash
@@ -124,6 +139,8 @@ RESUME_STATE=/absolute/previous/attempt/checkpoints/states/LATEST \
 ```
 
 resume 会写入新的唯一输出目录；不能把 Adapter-only `.pt` export 当作训练状态。
+RoboTwin 正式 state 只能在相同的双节点 × 8 H100、world size 16 拓扑下恢复，不能降回
+8 GPU，也不能从 smoke/pilot state 恢复。
 
 下面的单卡和裸 `accelerate` 命令仅用于开发，不是正式极核入口。
 
@@ -146,7 +163,7 @@ accelerate launch \
   task=libero_stage3_alignment_2cam224_1e-4
 ```
 
-RoboTwin 使用同一 launcher、不同 task 和独立输出目录：
+下面的 RoboTwin 命令只表示单节点 8-GPU smoke/development 入口，不是正式双节点入口：
 
 ```bash
 accelerate launch \
@@ -156,9 +173,13 @@ accelerate launch \
   task=robotwin_stage3_alignment_3cam384_1e-4
 ```
 
-两个 task 均锁定每卡 batch 2、gradient accumulation 3，有效 global batch 48。
-LIBERO 每 epoch 的 global micro-batch 数为 `17091`、tail 为 9；RoboTwin 为
-`375723`、tail 为 7；两者都能构成完整 accumulation group。
+两个 task 均锁定每卡 batch 2、gradient accumulation 3。LIBERO 有效 global batch 为
+48；RoboTwin 正式双节点拓扑的有效 global batch 为 96。LIBERO 每 epoch 有 `17091` 个
+global microbatch，并余 9 个不能组成 global microbatch 的样本；`17091` 可被 accumulation
+3 整除。RoboTwin 在 16 GPU 下有 `187861` 个 global microbatch，并余 23 个样本；它可
+组成 `62620` 个完整 optimizer steps，再余一个不完整 accumulation microbatch。正式
+RoboTwin 在 20,000 steps 停止，不会进入该 tail。8-GPU smoke 的 `375723` 个 global
+microbatch 仍可被 accumulation 3 整除。
 
 任务配置锁定以下身份：
 
@@ -261,6 +282,9 @@ world size 8、ZeRO-2、每卡 batch 2、accumulation 3、8 份可加载 random 
 完整 metadata 和 16 个 Adapter tensor。LIBERO 使用相同流程，只替换 task、锁定 SHA 和独立
 输出目录；两个 benchmark 的产物不得交叉复用。
 
+本节的 world size 8 和 8 份 random state 只适用于 save/resume smoke。RoboTwin 正式
+16-GPU state 必须包含 world size 16 和 16 份 random state，并且只能在相同拓扑下恢复。
+
 运行验收器的 shell 必须保持保存时的 8 张 GPU 全部可见；不要把
 `CUDA_VISIBLE_DEVICES` 缩窄到单卡，否则 CUDA RNG device-count 校验会按设计拒绝该 state。
 
@@ -312,6 +336,8 @@ Adapter export SHA256 均为
 ZeRO-2、每卡 batch 2、accumulation 3 的 fresh/resume exact-equivalence 验收。两个
 benchmark 的 200-step pilot 和单 episode endpoint connectivity smoke 均已通过；任一
 smoke 或 pilot export 都不得当作正式 Stage 3 最终 Adapter 使用。
+上述 8 进程验收不改变 RoboTwin 正式训练合同；正式 run 仍须 fresh 使用双节点 × 8 H100、
+global batch 96、20,000 steps。
 
 本链锁定的 official Wan2.2 VAE PTH 可保证本次 Stage 3 自身稳定；原 base 日志使用的
 converted safetensors 当前不在机器上，因此在恢复原文件或完成 tensor digest 对比前，
@@ -328,6 +354,9 @@ converted safetensors 当前不在机器上，因此在恢复原文件或完成 
 3. 直接用冻结 Adapter 生成 matched `wo/w` 数据和 Stage 2 `E0/E10` 标签；
 4. 训练对应的 Binary Gate；
 5. 最后一次性做有意义的完整对比：always-`wo`、always-`w` 和 Gate 路由。
+
+RoboTwin 正式 Adapter 的预定冻结点是 step 20,000；LIBERO 使用其独立合同的 step
+30,000。两个 benchmark 的 Adapter、标签和 Gate 不得交叉复用。
 
 跳过的是单独的完整 `w-only` eval，不是 Adapter 身份冻结和最终 health smoke。两个
 benchmark 可以并行推进，但 Adapter、标签、split、contract、merged manifest、Gate 和

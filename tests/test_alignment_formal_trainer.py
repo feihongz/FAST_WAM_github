@@ -817,6 +817,30 @@ def test_explicit_max_steps_rejects_dataset_smaller_than_global_batch(tmp_path):
         )
 
 
+def test_explicit_max_steps_can_stop_before_partial_accumulation_tail(tmp_path):
+    trainer, _, _ = _make_trainer(
+        tmp_path,
+        accumulation=2,
+        max_steps=1,
+        dataset_length=3,
+        batch_size=1,
+    )
+    microbatches = []
+
+    def fake_build_loss(sample, *, k=None):
+        del k
+        microbatches.extend(int(value) for value in sample["index"].reshape(-1))
+        return _logging_loss_output(trainer, 1.0)
+
+    trainer.build_loss = fake_build_loss
+    trainer.train()
+
+    assert trainer.global_step == 1
+    assert trainer.epoch == 0
+    assert trainer.batch_in_epoch == 2
+    assert len(microbatches) == 2
+
+
 def test_formal_v1_rejects_partial_accumulation_group_per_epoch(tmp_path):
     with pytest.raises(
         ValueError,

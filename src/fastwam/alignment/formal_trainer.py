@@ -320,18 +320,26 @@ class Stage3AlignmentTrainer:
                 "drop_last would yield no batches; reduce batch size or "
                 "world size"
             )
-        if (
+        self.max_steps = self._resolve_max_steps()
+        complete_steps_before_tail = (
+            self.micro_batches_per_epoch
+            // self.gradient_accumulation_steps
+        )
+        has_incomplete_accumulation_tail = (
             self.micro_batches_per_epoch
             % self.gradient_accumulation_steps
             != 0
+        )
+        if (
+            has_incomplete_accumulation_tail
+            and self.max_steps > complete_steps_before_tail
         ):
             raise ValueError(
                 "formal Stage 3 requires complete gradient-accumulation "
-                "groups in every epoch"
+                "groups when training reaches an epoch tail"
             )
 
         def initialize_scheduler() -> None:
-            self.max_steps = self._resolve_max_steps()
             self.scheduler = self._build_scheduler()
 
         self._run_all_rank_phase(

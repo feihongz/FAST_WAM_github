@@ -11,6 +11,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 FASTWAM_STORAGE_ROOT="${FASTWAM_STORAGE_ROOT:-/root/feihong}"
 export FASTWAM_REPO_DIR="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
 export FASTWAM_ENV="/root/.venvs/fastwam"
+FASTWAM_DRY_RUN="${FASTWAM_DRY_RUN:-0}"
 
 case "${BENCHMARK_KEY}" in
   libero)
@@ -23,6 +24,9 @@ case "${BENCHMARK_KEY}" in
     SAVE_EVERY="1000"
     KEEP_LAST="31"
     EXPECTED_TRAIN_TIME="19-23 hours"
+    FULL_NNODES="1"
+    GLOBAL_BATCH="48"
+    DEFAULT_MASTER_PORT="29531"
 
     export FASTWAM_STAGE3_BASE_CHECKPOINT="/root/feihong/FastWAM/formal_runs/FAST_WAM_github/libero_unified_shared_2cam224_1e-4/2026-07-01_00-44-20/checkpoints/weights/latest.pt"
     export FASTWAM_STAGE3_BASE_SHA256="17a5588cc2b8d162219c9daf818614f614ee4a7921933a4a26c5d678111330e9"
@@ -37,12 +41,15 @@ case "${BENCHMARK_KEY}" in
     BENCHMARK="RoboTwin-2.0"
     TASK_NAME="robotwin_stage3_alignment_3cam384_1e-4"
     TRAIN_LAUNCHER="${SCRIPT_DIR}/train_robotwin_stage3_alignment_8xh100.sh"
-    MAX_STEPS="40000"
-    STEPS_PER_EPOCH="125241"
+    MAX_STEPS="20000"
+    STEPS_PER_EPOCH="62620"
     DATASET_EXPOSURE="0.3194 epoch / 1,920,000 windows"
-    SAVE_EVERY="500"
+    SAVE_EVERY="250"
     KEEP_LAST="41"
-    EXPECTED_TRAIN_TIME="168-192 hours"
+    EXPECTED_TRAIN_TIME="90-110 hours"
+    FULL_NNODES="2"
+    GLOBAL_BATCH="96"
+    DEFAULT_MASTER_PORT="29532"
 
     export FASTWAM_ROBOTWIN_STAGE3_BASE_CHECKPOINT="/root/feihong/FastWAM/formal_runs/FAST_WAM_github/robotwin_unified_shared_3cam_384_1e-4/2026-07-01_00-51-30/checkpoints/weights/latest.pt"
     export FASTWAM_ROBOTWIN_STAGE3_BASE_SHA256="368a99ca9575a78d01f4cdcdee8820ec74d30c4528cf7aff07b83361a17cbbda"
@@ -60,7 +67,80 @@ case "${BENCHMARK_KEY}" in
     ;;
 esac
 
-RUN_ID="${RUN_ID:-$(date -u +%Y-%m-%d_%H-%M-%S)}"
+NPROC_PER_NODE="${NPROC_PER_NODE:-${SENSECORE_ACCELERATE_DEVICE_COUNT:-8}}"
+if [[ "${NPROC_PER_NODE,,}" == "auto" ]]; then
+  NPROC_PER_NODE="8"
+fi
+[[ "${NPROC_PER_NODE}" == "8" ]] || {
+  echo "[error] formal Stage 3 requires exactly 8 H100s per node" >&2
+  exit 2
+}
+NNODES="${NNODES:-${FULL_NNODES}}"
+[[ "${NNODES}" == "${FULL_NNODES}" ]] || {
+  echo "[error] ${BENCHMARK} formal Stage 3 requires NNODES=${FULL_NNODES}" >&2
+  exit 2
+}
+NODE_RANK="${NODE_RANK:-${MACHINE_RANK:-${GROUP_RANK:-0}}}"
+[[ "${NODE_RANK}" =~ ^[0-9]+$ && "${NODE_RANK}" -lt "${NNODES}" ]] || {
+  echo "[error] NODE_RANK must be in [0, $((NNODES - 1))]" >&2
+  exit 2
+}
+MASTER_PORT="${MASTER_PORT:-${DEFAULT_MASTER_PORT}}"
+[[ "${MASTER_PORT}" =~ ^[0-9]+$ && "${MASTER_PORT}" -ge 1 && "${MASTER_PORT}" -le 65535 ]] || {
+  echo "[error] MASTER_PORT must be in [1, 65535]" >&2
+  exit 2
+}
+export MASTER_PORT
+
+RUN_ID_CANDIDATE="${RUN_ID:-$(date -u +%Y-%m-%d_%H-%M-%S)}"
+if [[ "${NNODES}" == "2" && "${FASTWAM_DRY_RUN}" != "1" ]]; then
+  MASTER_ADDR="${MASTER_ADDR:-${MASTER_IP:-}}"
+  [[ -n "${MASTER_ADDR}" ]] || {
+    echo "[error] two-node RoboTwin full training requires MASTER_ADDR" >&2
+    exit 2
+  }
+  case "${MASTER_ADDR,,}" in
+    127.0.0.1|localhost)
+      echo "[error] two-node RoboTwin full training requires a non-loopback MASTER_ADDR" >&2
+      exit 2
+      ;;
+  esac
+  RUN_ID_STORE_PORT="${RUN_ID_STORE_PORT:-$((MASTER_PORT + 11))}"
+  [[ "${RUN_ID_STORE_PORT}" =~ ^[0-9]+$ && "${RUN_ID_STORE_PORT}" -ge 1 && "${RUN_ID_STORE_PORT}" -le 65535 ]] || {
+    echo "[error] RUN_ID_STORE_PORT must be in [1, 65535]" >&2
+    exit 2
+  }
+  export MASTER_ADDR RUN_ID_STORE_PORT NNODES NODE_RANK RUN_ID_CANDIDATE
+  RUN_ID="$("${FASTWAM_ENV}/bin/python" - <<'PY'
+from datetime import timedelta
+import os
+import torch.distributed as dist
+
+rank = int(os.environ["NODE_RANK"])
+nodes = int(os.environ["NNODES"])
+store = dist.TCPStore(
+    os.environ["MASTER_ADDR"],
+    int(os.environ["RUN_ID_STORE_PORT"]),
+    nodes,
+    rank == 0,
+    timeout=timedelta(minutes=5),
+    wait_for_workers=True,
+)
+if rank == 0:
+    store.set("fastwam_stage3_run_id", os.environ["RUN_ID_CANDIDATE"])
+run_id = store.get("fastwam_stage3_run_id").decode("utf-8")
+store.set(f"fastwam_stage3_run_id_ack_{rank}", "1")
+for peer in range(nodes):
+    store.get(f"fastwam_stage3_run_id_ack_{peer}")
+print(run_id)
+PY
+)"
+else
+  RUN_ID="${RUN_ID_CANDIDATE}"
+  if [[ "${NNODES}" == "2" ]]; then
+    MASTER_ADDR="${MASTER_ADDR:-${MASTER_IP:-127.0.0.1}}"
+  fi
+fi
 [[ "${RUN_ID}" =~ ^[A-Za-z0-9._-]+$ ]] || {
   echo "[error] RUN_ID may contain only letters, digits, '.', '_' and '-'" >&2
   exit 2
@@ -70,9 +150,17 @@ RUN_ID="${RUN_ID:-$(date -u +%Y-%m-%d_%H-%M-%S)}"
 # previous attempt through RESUME_STATE, while retaining the exact same formal
 # training contract below.
 export RUN_ID
+export NPROC_PER_NODE NNODES NODE_RANK
+if [[ "${NNODES}" == "2" ]]; then
+  export MASTER_ADDR
+fi
 export FASTWAM_OUTPUT_BASE="${FASTWAM_STORAGE_ROOT}/FastWAM/formal_runs/stage3/full"
 export OUTPUT_DIR="${FASTWAM_OUTPUT_BASE}/${TASK_NAME}/${RUN_ID}"
-export LOG_FILE="${OUTPUT_DIR}/launch.log"
+if [[ "${NNODES}" == "2" ]]; then
+  export LOG_FILE="${OUTPUT_DIR}/launch.node${NODE_RANK}.log"
+else
+  export LOG_FILE="${OUTPUT_DIR}/launch.log"
+fi
 
 if [[ -n "${RESUME_STATE:-}" && "${RESUME_STATE}" == *"/pilots/"* ]]; then
   echo "[error] a 200-step pilot state cannot resume a formal Stage 3 run" >&2
@@ -83,16 +171,19 @@ cat <<EOF
 [stage3-full]
   benchmark=${BENCHMARK}
   task=${TASK_NAME}
+  topology=${NNODES}x${NPROC_PER_NODE}
+  node_rank=${NODE_RANK}
   max_steps=${MAX_STEPS}
   steps_per_epoch=${STEPS_PER_EPOCH}
   data_exposure=${DATASET_EXPOSURE}
-  global_batch=48
+  global_batch=${GLOBAL_BATCH}
   optimizer=AdamW(lr=1e-4,betas=0.9/0.95,weight_decay=1e-4)
   schedule=5%_warmup_then_cosine_to_1e-6
   checkpoint_every=${SAVE_EVERY}
   checkpoint_keep_last=${KEEP_LAST}
   expected_wall_time=${EXPECTED_TRAIN_TIME}
   output_dir=${OUTPUT_DIR}
+  log_file=${LOG_FILE}
   resume_state=${RESUME_STATE:-null}
   pilot_resume_allowed=false
   wandb=disabled_local_launch_log_is_authoritative
