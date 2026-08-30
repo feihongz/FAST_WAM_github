@@ -80,6 +80,142 @@ def test_public_smoke_launcher_rejects_hydra_arguments() -> None:
 
 
 @pytest.mark.parametrize(
+    (
+        "launcher",
+        "benchmark",
+        "task",
+        "max_steps",
+        "steps_per_epoch",
+        "save_every",
+        "keep_last",
+    ),
+    (
+        (
+            "run_libero_stage3_full_8xh100.sh",
+            "LIBERO",
+            "libero_stage3_alignment_2cam224_1e-4",
+            "56970",
+            "5697",
+            "1899",
+            "32",
+        ),
+        (
+            "run_robotwin_stage3_full_8xh100.sh",
+            "RoboTwin-2.0",
+            "robotwin_stage3_alignment_3cam384_1e-4",
+            "20000",
+            "125241",
+            "500",
+            "41",
+        ),
+    ),
+)
+def test_full_stage3_launcher_dry_run_locks_formal_contract(
+    launcher: str,
+    benchmark: str,
+    task: str,
+    max_steps: str,
+    steps_per_epoch: str,
+    save_every: str,
+    keep_last: str,
+) -> None:
+    environment = os.environ.copy()
+    environment.pop("RESUME_STATE", None)
+    environment.update(
+        {
+            "FASTWAM_DRY_RUN": "1",
+            "FASTWAM_STORAGE_ROOT": "/tmp/fastwam-persistent",
+            "RUN_ID": "pytest-full",
+            "NPROC_PER_NODE": "auto",
+            # The public wrapper must replace inherited ad-hoc destinations.
+            "FASTWAM_OUTPUT_BASE": "/tmp/poisoned-output-base",
+            "OUTPUT_DIR": "/tmp/poisoned-output-dir",
+            "LOG_FILE": "/tmp/poisoned-log",
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(JIHE_DIR / launcher)],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    output = result.stdout
+    expected_output = (
+        f"/tmp/fastwam-persistent/FastWAM/formal_runs/stage3/full/"
+        f"{task}/pytest-full"
+    )
+    assert f"benchmark={benchmark}" in output
+    assert f"max_steps={max_steps}" in output
+    assert f"steps_per_epoch={steps_per_epoch}" in output
+    assert f"output_dir={expected_output}" in output
+    assert f"training.max_steps={max_steps}" in output
+    assert "training.num_epochs=10" in output
+    assert "training.learning_rate=1.0e-4" in output
+    assert "training.weight_decay=1.0e-4" in output
+    assert "training.betas=\\[0.9\\,0.95\\]" in output
+    assert "training.max_grad_norm=1.0" in output
+    assert "training.lr_scheduler_type=cosine" in output
+    assert "training.warmup_ratio=0.05" in output
+    assert "training.seed=42" in output
+    assert "stage3.num_solver_steps=10" in output
+    assert "stage3.lambda_action=1.0" in output
+    assert "stage3.lambda_align=1.0" in output
+    assert "stage3.lambda_safe=0.5" in output
+    assert f"checkpoint.save_every={save_every}" in output
+    assert f"checkpoint.keep_last={keep_last}" in output
+    assert "checkpoint.save_final=true" in output
+    assert "runtime.log_every=100" in output
+    assert "--num_processes 8" in output
+    assert "/tmp/poisoned" not in output
+
+
+@pytest.mark.parametrize(
+    "launcher",
+    (
+        "run_libero_stage3_full_8xh100.sh",
+        "run_robotwin_stage3_full_8xh100.sh",
+    ),
+)
+def test_public_full_launcher_rejects_hydra_arguments(launcher: str) -> None:
+    result = subprocess.run(
+        ["bash", str(JIHE_DIR / launcher), "training.max_steps=1"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "takes no arguments" in result.stderr
+
+
+def test_full_launcher_rejects_pilot_resume_state() -> None:
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "FASTWAM_DRY_RUN": "1",
+            "RUN_ID": "pytest-pilot-resume",
+            "RESUME_STATE": "/formal_runs/pilots/stage3/run/states/LATEST",
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(JIHE_DIR / "run_libero_stage3_full_8xh100.sh")],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "pilot state cannot resume" in result.stderr
+
+
+@pytest.mark.parametrize(
     "launcher",
     (
         "train_libero_stage3_alignment_8xh100.sh",

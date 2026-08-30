@@ -18,7 +18,10 @@ from fastwam.alignment.checkpointing import (
     TRAINING_STATE_SCHEMA_VERSION,
     sha256_file,
 )
-from fastwam.alignment.formal_trainer import Stage3AlignmentTrainer
+from fastwam.alignment.formal_trainer import (
+    Stage3AlignmentTrainer,
+    _detached_stage3_log_metrics,
+)
 from fastwam.alignment.losses import Stage3LossOutput
 from fastwam.models.wan22.video_action_alignment import (
     VideoActionResidualAdapter,
@@ -180,6 +183,24 @@ def _assert_nested_equal(actual, expected) -> None:
             _assert_nested_equal(actual_value, expected_value)
     else:
         assert actual == expected
+
+
+def _logging_loss_output(
+    trainer: Stage3AlignmentTrainer,
+    value: float,
+) -> Stage3LossOutput:
+    parameter = next(trainer.adapter_module.parameters())
+    loss = parameter.float().sum() * 0.0 + value
+    return Stage3LossOutput(
+        loss=loss,
+        action_loss=loss * 10.0,
+        alignment_loss=loss * 20.0,
+        safe_loss=loss * 30.0,
+        helpful_fraction=loss / 10.0,
+        e0=torch.stack((loss, loss + 2.0)),
+        egt=torch.stack((loss + 2.0, loss + 4.0)),
+        eself=torch.stack((loss + 4.0, loss + 6.0)),
+    )
 
 
 def _fake_two_rank_trainer() -> Stage3AlignmentTrainer:
@@ -474,6 +495,159 @@ def test_train_accumulates_two_microbatches_per_optimizer_step(tmp_path):
         not torch.equal(value, before[name])
         for name, value in model.alignment_adapter.state_dict().items()
     )
+
+
+def test_detached_stage3_log_metrics_does_not_retain_autograd_graph():
+    loss = torch.tensor(2.0, requires_grad=True).square()
+    out = Stage3LossOutput(
+        loss=loss,
+        action_loss=loss * 2.0,
+        alignment_loss=loss * 3.0,
+        safe_loss=loss * 4.0,
+        helpful_fraction=loss / 4.0,
+        e0=torch.stack((loss, loss + 2.0)),
+        egt=torch.stack((loss + 2.0, loss + 4.0)),
+        eself=torch.stack((loss + 4.0, loss + 6.0)),
+    )
+
+    metrics = _detached_stage3_log_metrics(out)
+
+    assert metrics.tolist() == pytest.approx(
+        [4.0, 8.0, 12.0, 16.0, 1.0, 5.0, 7.0, 9.0]
+    )
+    assert not metrics.requires_grad
+    assert metrics.grad_fn is None
+
+
+def test_train_logs_full_window_across_microbatches_steps_and_ranks(
+    tmp_path,
+    monkeypatch,
+):
+    trainer, _, accelerator = _make_trainer(
+        tmp_path,
+        accumulation=2,
+        max_steps=2,
+        dataset_length=4,
+    )
+    trainer.log_every = 2
+    values = iter((1.0, 3.0, 5.0, 7.0))
+    trainer.build_loss = lambda sample, k=None: _logging_loss_output(
+        trainer,
+        next(values),
+    )
+
+    gather_calls = []
+
+    def fake_two_rank_gather(local_window):
+        gather_calls.append(local_window.detach().clone())
+        assert not local_window.requires_grad
+        assert tuple(local_window.shape) == (1, 11)
+        assert local_window[0, -2:].tolist() == [4.0, 2.0]
+        remote_window = local_window.clone()
+        remote_metric_offsets = local_window.new_tensor(
+            [2.0, 20.0, 40.0, 60.0, 0.2, 2.0, 2.0, 2.0]
+        )
+        remote_window[0, :8].add_(
+            local_window[0, -2] * remote_metric_offsets
+        )
+        remote_window[0, 8].add_(local_window[0, -1] * 2.0)
+        return torch.cat((local_window, remote_window), dim=0)
+
+    monkeypatch.setattr(accelerator, "gather", fake_two_rank_gather)
+    log_records = []
+    monkeypatch.setattr(
+        "fastwam.alignment.formal_trainer.logger.info",
+        lambda message, *args: log_records.append(message % args),
+    )
+
+    trainer.train()
+
+    assert len(gather_calls) == 1
+    assert len(log_records) == 1
+    assert "step=2/2" in log_records[0]
+    assert "loss=5.000000" in log_records[0]
+    assert "action=50.000000" in log_records[0]
+    assert "alignment=100.000000" in log_records[0]
+    assert "safe=150.000000" in log_records[0]
+    assert "helpful=0.500000" in log_records[0]
+    assert "e0=6.000000" in log_records[0]
+    assert "egt=8.000000" in log_records[0]
+    assert "eself=10.000000" in log_records[0]
+    assert "grad_norm=1.000000" in log_records[0]
+
+
+def test_train_discards_entire_accumulation_group_when_step_is_skipped(
+    tmp_path,
+    monkeypatch,
+):
+    trainer, _, accelerator = _make_trainer(
+        tmp_path,
+        accumulation=2,
+        max_steps=1,
+        dataset_length=4,
+    )
+    trainer.log_every = 1
+    values = iter((100.0, 200.0, 1.0, 3.0))
+    trainer.build_loss = lambda sample, k=None: _logging_loss_output(
+        trainer,
+        next(values),
+    )
+
+    original_step = trainer.optimizer.step
+    optimizer_boundaries = 0
+
+    def skip_first_optimizer_step(*args, **kwargs):
+        nonlocal optimizer_boundaries
+        if accelerator.sync_gradients:
+            optimizer_boundaries += 1
+            if optimizer_boundaries == 1:
+                trainer.optimizer._is_overflow = True
+                return None
+            trainer.optimizer._is_overflow = False
+        return original_step(*args, **kwargs)
+
+    monkeypatch.setattr(trainer.optimizer, "step", skip_first_optimizer_step)
+    log_records = []
+    monkeypatch.setattr(
+        "fastwam.alignment.formal_trainer.logger.info",
+        lambda message, *args: log_records.append(message % args),
+    )
+
+    trainer.train()
+
+    assert optimizer_boundaries == 2
+    assert trainer.global_step == 1
+    assert trainer.scheduler.scheduler.last_epoch == 1
+    assert len(log_records) == 1
+    assert "loss=2.000000" in log_records[0]
+    assert "action=20.000000" in log_records[0]
+    assert "loss=150.000000" not in log_records[0]
+
+
+def test_log_every_zero_skips_logging_metric_collection(
+    tmp_path,
+    monkeypatch,
+):
+    trainer, _, accelerator = _make_trainer(
+        tmp_path,
+        accumulation=2,
+        max_steps=1,
+        dataset_length=2,
+    )
+    trainer.build_loss = lambda sample, k=None: _logging_loss_output(
+        trainer,
+        1.0,
+    )
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("logging path must stay disabled for log_every=0")
+
+    monkeypatch.setattr(Stage3LossOutput, "detached", fail_if_called)
+    monkeypatch.setattr(accelerator, "gather", fail_if_called)
+
+    trainer.train()
+
+    assert trainer.global_step == 1
 
 
 def test_mid_epoch_resume_matches_uninterrupted_rng_and_updates(tmp_path):

@@ -75,11 +75,18 @@ reported as formal benchmark results.
 After both connectivity smokes pass:
 
 1. choose and run the full Stage 3 training schedule for each benchmark;
-2. freeze each final Adapter and run the full benchmark endpoint evaluation;
-3. use that frozen Adapter to generate the benchmark's Stage 2 `E0/E10`
-   labels;
-4. train the small binary Gate and evaluate the success/compute threshold
-   sweep.
+2. freeze each final Adapter and bind all artifact identities;
+3. run only a tiny final `w`-branch health smoke, not a standalone full
+   `w-only` benchmark evaluation;
+4. use that frozen Adapter immediately to generate matched `wo/w` data and
+   the benchmark's Stage 2 `E0/E10` labels;
+5. train the small binary Gate;
+6. run the meaningful final full comparison of always-`wo`, always-`w`, and
+   Gate routing, including the success/compute threshold sweep.
+
+The standalone full `w-only` pass is intentionally deferred and folded into
+the final comparison; artifact freezing and the tiny load/execute health smoke
+remain mandatory.
 
 Stage 3 training used cached text context, so its export binds VAE and stats but
 does not yet bind the online text encoder/tokenizer bytes. Pilot receipts record

@@ -80,8 +80,49 @@ canonical manifest SHA
 
 ## 训练配置与启动顺序
 
-RoboTwin 的数据身份已完成；两类 GPU smoke 完成后，再同时启动两个独立 Stage 3 run。
-不要先生成 Stage 2 标签：标签合同必须绑定各自最终冻结的 Stage 3 Adapter。
+两类 8×H100 save/resume smoke、200-step pilot 和单 episode `w` 分支 endpoint
+health smoke 均已通过。现在同时启动两个独立的正式 Stage 3 run；不要先生成 Stage 2
+标签，标签合同必须绑定各自最终冻结的 Stage 3 Adapter。
+
+### 锁定的正式预算
+
+| benchmark | optimizer steps | 数据暴露 | checkpoint | 8×H100 预计耗时 |
+| --- | ---: | ---: | ---: | ---: |
+| LIBERO | `56,970` | 10 epochs / 2,734,560 windows | 每 1,899 步，保留 32 份 | 36–43 小时 |
+| RoboTwin 2.0 | `20,000` | 0.1597 epoch / 960,000 windows | 每 500 步，保留 41 份 | 84–96 小时 |
+
+LIBERO 的一个 epoch 是 5,697 optimizer steps，因此沿用 task 原本的 10-epoch
+训练语义。RoboTwin 的一个 epoch 是 125,241 steps，按 pilot 吞吐约 21.5 天；禁止让
+`max_steps=null` 落入默认 10 epochs，正式预算显式截为 20,000 steps。
+
+两边均锁定 8×H100、每卡 batch 2、gradient accumulation 3、有效 global batch 48、
+BF16、AdamW `lr=1e-4` / `betas=(0.9,0.95)` / `weight_decay=1e-4`、gradient clip 1.0、
+5% linear warmup 后 cosine 到 `1e-6`、seed 42，以及现有 N=10、margin 和 loss 权重。
+日志每 100 个成功 optimizer steps 输出一次，指标是该窗口内全部 accumulation
+microbatch 的跨 rank 均值，而不是最后一个 microbatch 的瞬时值。
+
+正式提交只使用下面两个零参数入口，分别作为两个独立极核任务：
+
+```bash
+bash scripts/jihe/run_libero_stage3_full_8xh100.sh
+```
+
+```bash
+bash scripts/jihe/run_robotwin_stage3_full_8xh100.sh
+```
+
+200-step pilot 的 scheduler/strict-resume 合同已经在 step 200 结束，不能作为正式 run
+的 resume 起点。正式 run 必须 fresh 启动；若正式任务中断，可用同一正式合同的完整
+`states/step_*` 或 `states/LATEST` 启动新 attempt：
+
+```bash
+RESUME_STATE=/absolute/previous/attempt/checkpoints/states/LATEST \
+  bash scripts/jihe/run_libero_stage3_full_8xh100.sh
+```
+
+resume 会写入新的唯一输出目录；不能把 Adapter-only `.pt` export 当作训练状态。
+
+下面的单卡和裸 `accelerate` 命令仅用于开发，不是正式极核入口。
 
 LIBERO 单卡入口：
 
@@ -251,7 +292,8 @@ descriptor/index 的生成、验证和 runtime loader binding。RoboTwin 已用�
 样本通过 strict TorchCodec AV1/data-shape smoke，真实 index/manifest 也已发布；单卡 H100
 真实 5B CUDA 一步和严格 save→resume 已在提交 `001ba77` 上通过，正式 per-rank
 batch 2 / accumulation 3 也在提交 `4946d17` 上通过，实测峰值显存 `15957 MiB`。RoboTwin
-尚未完成相同 world size 下的真实 8 进程 ZeRO-2 save→resume。
+随后完成真实 8 进程 ZeRO-2 fresh 两步、从 step 1 严格恢复并重放第二步，验收器确认
+两个 step-2 Adapter 逐 tensor 完全一致。
 
 LIBERO 在提交 `83345ba` 上以 `batch_size=2`、accumulation 1 完成真实 H100 schema-v2
 两步连续训练，并从连续 run 的 `step_000001` 恢复到独立目录、只重放第二步。恢复日志确认
@@ -263,9 +305,10 @@ Adapter export SHA256 均为
 `309acf72066cca2a6dbc02e6d80dd2cbb6e426f49c6058decf65aeb267f0c0cc`，16 个 tensor、
 `1577479` 个参数逐值相等，training contract SHA256 均为
 `4416aff2f3a54d74abcc40b78e67b8053a834eac005325790f9fa7dbf4a24c59`。产物位于
-`formal_runs/smokes/stage3/libero_single_replay_83345ba_001`。LIBERO 同样只剩 8 进程
-ZeRO-2、每卡 batch 2、accumulation 3 的 save→resume 验收。任一单卡 smoke export 都不得
-当作正式 Stage 3 最终 Adapter 使用。
+`formal_runs/smokes/stage3/libero_single_replay_83345ba_001`。LIBERO 后续也完成真实 8 进程
+ZeRO-2、每卡 batch 2、accumulation 3 的 fresh/resume exact-equivalence 验收。两个
+benchmark 的 200-step pilot 和单 episode endpoint connectivity smoke 均已通过；任一
+smoke 或 pilot export 都不得当作正式 Stage 3 最终 Adapter 使用。
 
 本链锁定的 official Wan2.2 VAE PTH 可保证本次 Stage 3 自身稳定；原 base 日志使用的
 converted safetensors 当前不在机器上，因此在恢复原文件或完成 tensor digest 对比前，
@@ -273,9 +316,18 @@ converted safetensors 当前不在机器上，因此在恢复原文件或完成 
 
 ## Stage 3 之后
 
-每个 benchmark 的 Stage 3 Adapter 冻结并完成 closed-loop endpoint eval 后，才用它
-重新生成该 benchmark 的 Stage 2 `E0/E10` 标签并训练对应 Binary Gate。两个 benchmark
-可以按相同阶段并行推进，但 Adapter、标签、split、contract、merged manifest、Gate 和
+每个 benchmark 按以下顺序继续：
+
+1. 冻结预先约定的最终 step Adapter，并记录 export、base、data、VAE、stats、training
+   contract 和 Git SHA；
+2. 只跑极小的 `w` 分支 health smoke，确认最终 artifact 能严格加载和执行，不做完整
+   `w-only` benchmark eval；
+3. 直接用冻结 Adapter 生成 matched `wo/w` 数据和 Stage 2 `E0/E10` 标签；
+4. 训练对应的 Binary Gate；
+5. 最后一次性做有意义的完整对比：always-`wo`、always-`w` 和 Gate 路由。
+
+跳过的是单独的完整 `w-only` eval，不是 Adapter 身份冻结和最终 health smoke。两个
+benchmark 可以并行推进，但 Adapter、标签、split、contract、merged manifest、Gate 和
 输出目录必须完全分开。最终 eval 只路由 `N=0` 或 `N=10`，阈值扫描使用
 `N_eff = 10 * n_w / n_queries` 作为横坐标绘制 success-compute Pareto 图。完整的标签分片、
 严格合并和 Gate-only 训练命令见

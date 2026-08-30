@@ -55,6 +55,36 @@ from .trainer import AlignmentVelocityModule
 logger = get_logger(__name__)
 
 
+_STAGE3_LOG_METRIC_NAMES = (
+    "loss",
+    "action",
+    "alignment",
+    "safe",
+    "helpful",
+    "e0",
+    "egt",
+    "eself",
+)
+
+
+def _detached_stage3_log_metrics(out: Stage3LossOutput) -> torch.Tensor:
+    """Return one graph-free scalar for every Stage 3 logging metric."""
+
+    detached = out.detached()
+    return torch.stack(
+        (
+            detached.loss.float().mean(),
+            detached.action_loss.float().mean(),
+            detached.alignment_loss.float().mean(),
+            detached.safe_loss.float().mean(),
+            detached.helpful_fraction.float().mean(),
+            detached.e0.float().mean(),
+            detached.egt.float().mean(),
+            detached.eself.float().mean(),
+        )
+    ).detach()
+
+
 def _require_sha256(value: Any, *, field: str) -> str:
     if (
         not isinstance(value, str)
@@ -935,6 +965,26 @@ class Stage3AlignmentTrainer:
     def train(self) -> None:
         data_iter = iter(self.train_loader)
         start_time = time.perf_counter()
+        logging_enabled = self.log_every > 0
+        if logging_enabled:
+            # Keep the current accumulation group separate until Accelerate
+            # confirms that its optimizer step was not skipped. All tensors are
+            # detached FP64 scalars, so a log window never retains an autograd
+            # graph and remains numerically stable over long intervals.
+            pending_metric_sum = torch.zeros(
+                len(_STAGE3_LOG_METRIC_NAMES),
+                device=self.accelerator.device,
+                dtype=torch.float64,
+            )
+            window_metric_sum = torch.zeros_like(pending_metric_sum)
+            window_grad_norm_sum = torch.zeros(
+                (),
+                device=self.accelerator.device,
+                dtype=torch.float64,
+            )
+            pending_microbatches = 0
+            window_microbatches = 0
+            window_steps = 0
         while self.global_step < self.max_steps:
             try:
                 sample = next(data_iter)
@@ -947,11 +997,22 @@ class Stage3AlignmentTrainer:
                 continue
 
             step_succeeded = False
+            optimizer_boundary = False
             grad_norm = None
             with self.accelerator.accumulate(self.adapter_module):
                 out = self.build_loss(sample)
+                if logging_enabled:
+                    with torch.no_grad():
+                        pending_metric_sum.add_(
+                            _detached_stage3_log_metrics(out).to(
+                                device=pending_metric_sum.device,
+                                dtype=pending_metric_sum.dtype,
+                            )
+                        )
+                    pending_microbatches += 1
                 self.accelerator.backward(out.loss)
-                if self.accelerator.sync_gradients:
+                optimizer_boundary = bool(self.accelerator.sync_gradients)
+                if optimizer_boundary:
                     self._assert_no_base_gradients()
                     grad_norm = self.accelerator.clip_grad_norm_(
                         self.adapter_module.parameters(),
@@ -959,31 +1020,79 @@ class Stage3AlignmentTrainer:
                     )
                 self.optimizer.step()
                 step_succeeded = (
-                    self.accelerator.sync_gradients
+                    optimizer_boundary
                     and not self.accelerator.optimizer_step_was_skipped
                 )
                 if step_succeeded:
                     self.scheduler.step()
                 self.optimizer.zero_grad(set_to_none=True)
 
+            if logging_enabled and optimizer_boundary:
+                if step_succeeded:
+                    with torch.no_grad():
+                        window_metric_sum.add_(pending_metric_sum)
+                        if isinstance(grad_norm, torch.Tensor):
+                            detached_grad_norm = grad_norm.detach().to(
+                                device=window_grad_norm_sum.device,
+                                dtype=window_grad_norm_sum.dtype,
+                            )
+                        else:
+                            detached_grad_norm = torch.tensor(
+                                grad_norm,
+                                device=window_grad_norm_sum.device,
+                                dtype=window_grad_norm_sum.dtype,
+                            )
+                        window_grad_norm_sum.add_(detached_grad_norm.reshape(()))
+                    window_microbatches += pending_microbatches
+                    window_steps += 1
+                # A skipped optimizer step invalidates every microbatch in its
+                # accumulation group, including the non-sync microbatches.
+                pending_metric_sum.zero_()
+                pending_microbatches = 0
+
             if not step_succeeded:
                 continue
             self.global_step += 1
-            if self.log_every > 0 and self.global_step % self.log_every == 0:
-                loss_value = float(
-                    self.accelerator.gather(
-                        out.loss.detach().float().reshape(1)
-                    ).mean().item()
+            if logging_enabled and self.global_step % self.log_every == 0:
+                local_window = torch.cat(
+                    (
+                        window_metric_sum,
+                        window_grad_norm_sum.reshape(1),
+                        window_metric_sum.new_tensor(
+                            [window_microbatches, window_steps]
+                        ),
+                    )
                 )
+                gathered_window = self.accelerator.gather(
+                    local_window.reshape(1, -1)
+                ).reshape(-1, local_window.numel())
+                global_window = gathered_window.sum(dim=0)
+                global_microbatches = float(global_window[-2].item())
+                global_steps = float(global_window[-1].item())
+                if global_microbatches <= 0 or global_steps <= 0:
+                    raise RuntimeError(
+                        "Stage 3 logging window contains no successful steps"
+                    )
+                metric_values = (
+                    global_window[: len(_STAGE3_LOG_METRIC_NAMES)]
+                    / global_microbatches
+                )
+                grad_norm_value = global_window[-3] / global_steps
+                window_metric_sum.zero_()
+                window_grad_norm_sum.zero_()
+                window_microbatches = 0
+                window_steps = 0
                 if self.accelerator.is_main_process:
                     elapsed = max(time.perf_counter() - start_time, 1e-6)
                     logger.info(
-                        "[stage3] step=%d/%d loss=%.6f grad_norm=%.6f "
-                        "lr=%.3e elapsed=%.1fs",
+                        "[stage3] step=%d/%d loss=%.6f action=%.6f "
+                        "alignment=%.6f safe=%.6f helpful=%.6f e0=%.6f "
+                        "egt=%.6f eself=%.6f grad_norm=%.6f lr=%.3e "
+                        "elapsed=%.1fs",
                         self.global_step,
                         self.max_steps,
-                        loss_value,
-                        float(grad_norm) if grad_norm is not None else float("nan"),
+                        *(float(value.item()) for value in metric_values),
+                        float(grad_norm_value.item()),
                         float(self.optimizer.param_groups[0]["lr"]),
                         elapsed,
                     )

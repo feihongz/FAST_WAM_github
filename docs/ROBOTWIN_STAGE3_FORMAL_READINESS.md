@@ -9,8 +9,8 @@ RoboTwin 2.0 已有独立 Stage 3 Hydra 入口
 schema-v2 text-cache index/descriptor 与 data manifest 已发布，Stage 3 和 Stage 2 task
 均默认锁定 canonical manifest SHA
 `1190b75b1ef19a7abd949bdff5679da59afa7e51a043eeb43663cf2c4495173c`。数据身份门槛已
-完成，真实单卡 H100 一步训练和严格 save/resume 也已通过；正式长训练前只剩 8 卡
-ZeRO-2 save/resume smoke。
+完成；真实单卡 H100、8×H100 ZeRO-2 严格 save/resume、200-step pilot 和单 episode
+endpoint health smoke 均已通过。当前下一步是正式 Stage 3 长训练。
 
 ## 已确认的真实数据与资产
 
@@ -101,19 +101,20 @@ accumulation 1 的一步训练得到 loss `0.000199`、grad norm `0.206138`，�
 Adapter SHA256 均为
 `4686621e6eda37133a63506839772786275da3fdd473af68aefeefedfe79aec2`，training contract SHA256
 均为 `216ea9a6b7567415b84a7aaf6fccc4168fdb7cac422d8f96a23488d8ff7a5d0f`。该 export 仅是
-smoke 证据，不能用于正式 Stage 2 标签。尚需在正式 8 卡环境跑至少两个 optimizer step，
-并用相同 world size 验证 ZeRO-2 save/resume。
+smoke 证据，不能用于正式 Stage 2 标签。后续 8×H100 ZeRO-2 fresh/resume exact
+equivalence 已通过，200-step pilot 也已完成；两类产物都不能替代正式最终 Adapter。
 
 另在提交 `4946d17` 上用正式每卡合同 `batch_size=2`、accumulation 3 跑完一个 optimizer
 step：loss `0.004577`、grad norm `0.198295`、三次 micro-batch 计算共 `24.0s`。对 H100
 每 `0.5s` 采样得到峰值显存 `15957 MiB`、峰值利用率 83%，因此无需把正式合同降到
-batch 1 / accumulation 6；仍须在 8 卡 smoke 中为 NCCL/ZeRO 通信复核实际余量。
+batch 1 / accumulation 6；后续 8 卡 NCCL/ZeRO smoke 已确认该正式 batch 合同可运行。
 
 ## 与 LIBERO 对齐后的顺序
 
-RoboTwin 的 index/manifest 和单卡 smoke 已完成；LIBERO 的 manifest、专用 Stage 2 task 和
-单卡 Stage 3 save/resume 也已完成。下一步分别跑相同合同的 8 卡 ZeRO-2 smoke，通过后再
-启动两个独立 Stage 3 run。各自 Adapter 冻结并通过 endpoint eval 后，再分别开始 Stage 2：
+RoboTwin 与 LIBERO 的 data contract、单卡检查、8 卡 ZeRO-2 save/resume、200-step pilot
+和 endpoint connectivity smoke 均已完成。下一步同时启动两个独立正式 Stage 3 run。
+各自 Adapter 冻结并通过最终小规模 `w` 分支 health smoke 后，
+直接开始 Stage 2 标签生成；完整 endpoint 对比推迟到 Gate 完成后统一执行：
 生成标签、严格 merge、训练 Gate。两个 Stage 2 task 当前都保留无效 Adapter placeholder；
 在各自 Stage 3 最终 export 与真实 SHA 出现前不会启动。两个 benchmark 绝不共享 Adapter、
 label contract、label manifest 或 Gate checkpoint。
