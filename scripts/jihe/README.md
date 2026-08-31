@@ -1,5 +1,18 @@
 # JiHe launch scripts
 
+## LIBERO Stage 3 final health smoke (1xH100)
+
+After freezing the LIBERO step-30,000 Adapter, run exactly one tiny `w`-path
+load/execute health check:
+
+```bash
+bash scripts/jihe/eval_libero_stage3_final_health_1xh100.sh
+```
+
+The launcher locks the final Adapter path/SHA, training-contract SHA, and
+global step. It runs one closed-loop trial with two solver steps and does not
+produce a formal benchmark success-rate result.
+
 ## Stage 3 endpoint pilot smoke (1xH100)
 
 Stage 3 200-step pilot endpoint connectivity smokes use two independent

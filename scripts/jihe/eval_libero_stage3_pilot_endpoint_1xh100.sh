@@ -13,6 +13,8 @@ RUN_ID="${RUN_ID:-$(date -u +%Y-%m-%d_%H-%M-%S)}"
 OUTPUT_DIR="${OUTPUT_DIR:-/root/feihong/FastWAM/evaluate_results/stage3_pilot_endpoint/libero/${RUN_ID}}"
 LOG_FILE="${LOG_FILE:-${OUTPUT_DIR}/launch.log}"
 FASTWAM_DRY_RUN="${FASTWAM_DRY_RUN:-0}"
+SMOKE_HEADER="${SMOKE_HEADER:-stage3-pilot-endpoint-smoke}"
+SMOKE_NOTE="${SMOKE_NOTE:-connectivity-only; not a formal success-rate result}"
 
 BASE_CKPT="${BASE_CKPT:-/root/feihong/FastWAM/formal_runs/FAST_WAM_github/libero_unified_shared_2cam224_1e-4/2026-07-01_00-44-20/checkpoints/weights/latest.pt}"
 BASE_SHA256="${BASE_SHA256:-17a5588cc2b8d162219c9daf818614f614ee4a7921933a4a26c5d678111330e9}"
@@ -50,7 +52,7 @@ print_command() {
 for override in "$@"; do
   case "${override}" in
     task=*|ckpt=*|gpu_id=*|EVALUATION.output_dir=*|EVALUATION.stage3_*=*|EVALUATION.inference_mode=*)
-      fail "Locked pilot endpoint setting cannot be overridden: ${override}"
+      fail "Locked endpoint smoke setting cannot be overridden: ${override}"
       ;;
   esac
 done
@@ -97,7 +99,7 @@ COMMAND=(
 )
 
 cat <<EOF
-[stage3-pilot-endpoint-smoke]
+[${SMOKE_HEADER}]
   benchmark=LIBERO
   gpu_count=1
   adapter_step=${GLOBAL_STEP}
@@ -105,7 +107,7 @@ cat <<EOF
   trials=${NUM_TRIALS}
   inference_mode=w
   output_dir=${OUTPUT_DIR}
-  note=connectivity-only; not a formal success-rate result
+  note=${SMOKE_NOTE}
   preflight=base/Adapter/VAE/stats SHA checks can take several minutes
 EOF
 print_command "${COMMAND[@]}"
