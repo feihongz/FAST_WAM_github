@@ -68,9 +68,9 @@ def _collect(device: str, **overrides):
 
 def test_runtime_identity_is_rank_invariant_across_same_gpu_model():
     rank_zero = _collect("cuda:0")
-    rank_three = _collect("cuda:3")
+    rank_seven = _collect("cuda:7")
 
-    assert rank_zero == rank_three
+    assert rank_zero == rank_seven
     assert rank_zero["ffmpeg"] == FFMPEG_RUNTIME
     assert rank_zero["device"]["nvidia_driver_version"] == "580.173.02"
     assert "index" not in rank_zero["device"]

@@ -6,7 +6,10 @@ import subprocess
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-LAUNCHER = REPO_ROOT / "scripts" / "jihe" / "run_libero_stage2_labels_4xh100.sh"
+LAUNCHER = REPO_ROOT / "scripts" / "jihe" / "run_libero_stage2_labels_8xh100.sh"
+LEGACY_LAUNCHER = (
+    REPO_ROOT / "scripts" / "jihe" / "run_libero_stage2_labels_4xh100.sh"
+)
 
 FINAL_ADAPTER = (
     "/root/feihong/FastWAM/formal_runs/stage3/full/"
@@ -21,9 +24,10 @@ FINAL_ADAPTER_SHA256 = (
 def _run_launcher(
     *arguments: str,
     environment: dict[str, str] | None = None,
+    launcher: Path = LAUNCHER,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["bash", str(LAUNCHER), *arguments],
+        ["bash", str(launcher), *arguments],
         cwd=REPO_ROOT,
         env=environment,
         capture_output=True,
@@ -36,7 +40,7 @@ def _unescape_printed_shell_arguments(output: str) -> str:
     return output.replace(r"\[", "[").replace(r"\]", "]")
 
 
-def test_dry_run_plans_exact_formal_four_gpu_job_without_writes(
+def test_dry_run_plans_exact_formal_eight_gpu_job_without_writes(
     tmp_path: Path,
 ) -> None:
     storage_root = tmp_path / "persistent"
@@ -65,11 +69,12 @@ def test_dry_run_plans_exact_formal_four_gpu_job_without_writes(
         "libero_stage2_gate_labels_2cam224/pytest-libero-stage2-labels"
     )
     assert "benchmark=LIBERO" in output
-    assert "topology=1x4" in output
-    assert "world_size=4" in output
+    assert "topology=1x8" in output
+    assert "world_size=8" in output
+    assert "rank_shards=rank_r_handles_r_r+8_..._r+56" in output
     assert "torchrun" in output
     assert "--standalone" in output
-    assert "--nproc_per_node=4" in output
+    assert "--nproc_per_node=8" in output
     assert "--nproc_per_node=auto" not in output
     assert "--max_restarts=0" in output
     assert "scripts/generate_gate_labels.py" in output
@@ -119,10 +124,89 @@ def test_default_run_id_is_stable_for_same_commit_resume(tmp_path: Path) -> None
         output = _unescape_printed_shell_arguments(result.stdout + result.stderr)
         assert f"output_dir={expected_job_dir}" in output
         assert f"run_id=formal_{git_short}" in output
-        assert "--nproc_per_node=4" in output
+        assert "--nproc_per_node=8" in output
     # Attempt-log names may vary, but the immutable/resumable job directory may not.
     assert not storage_root.exists()
     assert list(tmp_path.iterdir()) == []
+
+
+def test_launcher_accepts_only_exact_eight_rank_topology(tmp_path: Path) -> None:
+    base_environment = os.environ.copy()
+    base_environment.update(
+        {
+            "FASTWAM_DRY_RUN": "1",
+            "FASTWAM_STORAGE_ROOT": str(tmp_path / "persistent"),
+            "RUN_ID": "pytest-eight-rank-topology",
+            "FASTWAM_CUDA_VISIBLE_DEVICES": (
+                "GPU-0,GPU-1,GPU-2,GPU-3,GPU-4,GPU-5,GPU-6,GPU-7"
+            ),
+        }
+    )
+
+    accepted_environment = dict(base_environment, NPROC_PER_NODE="8")
+    accepted = _run_launcher(environment=accepted_environment)
+    assert accepted.returncode == 0, accepted.stderr
+    assert "--nproc_per_node=8" in accepted.stdout
+
+    for invalid_nproc in ("4", "7", "9", "16"):
+        rejected_environment = dict(
+            base_environment,
+            NPROC_PER_NODE=invalid_nproc,
+        )
+        rejected = _run_launcher(environment=rejected_environment)
+        assert rejected.returncode != 0
+        assert "require exactly 8 H100s" in rejected.stderr
+
+    for invalid_visible_devices in (
+        "0,1,2,3,4,5,6",
+        "0,1,2,3,4,5,6,7,8",
+        "0,1,2,3,4,5,6,6",
+        "0,1,2,3,4,5,6,7,",
+        ",0,1,2,3,4,5,6,7",
+        "0,1,2,3,4,5,,6,7",
+        "0,1,2,3,4,5,6, 7",
+    ):
+        rejected_environment = dict(
+            base_environment,
+            NPROC_PER_NODE="8",
+            FASTWAM_CUDA_VISIBLE_DEVICES=invalid_visible_devices,
+        )
+        rejected = _run_launcher(environment=rejected_environment)
+        assert rejected.returncode != 0
+        assert "FASTWAM_CUDA_VISIBLE_DEVICES" in rejected.stderr
+
+    assert not (tmp_path / "persistent").exists()
+
+
+def test_retired_four_gpu_entrypoint_forwards_to_eight_gpu_launcher(
+    tmp_path: Path,
+) -> None:
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "FASTWAM_DRY_RUN": "1",
+            "FASTWAM_STORAGE_ROOT": str(tmp_path / "persistent"),
+            "RUN_ID": "pytest-legacy-forward",
+            "NPROC_PER_NODE": "auto",
+        }
+    )
+
+    result = _run_launcher(
+        environment=environment,
+        launcher=LEGACY_LAUNCHER,
+    )
+
+    assert result.returncode == 0, result.stderr
+    output = result.stdout + result.stderr
+    assert "[compat] forwarding the retired 4xH100 command" in output
+    assert "topology=1x8" in output
+    assert "world_size=8" in output
+    assert "--nproc_per_node=8" in output
+    assert not (tmp_path / "persistent").exists()
+
+    rejected = _run_launcher("labeling.num_shards=1", launcher=LEGACY_LAUNCHER)
+    assert rejected.returncode != 0
+    assert "takes no arguments" in rejected.stderr
 
 
 def test_dry_run_locks_final_adapter_and_formal_contract(tmp_path: Path) -> None:
@@ -175,6 +259,15 @@ def test_launcher_guards_verifier_signals_and_receipt_symlinks() -> None:
     assert "residue_candidates" in script
     assert "crash-residue recovery" in script
     assert "FASTWAM_FFMPEG_APT_VERSION" in script
+    assert "len(names) != 8" in script
+    assert "expected exactly eight visible H100 GPUs" in script
+    for forbidden in (
+        "topology=1x4",
+        "--nproc_per_node=4",
+        "r+4",
+        "16 of the 64 shards",
+    ):
+        assert forbidden not in script
 
 
 def test_public_launcher_rejects_positional_or_hydra_arguments() -> None:

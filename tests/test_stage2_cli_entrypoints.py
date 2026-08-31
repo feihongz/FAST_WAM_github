@@ -303,6 +303,23 @@ def test_generate_rank_partition_and_immutable_json(tmp_path, monkeypatch):
         )
 
 
+def test_generate_eight_rank_partition_covers_every_formal_shard(monkeypatch):
+    monkeypatch.setenv("WORLD_SIZE", "8")
+    rank_assignments = []
+
+    for rank in range(8):
+        monkeypatch.setenv("RANK", str(rank))
+        expected = tuple(range(rank, 64, 8))
+        actual = generate_cli._rank_shard_indices(None, num_shards=64)
+        assert actual == expected
+        rank_assignments.append(set(actual))
+
+    assert set().union(*rank_assignments) == set(range(64))
+    for left_rank, left_assignment in enumerate(rank_assignments):
+        for right_assignment in rank_assignments[left_rank + 1 :]:
+            assert left_assignment.isdisjoint(right_assignment)
+
+
 def test_generate_torchrun_device_rejects_explicit_cuda_index(
     monkeypatch,
 ):

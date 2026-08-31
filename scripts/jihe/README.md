@@ -15,23 +15,27 @@ sample, reruns the same immutable output directory to prove strict resume, and
 writes a verification receipt. Its 1,048,576-shard singleton contract is
 smoke-only and explicitly cannot be merged into the formal 64-shard labels.
 
-## LIBERO Stage 2 formal labels (4xH100)
+## LIBERO Stage 2 formal labels (8xH100)
 
 After the singleton smoke passes, start the formal 64-shard label campaign on
-one JiHe node with four H100s:
+one JiHe node with eight H100s:
 
 ```bash
-bash scripts/jihe/run_libero_stage2_labels_4xh100.sh
+bash scripts/jihe/run_libero_stage2_labels_8xh100.sh
 ```
 
 The launcher fixes the final step-30,000 Adapter and every base/data/VAE/stats
-identity, then runs one four-rank `torchrun` job. Each rank receives 16 stable
+identity, then runs one eight-rank `torchrun` job. Each rank receives 8 stable
 shards and all ranks publish into one persistent label directory. The default
 run ID is `formal_<git-short-sha>`, so rerunning the same command at the same
 commit strictly validates and resumes existing chunks. Set `RUN_ID` only when
-you intentionally need a different formal job. To remap the four visible
-devices, set `FASTWAM_CUDA_VISIBLE_DEVICES` to exactly four comma-separated
+you intentionally need a different formal job. To remap the eight visible
+devices, set `FASTWAM_CUDA_VISIBLE_DEVICES` to exactly eight comma-separated
 logical indices or GPU UUIDs.
+
+The retired `run_libero_stage2_labels_4xh100.sh` path is retained only as a
+compatibility entrypoint for already copied commands; it prints a notice and
+forwards to this same strict eight-GPU launcher.
 
 The formal launcher pins Ubuntu FFmpeg to
 `7:4.4.2-0ubuntu0.22.04.1`. Its immutable numerical-runtime identity also
@@ -39,14 +43,16 @@ records the exact libav versions loaded by TorchCodec and the node-wide NVIDIA
 driver release, without GPU indices or UUIDs. A resumed container with a
 different decoder or driver fails before it can append chunks.
 
-The frozen plan contains 273,465 samples, 64 shards and 4,307 chunks. Based on
-the accepted one-sample H100 smoke, four H100s are expected to take roughly
-30--40 days; one 64-sample chunk per rank can take about 45--55 minutes. Check
-the observed time for the first completed chunks and reassess the GPU count
-before committing to the full campaign. The launcher reports chunk progress
-every five minutes and safely resumes at completed chunk boundaries.
-An exclusive non-blocking job lock rejects accidentally overlapping four-GPU
-launchers that target the same output directory.
+The frozen plan contains 273,465 samples, 64 shards and 4,307 chunks. The direct
+label phase of the accepted one-sample smoke took about 7.8 seconds; that
+projects to roughly 3.1 ideal days on eight H100s. Allow 3--5 days for
+multi-rank I/O and long-run variance. After the one-time model startup, the
+first 64-sample chunk on each rank should provide a better estimate in about
+8--12 minutes (roughly 18--25 minutes from initial launch, including startup).
+This projection is provisional until that first formal chunk
+completes. The launcher reports progress every five minutes and safely resumes
+at completed chunk boundaries. An exclusive non-blocking job lock rejects
+accidentally overlapping launchers that target the same output directory.
 
 `generation_success.json` is written only after rebuilding the canonical plan
 and strictly validating every chunk. The marker also binds a deterministic
