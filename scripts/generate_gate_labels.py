@@ -186,6 +186,8 @@ def collect_label_runtime_environment(
     *,
     package_version_resolver: Any = None,
     torch_runtime: Any = None,
+    ffmpeg_runtime_resolver: Any = None,
+    nvidia_driver_version_resolver: Any = None,
 ) -> dict[str, Any]:
     """Collect numerical software/hardware identity for label compatibility."""
 
@@ -193,6 +195,8 @@ def collect_label_runtime_environment(
         device,
         package_version_resolver=package_version_resolver,
         torch_runtime=torch_runtime,
+        ffmpeg_runtime_resolver=ffmpeg_runtime_resolver,
+        nvidia_driver_version_resolver=nvidia_driver_version_resolver,
     )
 
 

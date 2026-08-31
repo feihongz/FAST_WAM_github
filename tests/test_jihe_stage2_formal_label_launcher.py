@@ -1,0 +1,196 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import subprocess
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+LAUNCHER = REPO_ROOT / "scripts" / "jihe" / "run_libero_stage2_labels_4xh100.sh"
+
+FINAL_ADAPTER = (
+    "/root/feihong/FastWAM/formal_runs/stage3/full/"
+    "libero_stage3_alignment_2cam224_1e-4/2026-08-30_10-29-08/"
+    "checkpoints/exports/step_030000.pt"
+)
+FINAL_ADAPTER_SHA256 = (
+    "cbc593bc6ce99c0249a65e5c7cef754c9a1d7ea602f81fdae2b8cb158a25858c"
+)
+
+
+def _run_launcher(
+    *arguments: str,
+    environment: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", str(LAUNCHER), *arguments],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _unescape_printed_shell_arguments(output: str) -> str:
+    return output.replace(r"\[", "[").replace(r"\]", "]")
+
+
+def test_dry_run_plans_exact_formal_four_gpu_job_without_writes(
+    tmp_path: Path,
+) -> None:
+    storage_root = tmp_path / "persistent"
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "FASTWAM_DRY_RUN": "1",
+            "FASTWAM_STORAGE_ROOT": str(storage_root),
+            "RUN_ID": "pytest-libero-stage2-labels",
+            # The public launcher must replace inherited ad-hoc topology values.
+            "CUDA_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7",
+            "NPROC_PER_NODE": "auto",
+            "SENSECORE_ACCELERATE_DEVICE_COUNT": "auto",
+        }
+    )
+
+    result = _run_launcher(environment=environment)
+
+    assert result.returncode == 0, result.stderr
+    assert not storage_root.exists()
+    assert list(tmp_path.iterdir()) == []
+
+    output = _unescape_printed_shell_arguments(result.stdout + result.stderr)
+    expected_output = (
+        f"{storage_root}/FastWAM/formal_runs/stage2/labels/"
+        "libero_stage2_gate_labels_2cam224/pytest-libero-stage2-labels"
+    )
+    assert "benchmark=LIBERO" in output
+    assert "topology=1x4" in output
+    assert "world_size=4" in output
+    assert "torchrun" in output
+    assert "--standalone" in output
+    assert "--nproc_per_node=4" in output
+    assert "--nproc_per_node=auto" not in output
+    assert "--max_restarts=0" in output
+    assert "scripts/generate_gate_labels.py" in output
+    assert "task=libero_stage2_gate_labels_2cam224" in output
+    assert "labeling.num_shards=64" in output
+    assert "labeling.chunk_size=64" in output
+    assert "labeling.shard_indices=null" in output
+    assert "runtime.device=cuda" in output
+    assert "runtime.require_clean_git=true" in output
+    assert f"output_dir={expected_output}" in output
+    assert str(storage_root) in output
+    assert "generation_success.json" in output
+    assert "merge_completed=false" in output
+    assert "merge_gate_labels.py" in output
+    assert "ffmpeg_apt_version=7:4.4.2-0ubuntu0.22.04.1" in output
+    assert "ffmpeg_runtime_version=4.4.2-0ubuntu0.22.04.1" in output
+
+
+def test_default_run_id_is_stable_for_same_commit_resume(tmp_path: Path) -> None:
+    storage_root = tmp_path / "persistent"
+    environment = os.environ.copy()
+    environment.pop("RUN_ID", None)
+    environment.update(
+        {
+            "FASTWAM_DRY_RUN": "1",
+            "FASTWAM_STORAGE_ROOT": str(storage_root),
+            "NPROC_PER_NODE": "auto",
+        }
+    )
+    git_short = subprocess.run(
+        ["git", "rev-parse", "--short=7", "HEAD"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    expected_job_dir = (
+        f"{storage_root}/FastWAM/formal_runs/stage2/labels/"
+        f"libero_stage2_gate_labels_2cam224/formal_{git_short}"
+    )
+
+    first = _run_launcher(environment=environment)
+    second = _run_launcher(environment=environment)
+
+    for result in (first, second):
+        assert result.returncode == 0, result.stderr
+        output = _unescape_printed_shell_arguments(result.stdout + result.stderr)
+        assert f"output_dir={expected_job_dir}" in output
+        assert f"run_id=formal_{git_short}" in output
+        assert "--nproc_per_node=4" in output
+    # Attempt-log names may vary, but the immutable/resumable job directory may not.
+    assert not storage_root.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_dry_run_locks_final_adapter_and_formal_contract(tmp_path: Path) -> None:
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "FASTWAM_DRY_RUN": "1",
+            "FASTWAM_STORAGE_ROOT": str(tmp_path / "persistent"),
+            "RUN_ID": "pytest-locked-formal-labels",
+        }
+    )
+
+    result = _run_launcher(environment=environment)
+
+    assert result.returncode == 0, result.stderr
+    output = _unescape_printed_shell_arguments(result.stdout + result.stderr)
+    assert FINAL_ADAPTER in output
+    assert FINAL_ADAPTER_SHA256 in output
+    assert "step_030000" in output
+    assert "labeling.num_seed_pairs=2" in output
+    assert "labeling.num_inference_steps=10" in output
+    assert "labeling.relative_margin=0.05" in output
+    assert "runtime.mixed_precision=bf16" in output
+
+
+def test_launcher_declares_strict_generation_receipt_before_formal_merge() -> None:
+    script = LAUNCHER.read_text(encoding="utf-8")
+
+    assert "generation_success.json" in script
+    assert "merge_completed" in script
+    assert "merge_completed=false" in script
+    assert "planned_sample_count" in script
+    assert "273465" in script
+    assert "planned_chunk_count" in script
+    assert "4307" in script
+    assert "merge_gate_labels.py" in script
+
+
+def test_launcher_guards_verifier_signals_and_receipt_symlinks() -> None:
+    script = LAUNCHER.read_text(encoding="utf-8")
+
+    assert "set +m" in script
+    assert 'setsid "${PYTHON_BIN}" - \\' in script
+    assert 'VERIFY_PID="$!"' in script
+    assert "terminate_verify" in script
+    assert "success_path = Path(success_path_raw).resolve()" not in script
+    assert "O_NOFOLLOW" in script
+    assert "st_nlink != 1" in script
+    assert "metadata.st_nlink != 2" in script
+    assert "residue_candidates" in script
+    assert "crash-residue recovery" in script
+    assert "FASTWAM_FFMPEG_APT_VERSION" in script
+
+
+def test_public_launcher_rejects_positional_or_hydra_arguments() -> None:
+    result = _run_launcher("labeling.num_shards=1")
+
+    assert result.returncode != 0
+    assert "takes no arguments" in result.stderr
+
+
+def test_launcher_has_valid_bash_syntax() -> None:
+    result = subprocess.run(
+        ["bash", "-n", str(LAUNCHER)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr

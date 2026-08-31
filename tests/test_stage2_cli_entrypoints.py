@@ -457,6 +457,18 @@ def test_generate_runtime_contract_normalizes_precision_and_binds_model():
 
 
 def test_generate_runtime_environment_is_injectable_without_cuda():
+    ffmpeg_runtime = {
+        "executable_version": "ffmpeg version 7.1 deterministic-test",
+        "torchcodec_runtime": {
+            "ffmpeg_version": "7.1",
+            "libraries": {
+                "libavcodec": [61, 3, 100],
+                "libavformat": [61, 1, 100],
+                "libavutil": [59, 8, 100],
+            },
+        },
+    }
+
     fake_device = SimpleNamespace(type="cuda")
     fake_torch = SimpleNamespace(
         __version__="2.8.0+cu128",
@@ -475,6 +487,8 @@ def test_generate_runtime_environment_is_injectable_without_cuda():
         "cuda:7",
         package_version_resolver=lambda name: f"{name}-version",
         torch_runtime=fake_torch,
+        ffmpeg_runtime_resolver=lambda: ffmpeg_runtime,
+        nvidia_driver_version_resolver=lambda: "580.173.02",
     )
 
     assert environment["versions"] == {
@@ -488,10 +502,12 @@ def test_generate_runtime_environment_is_injectable_without_cuda():
         "accelerate": "accelerate-version",
         "lerobot": "lerobot-version",
     }
+    assert environment["ffmpeg"] == ffmpeg_runtime
     assert environment["device"] == {
         "type": "cuda",
         "cuda_version": "12.8",
         "cudnn_version": 91002,
+        "nvidia_driver_version": "580.173.02",
         "capability": [9, 0],
         "name": "Fake H100",
     }

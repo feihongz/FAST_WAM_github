@@ -422,6 +422,30 @@ def test_torchcodec_runtime_bootstraps_missing_ffmpeg(tmp_path: Path) -> None:
     assert "installing the Ubuntu ffmpeg runtime" in result.stdout
 
 
+
+def test_torchcodec_runtime_installs_requested_pinned_ffmpeg(tmp_path: Path) -> None:
+    environment, apt_log = _fake_missing_ffmpeg_environment(tmp_path)
+    environment.update(
+        {
+            "FASTWAM_FFMPEG_APT_VERSION": "7:4.4.2-0ubuntu0.22.04.1",
+            "FASTWAM_FFMPEG_RUNTIME_VERSION": "4.4.2-0ubuntu0.22.04.1",
+        }
+    )
+    helper = JIHE_DIR / "ensure_torchcodec_runtime.sh"
+    result = subprocess.run(
+        ["bash", "-c", 'source "$1"', "bash", str(helper)],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = apt_log.read_text(encoding="utf-8")
+    assert "--allow-downgrades ffmpeg=7:4.4.2-0ubuntu0.22.04.1" in calls
+    assert "installing pinned Ubuntu ffmpeg=7:4.4.2-0ubuntu0.22.04.1" in result.stdout
+
 def test_torchcodec_runtime_can_disable_automatic_install(tmp_path: Path) -> None:
     environment, apt_log = _fake_missing_ffmpeg_environment(tmp_path)
     environment["FASTWAM_AUTO_INSTALL_FFMPEG"] = "0"

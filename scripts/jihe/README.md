@@ -15,6 +15,45 @@ sample, reruns the same immutable output directory to prove strict resume, and
 writes a verification receipt. Its 1,048,576-shard singleton contract is
 smoke-only and explicitly cannot be merged into the formal 64-shard labels.
 
+## LIBERO Stage 2 formal labels (4xH100)
+
+After the singleton smoke passes, start the formal 64-shard label campaign on
+one JiHe node with four H100s:
+
+```bash
+bash scripts/jihe/run_libero_stage2_labels_4xh100.sh
+```
+
+The launcher fixes the final step-30,000 Adapter and every base/data/VAE/stats
+identity, then runs one four-rank `torchrun` job. Each rank receives 16 stable
+shards and all ranks publish into one persistent label directory. The default
+run ID is `formal_<git-short-sha>`, so rerunning the same command at the same
+commit strictly validates and resumes existing chunks. Set `RUN_ID` only when
+you intentionally need a different formal job. To remap the four visible
+devices, set `FASTWAM_CUDA_VISIBLE_DEVICES` to exactly four comma-separated
+logical indices or GPU UUIDs.
+
+The formal launcher pins Ubuntu FFmpeg to
+`7:4.4.2-0ubuntu0.22.04.1`. Its immutable numerical-runtime identity also
+records the exact libav versions loaded by TorchCodec and the node-wide NVIDIA
+driver release, without GPU indices or UUIDs. A resumed container with a
+different decoder or driver fails before it can append chunks.
+
+The frozen plan contains 273,465 samples, 64 shards and 4,307 chunks. Based on
+the accepted one-sample H100 smoke, four H100s are expected to take roughly
+30--40 days; one 64-sample chunk per rank can take about 45--55 minutes. Check
+the observed time for the first completed chunks and reassess the GPU count
+before committing to the full campaign. The launcher reports chunk progress
+every five minutes and safely resumes at completed chunk boundaries.
+An exclusive non-blocking job lock rejects accidentally overlapping four-GPU
+launchers that target the same output directory.
+
+`generation_success.json` is written only after rebuilding the canonical plan
+and strictly validating every chunk. The marker also binds a deterministic
+ordered inventory SHA over every relative chunk path, chunk SHA and row count.
+It records `merge_completed=false`; the separate strict merge step must still
+pass before Gate training starts.
+
 ## LIBERO Stage 3 final health smoke (1xH100)
 
 After freezing the LIBERO step-30,000 Adapter, run exactly one tiny `w`-path
