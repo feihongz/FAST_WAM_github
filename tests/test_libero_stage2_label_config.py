@@ -16,7 +16,14 @@ from scripts.generate_gate_labels import _resolved_config
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TASK_NAME = "libero_stage2_gate_labels_2cam224"
 MANIFEST_SHA256 = "08da49109a57b55c67f3fa4ac31fbfa44e44dd541a194a5d3420838537d0d320"
-ADAPTER_PLACEHOLDER = "REPLACE_AFTER_STAGE3_ADAPTER_EXPORT"
+FINAL_ADAPTER_PATH = (
+    "/root/feihong/FastWAM/formal_runs/stage3/full/"
+    "libero_stage3_alignment_2cam224_1e-4/2026-08-30_10-29-08/"
+    "checkpoints/exports/step_030000.pt"
+)
+FINAL_ADAPTER_SHA256 = (
+    "cbc593bc6ce99c0249a65e5c7cef754c9a1d7ea602f81fdae2b8cb158a25858c"
+)
 LIBERO_ENVIRONMENT_OVERRIDES = (
     "FASTWAM_LIBERO_STAGE2_LABEL_JOB",
     "FASTWAM_LIBERO_STAGE3_BASE_CHECKPOINT",
@@ -104,8 +111,8 @@ def test_libero_stage2_label_task_locks_formal_contract(monkeypatch):
         "expected_sha256": MANIFEST_SHA256,
     }
     assert resolved["adapter"] == {
-        "checkpoint": ADAPTER_PLACEHOLDER,
-        "expected_sha256": ADAPTER_PLACEHOLDER,
+        "checkpoint": FINAL_ADAPTER_PATH,
+        "expected_sha256": FINAL_ADAPTER_SHA256,
     }
 
     assert resolved["episode_split"] == {
@@ -137,7 +144,7 @@ def test_libero_stage2_label_task_locks_formal_contract(monkeypatch):
     }
 
 
-def test_libero_stage2_label_task_locks_manifest_and_adapter_fails_closed(
+def test_libero_stage2_label_task_locks_manifest_and_final_adapter(
     monkeypatch,
 ):
     resolved = _compose(monkeypatch)
@@ -145,11 +152,11 @@ def test_libero_stage2_label_task_locks_manifest_and_adapter_fails_closed(
         resolved["data_manifest"]["expected_sha256"],
         field="manifest",
     ) == MANIFEST_SHA256
-    with pytest.raises(ValueError, match="64 lowercase hex"):
-        require_sha256(
-            resolved["adapter"]["expected_sha256"],
-            field="adapter",
-        )
+    assert resolved["adapter"]["checkpoint"] == FINAL_ADAPTER_PATH
+    assert require_sha256(
+        resolved["adapter"]["expected_sha256"],
+        field="adapter",
+    ) == FINAL_ADAPTER_SHA256
 
 
 def test_libero_stage2_label_task_requires_durable_output_env(monkeypatch):

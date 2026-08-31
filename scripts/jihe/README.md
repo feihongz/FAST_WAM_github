@@ -1,5 +1,20 @@
 # JiHe launch scripts
 
+## LIBERO Stage 2 label smoke (1xH100)
+
+Before launching the formal 64-shard label campaign, run the exact one-sample
+E0/E10 generation and resume acceptance workflow:
+
+```bash
+bash scripts/jihe/run_libero_stage2_label_smoke_1xh100.sh
+```
+
+The launcher uses the frozen LIBERO step-30,000 Adapter, two paired seeds and
+ten solver steps for both N=0 and N=10. It generates one deterministic real
+sample, reruns the same immutable output directory to prove strict resume, and
+writes a verification receipt. Its 1,048,576-shard singleton contract is
+smoke-only and explicitly cannot be merged into the formal 64-shard labels.
+
 ## LIBERO Stage 3 final health smoke (1xH100)
 
 After freezing the LIBERO step-30,000 Adapter, run exactly one tiny `w`-path
