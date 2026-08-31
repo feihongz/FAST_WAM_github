@@ -58,7 +58,12 @@ class GitIdentity:
     untracked_source_files: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        # ``dataclasses.asdict`` preserves tuples.  Contract payloads are
+        # canonical JSON mappings, and the Stage 2 artifact schema requires
+        # this collection to be a JSON array/list.
+        payload["untracked_source_files"] = list(self.untracked_source_files)
+        return payload
 
 
 def sha256_file(path: str | Path, *, chunk_size: int = 8 * 1024 * 1024) -> str:

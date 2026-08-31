@@ -361,3 +361,4 @@ def test_git_identity_reports_only_untracked_source_contract_paths(tmp_path):
     assert identity.tracked_dirty is False
     assert identity.untracked_source_files == tuple(sorted(expected))
     assert "artifacts/local-output.bin" not in identity.untracked_source_files
+    assert identity.as_dict()["untracked_source_files"] == sorted(expected)
