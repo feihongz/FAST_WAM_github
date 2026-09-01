@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Stable short entrypoint for JiHe jobs whose command field already points to
+# `run_libero_stage2`. Keep all formal contract logic in the reviewed launcher.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+echo "[compat] forwarding run_libero_stage2 to the formal 8xH100 label launcher" >&2
+exec bash "${SCRIPT_DIR}/run_libero_stage2_labels_8xh100.sh" "$@"

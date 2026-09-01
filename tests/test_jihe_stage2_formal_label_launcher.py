@@ -7,6 +7,7 @@ import subprocess
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = REPO_ROOT / "scripts" / "jihe" / "run_libero_stage2_labels_8xh100.sh"
+SHORT_LAUNCHER = REPO_ROOT / "scripts" / "jihe" / "run_libero_stage2"
 LEGACY_LAUNCHER = (
     REPO_ROOT / "scripts" / "jihe" / "run_libero_stage2_labels_4xh100.sh"
 )
@@ -226,6 +227,37 @@ def test_retired_four_gpu_entrypoint_forwards_to_eight_gpu_launcher(
     assert not (tmp_path / "persistent").exists()
 
     rejected = _run_launcher("labeling.num_shards=1", launcher=LEGACY_LAUNCHER)
+    assert rejected.returncode != 0
+    assert "takes no arguments" in rejected.stderr
+
+
+def test_short_jihe_entrypoint_forwards_to_formal_eight_gpu_launcher(
+    tmp_path: Path,
+) -> None:
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "FASTWAM_DRY_RUN": "1",
+            "FASTWAM_STORAGE_ROOT": str(tmp_path / "persistent"),
+            "RUN_ID": "pytest-short-forward",
+            "NPROC_PER_NODE": "auto",
+        }
+    )
+
+    result = _run_launcher(
+        environment=environment,
+        launcher=SHORT_LAUNCHER,
+    )
+
+    assert result.returncode == 0, result.stderr
+    output = result.stdout + result.stderr
+    assert "[compat] forwarding run_libero_stage2" in output
+    assert "topology=1x8" in output
+    assert "world_size=8" in output
+    assert "--nproc_per_node=8" in output
+    assert not (tmp_path / "persistent").exists()
+
+    rejected = _run_launcher("labeling.num_shards=1", launcher=SHORT_LAUNCHER)
     assert rejected.returncode != 0
     assert "takes no arguments" in rejected.stderr
 
