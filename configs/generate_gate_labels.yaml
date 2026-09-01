@@ -44,6 +44,11 @@ episode_split:
   split_seed: 42
   expected_assignment_sha256: ""
 
+# Sparse subset tasks add both top-level sections below. Keeping them out of
+# the generic schema preserves the explicit legacy full-manifest path.
+# label_selection: {directory: ???, expected_sha256: ???}
+# label_coverage: {tier: ???, expected_sha256: ???}
+
 labeling:
   base_seed: 42
   num_seed_pairs: 2

@@ -14,6 +14,10 @@ episode_split:
   path: ???
   expected_assignment_sha256: ???
 
+# Sparse subset training adds both top-level sections together:
+# label_selection: {directory: ???, expected_sha256: ???}
+# label_coverage: {tier: ???, expected_sha256: ???}
+
 label_contract:
   path: ???
   expected_sha256: ???

@@ -21,6 +21,7 @@ from fastwam.alignment.checkpointing import (
     sha256_file,
 )
 from fastwam.gating.artifacts import (
+    COHORT_CHUNK_PLAN_ALGORITHM,
     build_label_artifact_context,
     build_label_contract,
     publish_json_atomic_no_clobber,
@@ -34,6 +35,10 @@ from fastwam.gating.runtime import (
 )
 from fastwam.gating.runtime_identity import (
     collect_numerical_runtime_environment,
+)
+from fastwam.gating.selection import (
+    SelectionArtifacts,
+    load_selection_artifacts,
 )
 from fastwam.gating.source_guard import (
     capture_selected_source_snapshot,
@@ -57,6 +62,9 @@ _ROOT_KEYS = {
     "labeling",
     "runtime",
 }
+_SUBSET_ROOT_KEYS = {"label_selection", "label_coverage"}
+_LABEL_SELECTION_KEYS = {"directory", "expected_sha256"}
+_LABEL_COVERAGE_KEYS = {"tier", "expected_sha256"}
 
 
 def _resolved_config(config: DictConfig | Mapping[str, Any]) -> dict[str, Any]:
@@ -65,14 +73,97 @@ def _resolved_config(config: DictConfig | Mapping[str, Any]) -> dict[str, Any]:
     payload = OmegaConf.to_container(config, resolve=True)
     if not isinstance(payload, dict):
         raise TypeError("Stage 2 label config must resolve to a mapping")
-    if set(payload) != _ROOT_KEYS:
-        missing = sorted(_ROOT_KEYS - set(payload))
-        unexpected = sorted(set(payload) - _ROOT_KEYS)
+    keys = set(payload)
+    has_selection = "label_selection" in keys
+    has_coverage = "label_coverage" in keys
+    if has_selection != has_coverage:
+        raise ValueError(
+            "label_selection and label_coverage must be provided together"
+        )
+    expected = _ROOT_KEYS | (_SUBSET_ROOT_KEYS if has_selection else set())
+    if keys != expected:
+        missing = sorted(expected - keys)
+        unexpected = sorted(keys - expected)
         raise ValueError(
             "Stage 2 label config fields do not match schema; "
             f"missing={missing}, unexpected={unexpected}"
         )
     return payload
+
+
+def _load_selection_binding(
+    resolved: Mapping[str, Any],
+    *,
+    data_manifest: Mapping[str, Any],
+) -> tuple[SelectionArtifacts | None, str | None, Mapping[str, Any] | None]:
+    """Load the optional committed selection and its exact active coverage."""
+
+    if "label_selection" not in resolved:
+        return None, None, None
+    selection_spec = _exact_section(
+        resolved, "label_selection", _LABEL_SELECTION_KEYS
+    )
+    coverage_spec = _exact_section(
+        resolved, "label_coverage", _LABEL_COVERAGE_KEYS
+    )
+    directory = selection_spec["directory"]
+    if not isinstance(directory, str) or not directory:
+        raise ValueError("label_selection.directory must be a non-empty path")
+    artifacts = load_selection_artifacts(
+        Path(directory).expanduser().resolve(),
+        data_manifest=data_manifest,
+    )
+    expected_selection = require_sha256(
+        selection_spec["expected_sha256"],
+        field="label selection expected_sha256",
+    )
+    actual_selection = require_sha256(
+        artifacts.descriptor.get("selection_sha256"),
+        field="label selection selection_sha256",
+    )
+    if actual_selection != expected_selection:
+        raise ValueError("Stage 2 label selection SHA256 mismatch")
+    tier = coverage_spec["tier"]
+    if not isinstance(tier, str) or not tier:
+        raise ValueError("label_coverage.tier must be a non-empty string")
+    coverage = artifacts.coverages.get(tier)
+    if coverage is None:
+        raise ValueError(f"unknown Stage 2 label coverage tier: {tier}")
+    expected_coverage = require_sha256(
+        coverage_spec["expected_sha256"],
+        field="label coverage expected_sha256",
+    )
+    actual_coverage = require_sha256(
+        coverage.get("coverage_sha256"),
+        field="label coverage coverage_sha256",
+    )
+    if actual_coverage != expected_coverage:
+        raise ValueError("Stage 2 label coverage SHA256 mismatch")
+    return artifacts, tier, coverage
+
+
+def _episode_split_for_generation(
+    data_manifest: Mapping[str, Any],
+    split_spec: Mapping[str, Any],
+    *,
+    selection_artifacts: SelectionArtifacts | None,
+) -> dict[str, Any]:
+    """Build the legacy split or use the selection's immutable pinned split."""
+
+    if selection_artifacts is None:
+        return build_episode_split(
+            data_manifest,
+            validation_fraction=split_spec["validation_fraction"],
+            split_seed=split_spec["split_seed"],
+        )
+    episode_split = dict(selection_artifacts.episode_split)
+    if episode_split.get("validation_fraction") != split_spec["validation_fraction"]:
+        raise ValueError(
+            "episode_split.validation_fraction differs from label selection"
+        )
+    if episode_split.get("split_seed") != split_spec["split_seed"]:
+        raise ValueError("episode_split.split_seed differs from label selection")
+    return episode_split
 
 
 def _exact_section(
@@ -461,10 +552,14 @@ def run_generate_gate_labels(
     )
     if data_manifest.get("manifest_sha256") != expected_data_sha:
         raise ValueError("Stage 2 data manifest SHA256 mismatch")
-    episode_split = build_episode_split(
+    selection_artifacts, coverage_tier, _coverage = _load_selection_binding(
+        resolved,
+        data_manifest=data_manifest,
+    )
+    episode_split = _episode_split_for_generation(
         data_manifest,
-        validation_fraction=split_spec["validation_fraction"],
-        split_seed=split_spec["split_seed"],
+        split_spec,
+        selection_artifacts=selection_artifacts,
     )
     expected_assignment = split_spec["expected_assignment_sha256"]
     if expected_assignment not in (None, ""):
@@ -642,6 +737,11 @@ def run_generate_gate_labels(
         tiled=labeling["tiled"],
         num_shards=num_shards,
         chunk_size=chunk_size,
+        **(
+            {"chunk_plan_algorithm": COHORT_CHUNK_PLAN_ALGORITHM}
+            if selection_artifacts is not None
+            else {}
+        ),
     )
     context = build_label_artifact_context(
         contract=contract,
@@ -679,6 +779,14 @@ def run_generate_gate_labels(
         shard_indices=shard_indices,
         dependencies=None,
         source_guard=source_guard,
+        **(
+            {
+                "selection_artifacts": selection_artifacts,
+                "coverage_tier": coverage_tier,
+            }
+            if selection_artifacts is not None
+            else {}
+        ),
     )
     source_snapshot.check_content()
     return result

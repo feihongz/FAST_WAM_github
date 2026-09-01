@@ -21,6 +21,7 @@ import torch
 
 from .artifacts import (
     CHUNK_PLAN_ALGORITHM,
+    COHORT_CHUNK_PLAN_ALGORITHM,
     LabelArtifactContext,
     build_label_row_from_context,
     load_complete_label_chunk_from_context,
@@ -34,6 +35,7 @@ from .contracts import (
 )
 from .inference import PairedActionRollouts, run_paired_action_rollouts
 from .labels import GateLabelStatistics, paired_gate_label_statistics
+from .selection import SelectionArtifacts, selected_rows_for_coverage
 
 
 _IDENTITY_KEYS = frozenset(
@@ -57,6 +59,7 @@ class PlannedLabelSample:
     sample_id: str
     identity: Mapping[str, int]
     shard_index: int
+    cohort_index: int | None = None
 
     def __post_init__(self) -> None:
         normalized = dict(self.identity)
@@ -70,6 +73,15 @@ class PlannedLabelSample:
                     f"planned sample identity {field} must be non-negative"
                 )
         object.__setattr__(self, "identity", MappingProxyType(normalized))
+        if self.cohort_index is not None:
+            if isinstance(self.cohort_index, bool) or not isinstance(
+                self.cohort_index, int
+            ):
+                raise TypeError("planned sample cohort_index must be an integer")
+            if self.cohort_index < 0:
+                raise ValueError(
+                    "planned sample cohort_index must be non-negative"
+                )
 
     @property
     def global_sample_index(self) -> int:
@@ -84,6 +96,7 @@ class LabelChunkPlan:
     shard_index: int
     chunk_index: int
     samples: tuple[PlannedLabelSample, ...]
+    cohort_index: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "path", Path(self.path))
@@ -91,6 +104,17 @@ class LabelChunkPlan:
             raise ValueError("a label chunk plan must contain at least one sample")
         if any(sample.shard_index != self.shard_index for sample in self.samples):
             raise ValueError("a label chunk plan cannot mix shards")
+        if any(
+            sample.cohort_index != self.cohort_index for sample in self.samples
+        ):
+            raise ValueError("a label chunk plan cannot mix cohorts")
+        if self.cohort_index is not None:
+            if isinstance(self.cohort_index, bool) or not isinstance(
+                self.cohort_index, int
+            ):
+                raise TypeError("label chunk cohort_index must be an integer")
+            if self.cohort_index < 0:
+                raise ValueError("label chunk cohort_index must be non-negative")
         sample_ids = tuple(sample.sample_id for sample in self.samples)
         if sample_ids != tuple(sorted(set(sample_ids))):
             raise ValueError("chunk plan sample IDs must be sorted and unique")
@@ -161,13 +185,88 @@ def _selected_shards(
     return tuple(sorted(normalized))
 
 
+def _validated_selection_request(
+    context: LabelArtifactContext,
+    *,
+    selection_artifacts: SelectionArtifacts | None,
+    coverage_tier: str | None,
+) -> tuple[SelectionArtifacts | None, str | None]:
+    has_artifacts = selection_artifacts is not None
+    has_tier = coverage_tier is not None
+    if has_artifacts != has_tier:
+        raise ValueError(
+            "selection_artifacts and coverage_tier must be provided together"
+        )
+    if not has_artifacts:
+        return None, None
+    if not isinstance(selection_artifacts, SelectionArtifacts):
+        raise TypeError("selection_artifacts must be SelectionArtifacts")
+    if not isinstance(coverage_tier, str) or not coverage_tier:
+        raise TypeError("coverage_tier must be a non-empty string")
+    if (
+        context.contract["chunk_plan_algorithm"]
+        != COHORT_CHUNK_PLAN_ALGORITHM
+    ):
+        raise ValueError("unsupported label chunk plan algorithm")
+    descriptor = selection_artifacts.descriptor
+    if not isinstance(descriptor, Mapping):
+        raise TypeError("selection artifact descriptor must be a mapping")
+    for descriptor_field, contract_field in (
+        ("data_manifest_sha256", "data_manifest_sha256"),
+        ("episode_split_sha256", "episode_split_sha256"),
+        ("episode_assignment_sha256", "episode_assignment_sha256"),
+    ):
+        if descriptor.get(descriptor_field) != context.contract[contract_field]:
+            raise ValueError(
+                "selection artifacts disagree with the label context: "
+                f"{descriptor_field}"
+            )
+    selected_rows_for_coverage(selection_artifacts, tier=coverage_tier)
+    return selection_artifacts, coverage_tier
+
+
 def iter_label_samples(
     context: LabelArtifactContext,
+    *,
+    selection_artifacts: SelectionArtifacts | None = None,
+    coverage_tier: str | None = None,
 ) -> Iterator[PlannedLabelSample]:
     """Stream exact semantic identities without materializing the whole dataset."""
 
     context = _require_context(context)
+    selection_artifacts, coverage_tier = _validated_selection_request(
+        context,
+        selection_artifacts=selection_artifacts,
+        coverage_tier=coverage_tier,
+    )
     num_shards = int(context.contract["num_shards"])
+    if selection_artifacts is not None:
+        assert coverage_tier is not None
+        for row in selected_rows_for_coverage(
+            selection_artifacts, tier=coverage_tier
+        ):
+            identity = {key: row[key] for key in _IDENTITY_KEYS}
+            normalized = validate_sample_identity_with_lookup(
+                identity, context.episode_lookup
+            )
+            stable_id = sample_id_from_lookup(normalized, context.episode_lookup)
+            if row.get("sample_id") != stable_id:
+                raise ValueError(
+                    "selection row sample_id disagrees with its semantic identity"
+                )
+            cohort_index = row.get("cohort_index")
+            if isinstance(cohort_index, bool) or not isinstance(cohort_index, int):
+                raise TypeError("selection row cohort_index must be an integer")
+            yield PlannedLabelSample(
+                sample_id=stable_id,
+                identity=normalized,
+                shard_index=shard_for_sample_id(
+                    stable_id, num_shards=num_shards
+                ),
+                cohort_index=cohort_index,
+            )
+        return
+
     root_offset = 0
     emitted = 0
     for dataset_index, root in enumerate(context.data_manifest["dataset_roots"]):
@@ -214,10 +313,19 @@ def iter_label_samples(
 
 def enumerate_label_samples(
     context: LabelArtifactContext,
+    *,
+    selection_artifacts: SelectionArtifacts | None = None,
+    coverage_tier: str | None = None,
 ) -> tuple[PlannedLabelSample, ...]:
     """Materialize the streamed label plan for compatibility and diagnostics."""
 
-    samples = tuple(iter_label_samples(context))
+    samples = tuple(
+        iter_label_samples(
+            context,
+            selection_artifacts=selection_artifacts,
+            coverage_tier=coverage_tier,
+        )
+    )
     sample_ids = [sample.sample_id for sample in samples]
     if len(sample_ids) != len(set(sample_ids)):
         raise RuntimeError("label sample enumeration produced duplicate sample IDs")
@@ -230,8 +338,22 @@ def _validated_plan_request(
     output_dir: str | Path,
     chunk_size: int,
     shard_indices: Sequence[int] | None = None,
-) -> tuple[LabelArtifactContext, Path, int, tuple[int, ...]]:
+    selection_artifacts: SelectionArtifacts | None = None,
+    coverage_tier: str | None = None,
+) -> tuple[
+    LabelArtifactContext,
+    Path,
+    int,
+    tuple[int, ...],
+    SelectionArtifacts | None,
+    str | None,
+]:
     context = _require_context(context)
+    selection_artifacts, coverage_tier = _validated_selection_request(
+        context,
+        selection_artifacts=selection_artifacts,
+        coverage_tier=coverage_tier,
+    )
     size = _positive_integer(chunk_size, field="chunk_size")
     contract_size = int(context.contract["chunk_size"])
     if size != contract_size:
@@ -239,12 +361,24 @@ def _validated_plan_request(
             "chunk_size disagrees with the immutable label contract: "
             f"requested={size}, contract={contract_size}"
         )
-    if context.contract["chunk_plan_algorithm"] != CHUNK_PLAN_ALGORITHM:
+    expected_algorithm = (
+        CHUNK_PLAN_ALGORITHM
+        if selection_artifacts is None
+        else COHORT_CHUNK_PLAN_ALGORITHM
+    )
+    if context.contract["chunk_plan_algorithm"] != expected_algorithm:
         raise ValueError("unsupported label chunk plan algorithm")
     num_shards = int(context.contract["num_shards"])
     selected = _selected_shards(shard_indices, num_shards=num_shards)
     root = Path(output_dir).expanduser().resolve()
-    return context, root, size, selected
+    return (
+        context,
+        root,
+        size,
+        selected,
+        selection_artifacts,
+        coverage_tier,
+    )
 
 
 def _insert_plan_index_batch(
@@ -257,14 +391,15 @@ def _insert_plan_index_batch(
         connection.executemany(
             """
             INSERT INTO planned_samples (
-                shard_index,
                 sample_id,
+                cohort_index,
+                shard_index,
                 global_sample_index,
                 dataset_index,
                 episode_index,
                 frame_index,
                 dataset_frame_index
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
@@ -281,6 +416,8 @@ def _iter_indexed_label_chunks(
     root: Path,
     chunk_size: int,
     selected: tuple[int, ...],
+    selection_artifacts: SelectionArtifacts | None,
+    coverage_tier: str | None,
 ) -> Iterator[LabelChunkPlan]:
     """External-sort selected samples while keeping Python memory bounded."""
 
@@ -299,27 +436,50 @@ def _iter_indexed_label_chunks(
             connection.execute(
                 """
                 CREATE TABLE planned_samples (
+                    sample_id BLOB PRIMARY KEY,
+                    cohort_index INTEGER NOT NULL,
                     shard_index INTEGER NOT NULL,
-                    sample_id BLOB NOT NULL,
                     global_sample_index INTEGER NOT NULL,
                     dataset_index INTEGER NOT NULL,
                     episode_index INTEGER NOT NULL,
                     frame_index INTEGER NOT NULL,
-                    dataset_frame_index INTEGER NOT NULL,
-                    PRIMARY KEY (shard_index, sample_id)
+                    dataset_frame_index INTEGER NOT NULL
                 ) WITHOUT ROWID
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX planned_samples_plan_order
+                ON planned_samples (cohort_index, shard_index, sample_id)
                 """
             )
 
             batch: list[tuple[Any, ...]] = []
-            for sample in iter_label_samples(context):
+            if selection_artifacts is None:
+                # Preserve the legacy call shape for existing injected and
+                # monkeypatched sample iterators.
+                sample_iterator = iter_label_samples(context)
+            else:
+                sample_iterator = iter_label_samples(
+                    context,
+                    selection_artifacts=selection_artifacts,
+                    coverage_tier=coverage_tier,
+                )
+            for sample in sample_iterator:
+                if (selection_artifacts is None) != (
+                    sample.cohort_index is None
+                ):
+                    raise RuntimeError(
+                        "label sample cohort binding disagrees with the plan"
+                    )
                 if sample.shard_index not in selected_set:
                     continue
                 identity = sample.identity
                 batch.append(
                     (
-                        sample.shard_index,
                         bytes.fromhex(sample.sample_id),
+                        -1 if sample.cohort_index is None else sample.cohort_index,
+                        sample.shard_index,
                         identity["global_sample_index"],
                         identity["dataset_index"],
                         identity["episode_index"],
@@ -332,66 +492,83 @@ def _iter_indexed_label_chunks(
             _insert_plan_index_batch(connection, batch)
             connection.commit()
 
-            for shard_index in selected:
-                cursor = connection.execute(
-                    """
-                    SELECT
-                        sample_id,
-                        global_sample_index,
-                        dataset_index,
-                        episode_index,
-                        frame_index,
-                        dataset_frame_index
-                    FROM planned_samples
-                    WHERE shard_index = ?
-                    ORDER BY sample_id
-                    """,
-                    (shard_index,),
+            cohort_rows = connection.execute(
+                "SELECT DISTINCT cohort_index FROM planned_samples "
+                "ORDER BY cohort_index"
+            )
+            cohort_indices = tuple(int(row[0]) for row in cohort_rows)
+            for indexed_cohort in cohort_indices:
+                cohort_index = None if indexed_cohort == -1 else indexed_cohort
+                cohort_root = (
+                    root
+                    if cohort_index is None
+                    else root / f"cohort-{cohort_index:05d}"
                 )
-                chunk_index = 0
-                chunk_samples: list[PlannedLabelSample] = []
-                for row in cursor:
-                    sample_id_bytes = row[0]
-                    if not isinstance(sample_id_bytes, bytes):
-                        raise RuntimeError("label plan index sample ID is corrupt")
-                    chunk_samples.append(
-                        PlannedLabelSample(
-                            sample_id=sample_id_bytes.hex(),
-                            identity={
-                                "global_sample_index": int(row[1]),
-                                "dataset_index": int(row[2]),
-                                "episode_index": int(row[3]),
-                                "frame_index": int(row[4]),
-                                "dataset_frame_index": int(row[5]),
-                            },
-                            shard_index=shard_index,
+                for shard_index in selected:
+                    cursor = connection.execute(
+                        """
+                        SELECT
+                            sample_id,
+                            global_sample_index,
+                            dataset_index,
+                            episode_index,
+                            frame_index,
+                            dataset_frame_index
+                        FROM planned_samples
+                        WHERE cohort_index = ? AND shard_index = ?
+                        ORDER BY sample_id
+                        """,
+                        (indexed_cohort, shard_index),
+                    )
+                    chunk_index = 0
+                    chunk_samples: list[PlannedLabelSample] = []
+                    for row in cursor:
+                        sample_id_bytes = row[0]
+                        if not isinstance(sample_id_bytes, bytes):
+                            raise RuntimeError(
+                                "label plan index sample ID is corrupt"
+                            )
+                        chunk_samples.append(
+                            PlannedLabelSample(
+                                sample_id=sample_id_bytes.hex(),
+                                identity={
+                                    "global_sample_index": int(row[1]),
+                                    "dataset_index": int(row[2]),
+                                    "episode_index": int(row[3]),
+                                    "frame_index": int(row[4]),
+                                    "dataset_frame_index": int(row[5]),
+                                },
+                                shard_index=shard_index,
+                                cohort_index=cohort_index,
+                            )
                         )
-                    )
-                    if len(chunk_samples) != chunk_size:
-                        continue
-                    yield LabelChunkPlan(
-                        path=(
-                            root
-                            / f"shard-{shard_index:05d}"
-                            / f"chunk-{chunk_index:08d}.json"
-                        ),
-                        shard_index=shard_index,
-                        chunk_index=chunk_index,
-                        samples=tuple(chunk_samples),
-                    )
-                    chunk_index += 1
-                    chunk_samples.clear()
-                if chunk_samples:
-                    yield LabelChunkPlan(
-                        path=(
-                            root
-                            / f"shard-{shard_index:05d}"
-                            / f"chunk-{chunk_index:08d}.json"
-                        ),
-                        shard_index=shard_index,
-                        chunk_index=chunk_index,
-                        samples=tuple(chunk_samples),
-                    )
+                        if len(chunk_samples) != chunk_size:
+                            continue
+                        yield LabelChunkPlan(
+                            path=(
+                                cohort_root
+                                / f"shard-{shard_index:05d}"
+                                / f"chunk-{chunk_index:08d}.json"
+                            ),
+                            shard_index=shard_index,
+                            chunk_index=chunk_index,
+                            samples=tuple(chunk_samples),
+                            cohort_index=cohort_index,
+                        )
+                        chunk_index += 1
+                        chunk_samples.clear()
+                    if chunk_samples:
+                        yield LabelChunkPlan(
+                            path=(
+                                cohort_root
+                                / f"shard-{shard_index:05d}"
+                                / f"chunk-{chunk_index:08d}.json"
+                            ),
+                            shard_index=shard_index,
+                            chunk_index=chunk_index,
+                            samples=tuple(chunk_samples),
+                            cohort_index=cohort_index,
+                        )
         finally:
             connection.close()
 
@@ -402,6 +579,8 @@ def iter_label_chunks(
     output_dir: str | Path,
     chunk_size: int,
     shard_indices: Sequence[int] | None = None,
+    selection_artifacts: SelectionArtifacts | None = None,
+    coverage_tier: str | None = None,
 ) -> Iterator[LabelChunkPlan]:
     """Stream deterministic fixed-size plans through a bounded disk sort.
 
@@ -412,17 +591,28 @@ def iter_label_chunks(
     plan. The temporary index is removed when iteration completes or closes.
     """
 
-    validated, root, size, selected = _validated_plan_request(
+    (
+        validated,
+        root,
+        size,
+        selected,
+        selection_artifacts,
+        coverage_tier,
+    ) = _validated_plan_request(
         context=context,
         output_dir=output_dir,
         chunk_size=chunk_size,
         shard_indices=shard_indices,
+        selection_artifacts=selection_artifacts,
+        coverage_tier=coverage_tier,
     )
     return _iter_indexed_label_chunks(
         context=validated,
         root=root,
         chunk_size=size,
         selected=selected,
+        selection_artifacts=selection_artifacts,
+        coverage_tier=coverage_tier,
     )
 
 
@@ -432,6 +622,8 @@ def plan_label_chunks(
     output_dir: str | Path,
     chunk_size: int,
     shard_indices: Sequence[int] | None = None,
+    selection_artifacts: SelectionArtifacts | None = None,
+    coverage_tier: str | None = None,
 ) -> tuple[LabelChunkPlan, ...]:
     """Materialize chunk plans for compatibility and small diagnostics.
 
@@ -445,6 +637,8 @@ def plan_label_chunks(
             output_dir=output_dir,
             chunk_size=chunk_size,
             shard_indices=shard_indices,
+            selection_artifacts=selection_artifacts,
+            coverage_tier=coverage_tier,
         )
     )
 
@@ -459,11 +653,21 @@ def _load_existing_chunk(
     plan: LabelChunkPlan,
     *,
     context: LabelArtifactContext,
+    selection_sha256: str | None = None,
 ) -> dict[str, Any]:
+    artifact_binding: dict[str, Any] = {}
+    if plan.cohort_index is not None:
+        if selection_sha256 is None:
+            raise ValueError("cohort chunk requires selection_sha256")
+        artifact_binding = {
+            "selection_sha256": selection_sha256,
+            "cohort_index": plan.cohort_index,
+        }
     payload = load_complete_label_chunk_from_context(
         plan.path,
         context=context,
         planned_sample_ids=plan.planned_sample_ids,
+        **artifact_binding,
     )
     if (
         payload["shard_index"] != plan.shard_index
@@ -622,6 +826,8 @@ def run_label_job(
     output_dir: str | Path,
     chunk_size: int,
     shard_indices: Sequence[int] | None = None,
+    selection_artifacts: SelectionArtifacts | None = None,
+    coverage_tier: str | None = None,
     dependencies: LabelJobDependencies | None = None,
     source_guard: Callable[[], None] | None = None,
 ) -> LabelJobResult:
@@ -634,6 +840,16 @@ def run_label_job(
     """
 
     context = _require_context(context)
+    selection_artifacts, coverage_tier = _validated_selection_request(
+        context,
+        selection_artifacts=selection_artifacts,
+        coverage_tier=coverage_tier,
+    )
+    selection_sha256 = (
+        None
+        if selection_artifacts is None
+        else selection_artifacts.descriptor["selection_sha256"]
+    )
     operations = dependencies or LabelJobDependencies()
     if not isinstance(operations, LabelJobDependencies):
         raise TypeError("dependencies must be a LabelJobDependencies")
@@ -659,6 +875,8 @@ def run_label_job(
         output_dir=output_dir,
         chunk_size=chunk_size,
         shard_indices=shard_indices,
+        selection_artifacts=selection_artifacts,
+        coverage_tier=coverage_tier,
     )
     written = 0
     resumed = 0
@@ -677,7 +895,11 @@ def run_label_job(
             _check_source_guard_for_plan(source_guard, plan)
 
             if _path_present(plan.path):
-                _load_existing_chunk(plan, context=context)
+                _load_existing_chunk(
+                    plan,
+                    context=context,
+                    selection_sha256=selection_sha256,
+                )
                 _check_source_guard_for_plan(source_guard, plan)
                 resumed += 1
                 continue
@@ -704,6 +926,12 @@ def run_label_job(
             # source changed while this chunk was being computed.
             _check_source_guard_for_plan(source_guard, plan)
 
+            artifact_binding: dict[str, Any] = {}
+            if plan.cohort_index is not None:
+                artifact_binding = {
+                    "selection_sha256": selection_sha256,
+                    "cohort_index": plan.cohort_index,
+                }
             published = publish_label_chunk_atomic_from_context(
                 plan.path,
                 context=context,
@@ -711,11 +939,16 @@ def run_label_job(
                 chunk_index=plan.chunk_index,
                 planned_sample_ids=plan.planned_sample_ids,
                 rows=rows,
+                **artifact_binding,
             )
             # Publication is create-if-absent. A losing worker must validate
             # the winner just as strictly as a chunk found during initial
             # resume.
-            _load_existing_chunk(plan, context=context)
+            _load_existing_chunk(
+                plan,
+                context=context,
+                selection_sha256=selection_sha256,
+            )
             if published:
                 written += 1
             else:

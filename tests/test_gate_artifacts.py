@@ -10,6 +10,7 @@ from fastwam.alignment.checkpointing import canonical_json_sha256
 from fastwam.alignment.data_identity import canonical_data_manifest_sha256
 from fastwam.gating.artifacts import (
     CHUNK_PLAN_ALGORITHM,
+    COHORT_CHUNK_PLAN_ALGORITHM,
     ValidatedMergedLabelArtifact,
     build_label_chunk,
     build_label_contract,
@@ -95,6 +96,7 @@ def _job(
     chunk_size=2,
     vae_sha256="f" * 64,
     label_runtime_config_sha256="1" * 64,
+    chunk_plan_algorithm=CHUNK_PLAN_ALGORITHM,
 ):
     manifest = _data_manifest()
     split = build_episode_split(
@@ -121,6 +123,7 @@ def _job(
         relative_margin=0.05,
         num_shards=num_shards,
         chunk_size=chunk_size,
+        chunk_plan_algorithm=chunk_plan_algorithm,
     )
     rows = []
     for index, identity in enumerate(_identities()):
@@ -161,6 +164,44 @@ def _chunks(tmp_path, *, contract, manifest, split, rows, prefix="job"):
             chunk_index=0,
             planned_sample_ids=[row["sample_id"] for row in shard_rows],
             rows=shard_rows,
+        )
+        paths.append(path)
+    return paths
+
+
+def _cohort_chunks(
+    tmp_path,
+    *,
+    contract,
+    manifest,
+    split,
+    rows,
+    selection_sha256,
+    cohort_index,
+):
+    grouped = {}
+    for row in rows:
+        grouped.setdefault(row["shard_index"], []).append(row)
+    paths = []
+    for shard_index, shard_rows in sorted(grouped.items()):
+        shard_rows.sort(key=lambda row: row["sample_id"])
+        path = (
+            tmp_path
+            / f"cohort-{cohort_index:05d}"
+            / f"shard-{shard_index:05d}"
+            / "chunk-00000000.json"
+        )
+        write_label_chunk_atomic(
+            path,
+            contract=contract,
+            data_manifest=manifest,
+            episode_split=split,
+            shard_index=shard_index,
+            chunk_index=0,
+            planned_sample_ids=[row["sample_id"] for row in shard_rows],
+            rows=shard_rows,
+            selection_sha256=selection_sha256,
+            cohort_index=cohort_index,
         )
         paths.append(path)
     return paths
@@ -213,6 +254,16 @@ def test_label_contract_is_self_hashed_and_binds_every_generation_identity():
     assert contract["vae_sha256"] == "f" * 64
     assert contract["label_runtime_config_sha256"] == "1" * 64
     assert contract["chunk_plan_algorithm"] == CHUNK_PLAN_ALGORITHM
+    assert _job(chunk_plan_algorithm=CHUNK_PLAN_ALGORITHM)[2] == contract
+    cohort_contract = _job(
+        chunk_plan_algorithm=COHORT_CHUNK_PLAN_ALGORITHM
+    )[2]
+    assert validate_label_contract(cohort_contract) == cohort_contract
+    assert (
+        cohort_contract["chunk_plan_algorithm"]
+        == COHORT_CHUNK_PLAN_ALGORITHM
+    )
+    assert cohort_contract["contract_sha256"] != contract["contract_sha256"]
     changed_plan_contract = _job(chunk_size=3)[2]
     assert changed_plan_contract["contract_sha256"] != contract["contract_sha256"]
     changed_vae_contract = _job(vae_sha256="2" * 64)[2]
@@ -360,6 +411,83 @@ def test_fixed_chunk_resume_requires_complete_self_hashed_plan(tmp_path):
         )
 
 
+def test_cohort_chunk_v2_requires_exact_selection_and_cohort_binding(tmp_path):
+    manifest, split, contract, rows = _job(
+        chunk_plan_algorithm=COHORT_CHUNK_PLAN_ALGORITHM
+    )
+    selection_sha256 = "8" * 64
+    shard = rows[0]["shard_index"]
+    shard_rows = [row for row in rows if row["shard_index"] == shard]
+    planned = [row["sample_id"] for row in shard_rows]
+    path = tmp_path / "chunk-v2.json"
+    write_label_chunk_atomic(
+        path,
+        contract=contract,
+        data_manifest=manifest,
+        episode_split=split,
+        shard_index=shard,
+        chunk_index=7,
+        planned_sample_ids=planned,
+        rows=shard_rows,
+        selection_sha256=selection_sha256,
+        cohort_index=3,
+    )
+
+    loaded = load_complete_label_chunk(
+        path,
+        contract=contract,
+        data_manifest=manifest,
+        episode_split=split,
+        planned_sample_ids=planned,
+        selection_sha256=selection_sha256,
+        cohort_index=3,
+    )
+    assert loaded["schema_version"] == 2
+    assert loaded["selection_sha256"] == selection_sha256
+    assert loaded["cohort_index"] == 3
+
+    with pytest.raises(ValueError, match="provided together"):
+        load_complete_label_chunk(
+            path,
+            contract=contract,
+            data_manifest=manifest,
+            episode_split=split,
+            selection_sha256=selection_sha256,
+        )
+    with pytest.raises(ValueError, match="requires a selection/cohort binding"):
+        load_complete_label_chunk(
+            path,
+            contract=contract,
+            data_manifest=manifest,
+            episode_split=split,
+        )
+    with pytest.raises(ValueError, match="selection SHA256 mismatch"):
+        load_complete_label_chunk(
+            path,
+            contract=contract,
+            data_manifest=manifest,
+            episode_split=split,
+            selection_sha256="9" * 64,
+            cohort_index=3,
+        )
+
+    tampered = deepcopy(loaded)
+    tampered["cohort_index"] = 4
+    unhashed = dict(tampered)
+    unhashed.pop("chunk_sha256")
+    tampered["chunk_sha256"] = canonical_json_sha256(unhashed)
+    path.write_text(json.dumps(tampered), encoding="utf-8")
+    with pytest.raises(ValueError, match="cohort_index mismatch"):
+        load_complete_label_chunk(
+            path,
+            contract=contract,
+            data_manifest=manifest,
+            episode_split=split,
+            selection_sha256=selection_sha256,
+            cohort_index=3,
+        )
+
+
 def test_merge_is_deterministic_and_validates_merged_artifact(tmp_path):
     manifest, split, contract, rows = _job()
     paths = _chunks(
@@ -402,6 +530,115 @@ def test_merge_is_deterministic_and_validates_merged_artifact(tmp_path):
         data_manifest=manifest,
         episode_split=split,
     ) == first
+
+
+def test_cohort_manifest_v2_reuses_chunks_across_coverage_expansion(tmp_path):
+    manifest, split, contract, rows = _job(
+        num_shards=1,
+        chunk_plan_algorithm=COHORT_CHUNK_PLAN_ALGORITHM,
+    )
+    selection_sha256 = "8" * 64
+    pilot_coverage_sha256 = "9" * 64
+    expanded_coverage_sha256 = "a" * 64
+    cohort_zero_rows = rows[:3]
+    cohort_one_rows = rows[3:]
+    cohort_zero_paths = _cohort_chunks(
+        tmp_path / "chunks",
+        contract=contract,
+        manifest=manifest,
+        split=split,
+        rows=cohort_zero_rows,
+        selection_sha256=selection_sha256,
+        cohort_index=0,
+    )
+    cohort_one_paths = _cohort_chunks(
+        tmp_path / "chunks",
+        contract=contract,
+        manifest=manifest,
+        split=split,
+        rows=cohort_one_rows,
+        selection_sha256=selection_sha256,
+        cohort_index=1,
+    )
+
+    pilot = merge_label_chunks(
+        cohort_zero_paths,
+        contract=contract,
+        data_manifest=manifest,
+        episode_split=split,
+        expected_sample_ids=[row["sample_id"] for row in cohort_zero_rows],
+        rows_output=tmp_path / "pilot" / "labels.jsonl",
+        manifest_output=tmp_path / "pilot" / "manifest.json",
+        selection_sha256=selection_sha256,
+        coverage_sha256=pilot_coverage_sha256,
+        active_cohort_indices=[0],
+    )
+    expanded = merge_label_chunks(
+        cohort_zero_paths + cohort_one_paths,
+        contract=contract,
+        data_manifest=manifest,
+        episode_split=split,
+        expected_sample_ids=[row["sample_id"] for row in rows],
+        rows_output=tmp_path / "expanded" / "labels.jsonl",
+        manifest_output=tmp_path / "expanded" / "manifest.json",
+        selection_sha256=selection_sha256,
+        coverage_sha256=expanded_coverage_sha256,
+        active_cohort_indices=[0, 1],
+    )
+
+    assert pilot["schema_version"] == expanded["schema_version"] == 2
+    assert pilot["selection_sha256"] == expanded["selection_sha256"]
+    assert pilot["coverage_sha256"] != expanded["coverage_sha256"]
+    assert pilot["active_cohort_indices"] == [0]
+    assert expanded["active_cohort_indices"] == [0, 1]
+    assert pilot["chunks"] == [
+        record for record in expanded["chunks"] if record["cohort_index"] == 0
+    ]
+    assert len(expanded["chunks"]) == 2
+    assert {
+        (record["cohort_index"], record["shard_index"], record["chunk_index"])
+        for record in expanded["chunks"]
+    } == {(0, 0, 0), (1, 0, 0)}
+    assert validate_merged_label_artifact(
+        tmp_path / "expanded" / "manifest.json",
+        contract=contract,
+        data_manifest=manifest,
+        episode_split=split,
+        selection_sha256=selection_sha256,
+        coverage_sha256=expanded_coverage_sha256,
+        active_cohort_indices=[0, 1],
+    ) == expanded
+
+    with pytest.raises(ValueError, match="label manifest keys differ"):
+        validate_merged_label_artifact(
+            tmp_path / "expanded" / "manifest.json",
+            contract=contract,
+            data_manifest=manifest,
+            episode_split=split,
+        )
+    with pytest.raises(ValueError, match="coverage SHA256 mismatch"):
+        validate_merged_label_artifact(
+            tmp_path / "expanded" / "manifest.json",
+            contract=contract,
+            data_manifest=manifest,
+            episode_split=split,
+            selection_sha256=selection_sha256,
+            coverage_sha256="b" * 64,
+            active_cohort_indices=[0, 1],
+        )
+    with pytest.raises(ValueError, match="duplicate label chunk cohort"):
+        merge_label_chunks(
+            cohort_zero_paths + cohort_one_paths + cohort_zero_paths,
+            contract=contract,
+            data_manifest=manifest,
+            episode_split=split,
+            expected_sample_ids=[row["sample_id"] for row in rows],
+            rows_output=tmp_path / "duplicate" / "labels.jsonl",
+            manifest_output=tmp_path / "duplicate" / "manifest.json",
+            selection_sha256=selection_sha256,
+            coverage_sha256=expanded_coverage_sha256,
+            active_cohort_indices=[0, 1],
+        )
 
 
 def test_validated_merged_loader_returns_recursive_immutable_snapshot(tmp_path):

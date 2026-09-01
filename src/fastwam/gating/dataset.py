@@ -190,6 +190,7 @@ class Stage2GateDataset(torch.utils.data.Dataset):
         data_manifest: Mapping[str, Any],
         episode_split: Mapping[str, Any],
         split: str,
+        expected_sample_ids: Sequence[str] | None = None,
     ) -> None:
         if not isinstance(robot_video_dataset, GateInputDataset):
             raise TypeError("robot_video_dataset must implement GateInputDataset")
@@ -204,6 +205,25 @@ class Stage2GateDataset(torch.utils.data.Dataset):
         ):
             raise TypeError("label_rows must be a sequence of validated rows")
 
+        normalized_expected_ids: tuple[str, ...] | None = None
+        if expected_sample_ids is not None:
+            if isinstance(expected_sample_ids, (str, bytes)) or not isinstance(
+                expected_sample_ids, Sequence
+            ):
+                raise TypeError("expected_sample_ids must be a sequence or None")
+            if not expected_sample_ids:
+                raise ValueError("expected_sample_ids must be non-empty")
+            normalized_expected_ids = tuple(
+                require_sha256(value, field="expected_sample_ids entry")
+                for value in expected_sample_ids
+            )
+            if normalized_expected_ids != tuple(
+                sorted(set(normalized_expected_ids))
+            ):
+                raise ValueError(
+                    "expected_sample_ids must be sorted and unique"
+                )
+
         lookup = build_episode_split_lookup(episode_split, data_manifest)
         manifest_size = int(data_manifest["num_frames"])
         if len(robot_video_dataset) != manifest_size:
@@ -211,49 +231,93 @@ class Stage2GateDataset(torch.utils.data.Dataset):
                 "Gate input dataset length disagrees with the data manifest: "
                 f"dataset={len(robot_video_dataset)}, manifest={manifest_size}"
             )
-        if len(label_rows) != manifest_size:
-            raise ValueError(
-                "label row coverage must be complete: "
-                f"expected {manifest_size}, got {len(label_rows)}"
-            )
 
-        ordered_rows: list[_GateRow | None] = [None] * manifest_size
-        sample_ids: set[str] = set()
-        contract_hashes: set[str] = set()
-        for artifact_row in label_rows:
-            row = _gate_row(
-                artifact_row,
-                data_manifest=data_manifest,
-                episode_split=episode_split,
-                lookup=lookup,
-            )
-            if ordered_rows[row.global_sample_index] is not None:
+        rows: list[_GateRow]
+        if normalized_expected_ids is None:
+            if len(label_rows) != manifest_size:
                 raise ValueError(
-                    "label rows contain duplicate global_sample_index values"
+                    "label row coverage must be complete: "
+                    f"expected {manifest_size}, got {len(label_rows)}"
                 )
-            if row.sample_id in sample_ids:
-                raise ValueError("label rows contain duplicate sample_id values")
-            ordered_rows[row.global_sample_index] = row
-            sample_ids.add(row.sample_id)
-            contract_hashes.add(row.contract_sha256)
-        if len(contract_hashes) != 1:
-            raise ValueError("label rows mix multiple label contracts")
 
-        rows: list[_GateRow] = []
-        for expected, row in zip(
-            _manifest_identities(data_manifest), ordered_rows, strict=True
-        ):
-            if row is None:
-                raise ValueError(
-                    "label row coverage has a missing sample identity at "
-                    f"global index {expected['global_sample_index']}"
+            ordered_rows: list[_GateRow | None] = [None] * manifest_size
+            sample_ids: set[str] = set()
+            contract_hashes: set[str] = set()
+            for artifact_row in label_rows:
+                row = _gate_row(
+                    artifact_row,
+                    data_manifest=data_manifest,
+                    episode_split=episode_split,
+                    lookup=lookup,
                 )
-            if row.identity() != expected:
-                raise ValueError(
-                    "label row coverage has a missing or drifted sample identity "
-                    f"at global index {expected['global_sample_index']}"
+                if ordered_rows[row.global_sample_index] is not None:
+                    raise ValueError(
+                        "label rows contain duplicate global_sample_index values"
+                    )
+                if row.sample_id in sample_ids:
+                    raise ValueError(
+                        "label rows contain duplicate sample_id values"
+                    )
+                ordered_rows[row.global_sample_index] = row
+                sample_ids.add(row.sample_id)
+                contract_hashes.add(row.contract_sha256)
+            if len(contract_hashes) != 1:
+                raise ValueError("label rows mix multiple label contracts")
+
+            rows = []
+            for expected, row in zip(
+                _manifest_identities(data_manifest), ordered_rows, strict=True
+            ):
+                if row is None:
+                    raise ValueError(
+                        "label row coverage has a missing sample identity at "
+                        f"global index {expected['global_sample_index']}"
+                    )
+                if row.identity() != expected:
+                    raise ValueError(
+                        "label row coverage has a missing or drifted sample identity "
+                        f"at global index {expected['global_sample_index']}"
+                    )
+                rows.append(row)
+        else:
+            subset_rows: list[_GateRow] = []
+            global_indices: set[int] = set()
+            sample_ids = set()
+            contract_hashes = set()
+            for artifact_row in label_rows:
+                row = _gate_row(
+                    artifact_row,
+                    data_manifest=data_manifest,
+                    episode_split=episode_split,
+                    lookup=lookup,
                 )
-            rows.append(row)
+                if row.global_sample_index in global_indices:
+                    raise ValueError(
+                        "label rows contain duplicate global_sample_index values"
+                    )
+                if row.sample_id in sample_ids:
+                    raise ValueError(
+                        "label rows contain duplicate sample_id values"
+                    )
+                global_indices.add(row.global_sample_index)
+                sample_ids.add(row.sample_id)
+                contract_hashes.add(row.contract_sha256)
+                subset_rows.append(row)
+
+            expected_id_set = set(normalized_expected_ids)
+            if sample_ids != expected_id_set:
+                missing = sorted(expected_id_set - sample_ids)
+                extra = sorted(sample_ids - expected_id_set)
+                raise ValueError(
+                    "label row sample IDs must exactly match "
+                    "expected_sample_ids: "
+                    f"missing={missing}, extra={extra}"
+                )
+            if len(contract_hashes) != 1:
+                raise ValueError("label rows mix multiple label contracts")
+            rows = sorted(
+                subset_rows, key=lambda row: row.global_sample_index
+            )
 
         selected_rows = tuple(row for row in rows if row.split == split)
         if not selected_rows:

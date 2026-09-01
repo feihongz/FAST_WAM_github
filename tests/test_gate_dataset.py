@@ -312,3 +312,101 @@ def test_gate_getitem_never_accesses_post_query_fields():
     item = dataset[0]
 
     assert set(item).isdisjoint(_PostQueryTrap._FORBIDDEN)
+
+
+
+def test_sparse_gate_dataset_is_exact_lazy_and_uses_global_indices(monkeypatch):
+    base, manifest, episode_split, rows = _job()
+    selected = [rows[0], rows[2]]
+    expected_ids = tuple(sorted(row["sample_id"] for row in selected))
+
+    def forbidden_manifest_expansion(_manifest):
+        raise AssertionError("sparse dataset must not expand every manifest frame")
+
+    monkeypatch.setattr(
+        "fastwam.gating.dataset._manifest_identities",
+        forbidden_manifest_expansion,
+    )
+    dataset = Stage2GateDataset(
+        base,
+        label_rows=list(reversed(selected)),
+        data_manifest=manifest,
+        episode_split=episode_split,
+        split=selected[0]["split"],
+        expected_sample_ids=expected_ids,
+    )
+
+    expected_rows = sorted(
+        (row for row in selected if row["split"] == selected[0]["split"]),
+        key=lambda row: row["global_sample_index"],
+    )
+    assert base.requests == []
+    assert dataset.sample_ids == tuple(row["sample_id"] for row in expected_rows)
+    for index in range(len(dataset)):
+        dataset[index]
+    assert base.requests == [row["global_sample_index"] for row in expected_rows]
+
+
+@pytest.mark.parametrize("mode", ["missing", "extra", "replacement"])
+def test_sparse_gate_dataset_rejects_coverage_drift(mode):
+    base, manifest, episode_split, rows = _job()
+    selected = [rows[0], rows[2]]
+    expected = sorted(row["sample_id"] for row in selected)
+    if mode == "missing":
+        artifact_rows = selected[:1]
+    elif mode == "extra":
+        artifact_rows = selected + [rows[3]]
+    else:
+        artifact_rows = [rows[0], rows[3]]
+    with pytest.raises(ValueError, match="exactly match expected_sample_ids"):
+        Stage2GateDataset(
+            base,
+            label_rows=artifact_rows,
+            data_manifest=manifest,
+            episode_split=episode_split,
+            split=selected[0]["split"],
+            expected_sample_ids=expected,
+        )
+    assert base.requests == []
+
+
+@pytest.mark.parametrize(
+    "expected_factory,error",
+    [
+        (lambda ids: [], "non-empty"),
+        (lambda ids: list(reversed(ids)), "sorted and unique"),
+        (lambda ids: [ids[0], ids[0]], "sorted and unique"),
+        (lambda ids: [ids[0].upper(), ids[1]], "lowercase hex"),
+    ],
+)
+def test_sparse_gate_dataset_rejects_invalid_expected_ids(
+    expected_factory, error
+):
+    base, manifest, episode_split, rows = _job()
+    selected = [rows[0], rows[2]]
+    ids = sorted(row["sample_id"] for row in selected)
+    with pytest.raises(ValueError, match=error):
+        Stage2GateDataset(
+            base,
+            label_rows=selected,
+            data_manifest=manifest,
+            episode_split=episode_split,
+            split=selected[0]["split"],
+            expected_sample_ids=expected_factory(ids),
+        )
+    assert base.requests == []
+
+
+def test_sparse_gate_dataset_rejects_duplicate_rows():
+    base, manifest, episode_split, rows = _job()
+    selected = [rows[0], rows[2]]
+    expected = sorted(row["sample_id"] for row in selected)
+    with pytest.raises(ValueError, match="duplicate global_sample_index"):
+        Stage2GateDataset(
+            base,
+            label_rows=[selected[0], selected[0], selected[1]],
+            data_manifest=manifest,
+            episode_split=episode_split,
+            split=selected[0]["split"],
+            expected_sample_ids=expected,
+        )

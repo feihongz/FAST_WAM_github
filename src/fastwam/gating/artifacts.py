@@ -46,13 +46,18 @@ LABEL_CONTRACT_KIND = "stage2_gate_label_contract"
 LABEL_ROW_SCHEMA_VERSION = 1
 LABEL_ROW_KIND = "stage2_gate_label_row"
 LABEL_CHUNK_SCHEMA_VERSION = 1
+LABEL_CHUNK_SCHEMA_VERSION_V2 = 2
 LABEL_CHUNK_KIND = "stage2_gate_label_chunk"
 LABEL_MANIFEST_SCHEMA_VERSION = 1
+LABEL_MANIFEST_SCHEMA_VERSION_V2 = 2
 LABEL_MANIFEST_KIND = "stage2_gate_label_manifest"
 SHARD_ALGORITHM = "sample_sha256_prefix_mod_v1"
 SEED_ALGORITHM = "stage2_pair_seed_v1"
 LABEL_RULE = "e10_lt_one_minus_margin_times_e0_v1"
 CHUNK_PLAN_ALGORITHM = "sample_id_sorted_fixed_chunks_per_shard_v1"
+COHORT_CHUNK_PLAN_ALGORITHM = (
+    "sample_id_sorted_fixed_chunks_per_cohort_shard_v1"
+)
 
 _GIT_COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 _CONTRACT_KEYS = {
@@ -107,7 +112,7 @@ _ROW_KEYS = {
     "num_video_frames",
     "shard_index",
 }
-_CHUNK_KEYS = {
+_CHUNK_KEYS_V1 = {
     "schema_version",
     "kind",
     "contract_sha256",
@@ -120,7 +125,11 @@ _CHUNK_KEYS = {
     "rows",
     "chunk_sha256",
 }
-_MANIFEST_KEYS = {
+_CHUNK_KEYS_V2 = _CHUNK_KEYS_V1 | {
+    "selection_sha256",
+    "cohort_index",
+}
+_MANIFEST_KEYS_V1 = {
     "schema_version",
     "kind",
     "contract",
@@ -134,6 +143,11 @@ _MANIFEST_KEYS = {
     "rows_file",
     "rows_file_sha256",
     "manifest_sha256",
+}
+_MANIFEST_KEYS_V2 = _MANIFEST_KEYS_V1 | {
+    "selection_sha256",
+    "coverage_sha256",
+    "active_cohort_indices",
 }
 
 
@@ -221,6 +235,68 @@ def _tiled(value: Any) -> bool:
     return value
 
 
+def _chunk_plan_algorithm(value: Any) -> str:
+    if not isinstance(value, str) or value not in {
+        CHUNK_PLAN_ALGORITHM,
+        COHORT_CHUNK_PLAN_ALGORITHM,
+    }:
+        raise ValueError("unsupported label chunk plan algorithm")
+    return str(value)
+
+
+def _optional_chunk_binding(
+    selection_sha256: Any,
+    cohort_index: Any,
+) -> tuple[str, int] | None:
+    if (selection_sha256 is None) != (cohort_index is None):
+        raise ValueError(
+            "selection_sha256 and cohort_index must be provided together"
+        )
+    if selection_sha256 is None:
+        return None
+    return (
+        require_sha256(selection_sha256, field="selection_sha256"),
+        _integer(cohort_index, field="cohort_index"),
+    )
+
+
+def _active_cohort_indices(value: Any) -> list[int]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise TypeError("active_cohort_indices must be a sequence")
+    indices = [
+        _integer(index, field="active cohort index") for index in value
+    ]
+    if not indices:
+        raise ValueError("active_cohort_indices must not be empty")
+    if indices != sorted(set(indices)):
+        raise ValueError("active_cohort_indices must be sorted and unique")
+    return indices
+
+
+def _optional_subset_binding(
+    selection_sha256: Any,
+    coverage_sha256: Any,
+    active_cohort_indices: Any,
+) -> tuple[str, str, list[int]] | None:
+    provided = (
+        selection_sha256 is not None,
+        coverage_sha256 is not None,
+        active_cohort_indices is not None,
+    )
+    if any(provided) and not all(provided):
+        raise ValueError(
+            "selection_sha256, coverage_sha256, and active_cohort_indices "
+            "must be provided together"
+        )
+    if not any(provided):
+        return None
+    return (
+        require_sha256(selection_sha256, field="selection_sha256"),
+        require_sha256(coverage_sha256, field="coverage_sha256"),
+        _active_cohort_indices(active_cohort_indices),
+    )
+
+
 def _self_sha256(payload: Mapping[str, Any], *, field: str) -> str:
     unhashed = dict(payload)
     unhashed.pop(field, None)
@@ -282,6 +358,7 @@ def build_label_contract(
     sigma_shift: float | None = None,
     rand_device: str = "cpu",
     tiled: bool = False,
+    chunk_plan_algorithm: str = CHUNK_PLAN_ALGORITHM,
 ) -> dict[str, Any]:
     """Build the immutable identity shared by every row in one label job."""
 
@@ -363,7 +440,7 @@ def build_label_contract(
             field="chunk_size",
             minimum=1,
         ),
-        "chunk_plan_algorithm": CHUNK_PLAN_ALGORITHM,
+        "chunk_plan_algorithm": _chunk_plan_algorithm(chunk_plan_algorithm),
     }
     payload["contract_sha256"] = canonical_json_sha256(payload)
     return payload
@@ -435,8 +512,7 @@ def validate_label_contract(
     if payload["shard_algorithm"] != SHARD_ALGORITHM:
         raise ValueError("unsupported label shard algorithm")
     _integer(payload["chunk_size"], field="chunk_size", minimum=1)
-    if payload["chunk_plan_algorithm"] != CHUNK_PLAN_ALGORITHM:
-        raise ValueError("unsupported label chunk plan algorithm")
+    _chunk_plan_algorithm(payload["chunk_plan_algorithm"])
 
     if (data_manifest is None) != (episode_split is None):
         raise ValueError("data_manifest and episode_split must be provided together")
@@ -732,6 +808,8 @@ def build_label_chunk(
     chunk_index: int,
     planned_sample_ids: Sequence[str],
     rows: Sequence[Mapping[str, Any]],
+    selection_sha256: str | None = None,
+    cohort_index: int | None = None,
 ) -> dict[str, Any]:
     context = build_label_artifact_context(
         contract=contract,
@@ -744,6 +822,8 @@ def build_label_chunk(
         chunk_index=chunk_index,
         planned_sample_ids=planned_sample_ids,
         rows=rows,
+        selection_sha256=selection_sha256,
+        cohort_index=cohort_index,
     )
 
 
@@ -754,10 +834,21 @@ def build_label_chunk_from_context(
     chunk_index: int,
     planned_sample_ids: Sequence[str],
     rows: Sequence[Mapping[str, Any]],
+    selection_sha256: str | None = None,
+    cohort_index: int | None = None,
 ) -> dict[str, Any]:
     if not isinstance(context, LabelArtifactContext):
         raise TypeError("context must be a LabelArtifactContext")
     contract = context.contract
+    subset_binding = _optional_chunk_binding(selection_sha256, cohort_index)
+    if subset_binding is None:
+        if contract["chunk_plan_algorithm"] != CHUNK_PLAN_ALGORITHM:
+            raise ValueError("cohort chunk plan requires a selection/cohort binding")
+        schema_version = LABEL_CHUNK_SCHEMA_VERSION
+    else:
+        if contract["chunk_plan_algorithm"] != COHORT_CHUNK_PLAN_ALGORITHM:
+            raise ValueError("selection/cohort chunks require the cohort chunk plan")
+        schema_version = LABEL_CHUNK_SCHEMA_VERSION_V2
     shard = _integer(shard_index, field="shard_index")
     if shard >= contract["num_shards"]:
         raise ValueError("shard_index is out of range")
@@ -778,7 +869,7 @@ def build_label_chunk_from_context(
     if any(row["shard_index"] != shard for row in validated_rows):
         raise ValueError("chunk contains a row assigned to another shard")
     payload: dict[str, Any] = {
-        "schema_version": LABEL_CHUNK_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "kind": LABEL_CHUNK_KIND,
         "contract_sha256": contract["contract_sha256"],
         "shard_index": shard,
@@ -789,6 +880,9 @@ def build_label_chunk_from_context(
         "rows_sha256": canonical_json_sha256(validated_rows),
         "rows": validated_rows,
     }
+    if subset_binding is not None:
+        payload["selection_sha256"] = subset_binding[0]
+        payload["cohort_index"] = subset_binding[1]
     payload["chunk_sha256"] = canonical_json_sha256(payload)
     return payload
 
@@ -800,6 +894,8 @@ def validate_label_chunk(
     data_manifest: Mapping[str, Any],
     episode_split: Mapping[str, Any],
     planned_sample_ids: Sequence[str] | None = None,
+    selection_sha256: str | None = None,
+    cohort_index: int | None = None,
 ) -> dict[str, Any]:
     context = build_label_artifact_context(
         contract=contract,
@@ -810,6 +906,8 @@ def validate_label_chunk(
         chunk,
         context=context,
         planned_sample_ids=planned_sample_ids,
+        selection_sha256=selection_sha256,
+        cohort_index=cohort_index,
     )
 
 
@@ -818,17 +916,30 @@ def validate_label_chunk_from_context(
     *,
     context: LabelArtifactContext,
     planned_sample_ids: Sequence[str] | None = None,
+    selection_sha256: str | None = None,
+    cohort_index: int | None = None,
 ) -> dict[str, Any]:
     if not isinstance(context, LabelArtifactContext):
         raise TypeError("context must be a LabelArtifactContext")
     if not isinstance(chunk, Mapping):
         raise TypeError("label chunk must be a mapping")
     payload = dict(chunk)
-    _exact_keys(payload, _CHUNK_KEYS, name="label chunk")
     contract = context.contract
+    subset_binding = _optional_chunk_binding(selection_sha256, cohort_index)
+    if subset_binding is None:
+        expected_schema = LABEL_CHUNK_SCHEMA_VERSION
+        expected_keys = _CHUNK_KEYS_V1
+        if contract["chunk_plan_algorithm"] != CHUNK_PLAN_ALGORITHM:
+            raise ValueError("cohort chunk plan requires a selection/cohort binding")
+    else:
+        expected_schema = LABEL_CHUNK_SCHEMA_VERSION_V2
+        expected_keys = _CHUNK_KEYS_V2
+        if contract["chunk_plan_algorithm"] != COHORT_CHUNK_PLAN_ALGORITHM:
+            raise ValueError("selection/cohort chunks require the cohort chunk plan")
+    _exact_keys(payload, expected_keys, name="label chunk")
     if _integer(
         payload["schema_version"], field="label chunk schema_version"
-    ) != LABEL_CHUNK_SCHEMA_VERSION:
+    ) != expected_schema:
         raise ValueError("unsupported label chunk schema_version")
     if payload["kind"] != LABEL_CHUNK_KIND:
         raise ValueError("unsupported label chunk kind")
@@ -837,6 +948,15 @@ def validate_label_chunk_from_context(
     recorded = require_sha256(payload["chunk_sha256"], field="chunk_sha256")
     if _self_sha256(payload, field="chunk_sha256") != recorded:
         raise ValueError("label chunk SHA256 does not match its contents")
+    if subset_binding is not None:
+        if require_sha256(
+            payload["selection_sha256"], field="chunk selection_sha256"
+        ) != subset_binding[0]:
+            raise ValueError("label chunk selection SHA256 mismatch")
+        if _integer(
+            payload["cohort_index"], field="label chunk cohort_index"
+        ) != subset_binding[1]:
+            raise ValueError("label chunk cohort_index mismatch")
     shard = _integer(payload["shard_index"], field="shard_index")
     if shard >= contract["num_shards"]:
         raise ValueError("label chunk shard_index is out of range")
@@ -886,6 +1006,8 @@ def write_label_chunk_atomic(
     chunk_index: int,
     planned_sample_ids: Sequence[str],
     rows: Sequence[Mapping[str, Any]],
+    selection_sha256: str | None = None,
+    cohort_index: int | None = None,
 ) -> Path:
     context = build_label_artifact_context(
         contract=contract,
@@ -899,6 +1021,8 @@ def write_label_chunk_atomic(
         chunk_index=chunk_index,
         planned_sample_ids=planned_sample_ids,
         rows=rows,
+        selection_sha256=selection_sha256,
+        cohort_index=cohort_index,
     )
 
 
@@ -910,6 +1034,8 @@ def write_label_chunk_atomic_from_context(
     chunk_index: int,
     planned_sample_ids: Sequence[str],
     rows: Sequence[Mapping[str, Any]],
+    selection_sha256: str | None = None,
+    cohort_index: int | None = None,
 ) -> Path:
     payload = build_label_chunk_from_context(
         context=context,
@@ -917,6 +1043,8 @@ def write_label_chunk_atomic_from_context(
         chunk_index=chunk_index,
         planned_sample_ids=planned_sample_ids,
         rows=rows,
+        selection_sha256=selection_sha256,
+        cohort_index=cohort_index,
     )
     return write_json_atomic(path, payload)
 
@@ -988,6 +1116,8 @@ def publish_label_chunk_atomic(
     chunk_index: int,
     planned_sample_ids: Sequence[str],
     rows: Sequence[Mapping[str, Any]],
+    selection_sha256: str | None = None,
+    cohort_index: int | None = None,
 ) -> bool:
     """Atomically publish a complete chunk without replacing an existing one.
 
@@ -1008,6 +1138,8 @@ def publish_label_chunk_atomic(
         chunk_index=chunk_index,
         planned_sample_ids=planned_sample_ids,
         rows=rows,
+        selection_sha256=selection_sha256,
+        cohort_index=cohort_index,
     )
 
 
@@ -1019,6 +1151,8 @@ def publish_label_chunk_atomic_from_context(
     chunk_index: int,
     planned_sample_ids: Sequence[str],
     rows: Sequence[Mapping[str, Any]],
+    selection_sha256: str | None = None,
+    cohort_index: int | None = None,
 ) -> bool:
     """Durably publish a chunk with an atomic POSIX no-clobber operation."""
 
@@ -1028,6 +1162,8 @@ def publish_label_chunk_atomic_from_context(
         chunk_index=chunk_index,
         planned_sample_ids=planned_sample_ids,
         rows=rows,
+        selection_sha256=selection_sha256,
+        cohort_index=cohort_index,
     )
     return publish_json_atomic_no_clobber(path, payload)
 
@@ -1039,6 +1175,8 @@ def load_complete_label_chunk(
     data_manifest: Mapping[str, Any],
     episode_split: Mapping[str, Any],
     planned_sample_ids: Sequence[str] | None = None,
+    selection_sha256: str | None = None,
+    cohort_index: int | None = None,
 ) -> dict[str, Any]:
     context = build_label_artifact_context(
         contract=contract,
@@ -1049,6 +1187,8 @@ def load_complete_label_chunk(
         path,
         context=context,
         planned_sample_ids=planned_sample_ids,
+        selection_sha256=selection_sha256,
+        cohort_index=cohort_index,
     )
 
 
@@ -1057,6 +1197,8 @@ def load_complete_label_chunk_from_context(
     *,
     context: LabelArtifactContext,
     planned_sample_ids: Sequence[str] | None = None,
+    selection_sha256: str | None = None,
+    cohort_index: int | None = None,
 ) -> dict[str, Any]:
     source = Path(path)
     try:
@@ -1069,6 +1211,8 @@ def load_complete_label_chunk_from_context(
         payload,
         context=context,
         planned_sample_ids=planned_sample_ids,
+        selection_sha256=selection_sha256,
+        cohort_index=cohort_index,
     )
 
 
@@ -1081,6 +1225,9 @@ def merge_label_chunks(
     expected_sample_ids: Sequence[str],
     rows_output: str | Path,
     manifest_output: str | Path,
+    selection_sha256: str | None = None,
+    coverage_sha256: str | None = None,
+    active_cohort_indices: Sequence[int] | None = None,
 ) -> dict[str, Any]:
     """Validate and deterministically merge a complete label job."""
 
@@ -1089,6 +1236,22 @@ def merge_label_chunks(
         data_manifest=data_manifest,
         episode_split=episode_split,
     )
+    subset_binding = _optional_subset_binding(
+        selection_sha256,
+        coverage_sha256,
+        active_cohort_indices,
+    )
+    if subset_binding is None:
+        if validated_contract["chunk_plan_algorithm"] != CHUNK_PLAN_ALGORITHM:
+            raise ValueError("cohort chunk plan requires subset manifest bindings")
+        manifest_schema_version = LABEL_MANIFEST_SCHEMA_VERSION
+    else:
+        if (
+            validated_contract["chunk_plan_algorithm"]
+            != COHORT_CHUNK_PLAN_ALGORITHM
+        ):
+            raise ValueError("subset manifest requires the cohort chunk plan")
+        manifest_schema_version = LABEL_MANIFEST_SCHEMA_VERSION_V2
     if isinstance(chunk_paths, (str, bytes)) or not isinstance(
         chunk_paths, Sequence
     ):
@@ -1107,18 +1270,50 @@ def merge_label_chunks(
         raise ValueError("expected sample IDs must be sorted and unique")
 
     chunks: list[dict[str, Any]] = []
-    chunk_keys: set[tuple[int, int]] = set()
+    chunk_keys: set[tuple[int, ...]] = set()
     rows_by_id: dict[str, dict[str, Any]] = {}
     for raw_path in chunk_paths:
-        chunk = load_complete_label_chunk(
-            raw_path,
-            contract=validated_contract,
-            data_manifest=data_manifest,
-            episode_split=episode_split,
-        )
-        key = (chunk["shard_index"], chunk["chunk_index"])
+        if subset_binding is None:
+            chunk = load_complete_label_chunk(
+                raw_path,
+                contract=validated_contract,
+                data_manifest=data_manifest,
+                episode_split=episode_split,
+            )
+            key = (chunk["shard_index"], chunk["chunk_index"])
+        else:
+            source = Path(raw_path)
+            try:
+                hint_payload = json.loads(source.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise ValueError(
+                    f"label chunk is unreadable or incomplete: {source}"
+                ) from error
+            if not isinstance(hint_payload, Mapping):
+                raise TypeError("label chunk must be a mapping")
+            hinted_cohort = _integer(
+                hint_payload.get("cohort_index"),
+                field="label chunk cohort_index",
+            )
+            if hinted_cohort not in subset_binding[2]:
+                raise ValueError("label chunk cohort is not active for this coverage")
+            chunk = load_complete_label_chunk(
+                raw_path,
+                contract=validated_contract,
+                data_manifest=data_manifest,
+                episode_split=episode_split,
+                selection_sha256=subset_binding[0],
+                cohort_index=hinted_cohort,
+            )
+            key = (
+                chunk["cohort_index"],
+                chunk["shard_index"],
+                chunk["chunk_index"],
+            )
         if key in chunk_keys:
-            raise ValueError("duplicate label chunk shard/chunk index")
+            if subset_binding is None:
+                raise ValueError("duplicate label chunk shard/chunk index")
+            raise ValueError("duplicate label chunk cohort/shard/chunk index")
         chunk_keys.add(key)
         chunks.append(chunk)
         for row in chunk["rows"]:
@@ -1162,19 +1357,42 @@ def merge_label_chunks(
         split_counts[row["split"]] += 1
         shard_counts[row["shard_index"]] += 1
         positive_count += int(row["label"])
-    chunk_records = [
-        {
-            "shard_index": chunk["shard_index"],
-            "chunk_index": chunk["chunk_index"],
-            "row_count": chunk["row_count"],
-            "chunk_sha256": chunk["chunk_sha256"],
-        }
-        for chunk in sorted(
-            chunks, key=lambda value: (value["shard_index"], value["chunk_index"])
-        )
-    ]
+    if subset_binding is None:
+        chunk_records = [
+            {
+                "shard_index": chunk["shard_index"],
+                "chunk_index": chunk["chunk_index"],
+                "row_count": chunk["row_count"],
+                "chunk_sha256": chunk["chunk_sha256"],
+            }
+            for chunk in sorted(
+                chunks,
+                key=lambda value: (
+                    value["shard_index"],
+                    value["chunk_index"],
+                ),
+            )
+        ]
+    else:
+        chunk_records = [
+            {
+                "cohort_index": chunk["cohort_index"],
+                "shard_index": chunk["shard_index"],
+                "chunk_index": chunk["chunk_index"],
+                "row_count": chunk["row_count"],
+                "chunk_sha256": chunk["chunk_sha256"],
+            }
+            for chunk in sorted(
+                chunks,
+                key=lambda value: (
+                    value["cohort_index"],
+                    value["shard_index"],
+                    value["chunk_index"],
+                ),
+            )
+        ]
     manifest: dict[str, Any] = {
-        "schema_version": LABEL_MANIFEST_SCHEMA_VERSION,
+        "schema_version": manifest_schema_version,
         "kind": LABEL_MANIFEST_KIND,
         "contract": validated_contract,
         "contract_sha256": validated_contract["contract_sha256"],
@@ -1187,6 +1405,10 @@ def merge_label_chunks(
         "rows_file": rows_path.name,
         "rows_file_sha256": sha256_file(rows_path),
     }
+    if subset_binding is not None:
+        manifest["selection_sha256"] = subset_binding[0]
+        manifest["coverage_sha256"] = subset_binding[1]
+        manifest["active_cohort_indices"] = subset_binding[2]
     manifest["manifest_sha256"] = canonical_json_sha256(manifest)
     write_json_atomic(manifest_path, manifest)
     return manifest
@@ -1198,6 +1420,9 @@ def load_validated_merged_label_artifact(
     contract: Mapping[str, Any],
     data_manifest: Mapping[str, Any],
     episode_split: Mapping[str, Any],
+    selection_sha256: str | None = None,
+    coverage_sha256: str | None = None,
+    active_cohort_indices: Sequence[int] | None = None,
 ) -> ValidatedMergedLabelArtifact:
     """Load and validate one immutable snapshot of a merged label artifact.
 
@@ -1214,10 +1439,21 @@ def load_validated_merged_label_artifact(
     if not isinstance(manifest, Mapping):
         raise TypeError("label manifest must be a mapping")
     payload = dict(manifest)
-    _exact_keys(payload, _MANIFEST_KEYS, name="label manifest")
+    subset_binding = _optional_subset_binding(
+        selection_sha256,
+        coverage_sha256,
+        active_cohort_indices,
+    )
+    if subset_binding is None:
+        expected_schema = LABEL_MANIFEST_SCHEMA_VERSION
+        expected_keys = _MANIFEST_KEYS_V1
+    else:
+        expected_schema = LABEL_MANIFEST_SCHEMA_VERSION_V2
+        expected_keys = _MANIFEST_KEYS_V2
+    _exact_keys(payload, expected_keys, name="label manifest")
     if _integer(
         payload["schema_version"], field="label manifest schema_version"
-    ) != LABEL_MANIFEST_SCHEMA_VERSION:
+    ) != expected_schema:
         raise ValueError("unsupported label manifest schema_version")
     if payload["kind"] != LABEL_MANIFEST_KIND:
         raise ValueError("unsupported label manifest kind")
@@ -1226,6 +1462,15 @@ def load_validated_merged_label_artifact(
         data_manifest=data_manifest,
         episode_split=episode_split,
     )
+    if subset_binding is None:
+        if validated_contract["chunk_plan_algorithm"] != CHUNK_PLAN_ALGORITHM:
+            raise ValueError("cohort chunk plan requires subset manifest bindings")
+    else:
+        if (
+            validated_contract["chunk_plan_algorithm"]
+            != COHORT_CHUNK_PLAN_ALGORITHM
+        ):
+            raise ValueError("subset manifest requires the cohort chunk plan")
     if payload["contract"] != validated_contract:
         raise ValueError("label manifest embeds a different label contract")
     if payload["contract_sha256"] != validated_contract["contract_sha256"]:
@@ -1233,6 +1478,20 @@ def load_validated_merged_label_artifact(
     recorded = require_sha256(payload["manifest_sha256"], field="manifest_sha256")
     if _self_sha256(payload, field="manifest_sha256") != recorded:
         raise ValueError("label manifest SHA256 does not match its contents")
+    if subset_binding is not None:
+        if require_sha256(
+            payload["selection_sha256"], field="manifest selection_sha256"
+        ) != subset_binding[0]:
+            raise ValueError("label manifest selection SHA256 mismatch")
+        if require_sha256(
+            payload["coverage_sha256"], field="manifest coverage_sha256"
+        ) != subset_binding[1]:
+            raise ValueError("label manifest coverage SHA256 mismatch")
+        if (
+            _active_cohort_indices(payload["active_cohort_indices"])
+            != subset_binding[2]
+        ):
+            raise ValueError("label manifest active cohort indices mismatch")
     rows_file = payload["rows_file"]
     if (
         not isinstance(rows_file, str)
@@ -1293,13 +1552,22 @@ def load_validated_merged_label_artifact(
     for chunk in chunks:
         if not isinstance(chunk, Mapping):
             raise TypeError("label manifest chunk record must be a mapping")
-        if set(chunk) != {
+        chunk_record_keys = {
             "shard_index",
             "chunk_index",
             "row_count",
             "chunk_sha256",
-        }:
+        }
+        if subset_binding is not None:
+            chunk_record_keys.add("cohort_index")
+        if set(chunk) != chunk_record_keys:
             raise ValueError("label manifest chunk record keys differ")
+        if subset_binding is not None:
+            cohort = _integer(
+                chunk["cohort_index"], field="manifest chunk cohort_index"
+            )
+            if cohort not in subset_binding[2]:
+                raise ValueError("label manifest chunk cohort is not active")
         shard_index = _integer(
             chunk["shard_index"], field="manifest chunk shard_index"
         )
@@ -1308,12 +1576,23 @@ def load_validated_merged_label_artifact(
         _integer(chunk["chunk_index"], field="manifest chunk chunk_index")
         _integer(chunk["row_count"], field="manifest chunk row_count")
         require_sha256(chunk["chunk_sha256"], field="manifest chunk SHA256")
-    expected_chunk_keys = sorted(
-        (chunk["shard_index"], chunk["chunk_index"]) for chunk in chunks
-    )
-    if expected_chunk_keys != [
-        (chunk["shard_index"], chunk["chunk_index"]) for chunk in chunks
-    ] or len(expected_chunk_keys) != len(set(expected_chunk_keys)):
+    if subset_binding is None:
+        chunk_keys = [
+            (chunk["shard_index"], chunk["chunk_index"]) for chunk in chunks
+        ]
+    else:
+        chunk_keys = [
+            (
+                chunk["cohort_index"],
+                chunk["shard_index"],
+                chunk["chunk_index"],
+            )
+            for chunk in chunks
+        ]
+    expected_chunk_keys = sorted(chunk_keys)
+    if expected_chunk_keys != chunk_keys or len(expected_chunk_keys) != len(
+        set(expected_chunk_keys)
+    ):
         raise ValueError("label manifest chunks must be sorted and unique")
     if sum(chunk.get("row_count", -1) for chunk in chunks) != len(validated_rows):
         raise ValueError("label manifest chunk row counts mismatch")
@@ -1329,6 +1608,9 @@ def validate_merged_label_artifact(
     contract: Mapping[str, Any],
     data_manifest: Mapping[str, Any],
     episode_split: Mapping[str, Any],
+    selection_sha256: str | None = None,
+    coverage_sha256: str | None = None,
+    active_cohort_indices: Sequence[int] | None = None,
 ) -> dict[str, Any]:
     """Validate a merged artifact and return its legacy mutable manifest."""
 
@@ -1337,18 +1619,24 @@ def validate_merged_label_artifact(
         contract=contract,
         data_manifest=data_manifest,
         episode_split=episode_split,
+        selection_sha256=selection_sha256,
+        coverage_sha256=coverage_sha256,
+        active_cohort_indices=active_cohort_indices,
     )
     return _thaw_json(artifact.manifest)
 
 
 __all__ = [
     "CHUNK_PLAN_ALGORITHM",
+    "COHORT_CHUNK_PLAN_ALGORITHM",
     "LABEL_CHUNK_KIND",
     "LABEL_CHUNK_SCHEMA_VERSION",
+    "LABEL_CHUNK_SCHEMA_VERSION_V2",
     "LABEL_CONTRACT_KIND",
     "LABEL_CONTRACT_SCHEMA_VERSION",
     "LABEL_MANIFEST_KIND",
     "LABEL_MANIFEST_SCHEMA_VERSION",
+    "LABEL_MANIFEST_SCHEMA_VERSION_V2",
     "LABEL_ROW_KIND",
     "LABEL_ROW_SCHEMA_VERSION",
     "LabelArtifactContext",

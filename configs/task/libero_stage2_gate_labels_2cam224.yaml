@@ -50,11 +50,22 @@ model:
   mot_checkpoint_mixed_attn: false
   action_dit_pretrained_path: null
 
+# The nested selection master is coverage-independent. Pilot/formal/cap jobs
+# share one cohort chunk campaign and activate different immutable prefixes.
+label_selection:
+  directory: ${oc.env:FASTWAM_LIBERO_STAGE2_SELECTION_DIR,/root/feihong/FastWAM/formal_runs/contracts/stage2/libero_nested64_stratified_v2_426b635d}
+  expected_sha256: ${oc.env:FASTWAM_LIBERO_STAGE2_SELECTION_SHA256,426b635d637a0f3e5d31dd13612ff5ad786fd5cfe9ce27b0e8689854d9aa9e9b}
+
+label_coverage:
+  tier: formal
+  expected_sha256: ${oc.env:FASTWAM_LIBERO_STAGE2_COVERAGE_SHA256,d114ac25b61ab30f18185c9ea69a33d537b5196b145a8c5c3d6f6fd9d884708f}
+
 # These fields are immutable once any label artifact has been published.
 episode_split:
+  path: ${label_selection.directory}/episode_split.json
   validation_fraction: 0.1
   split_seed: 42
-  expected_assignment_sha256: ""
+  expected_assignment_sha256: a77efa24249dab8cfacbc228b1da341947240b36fa77d90182701c07bdcf7787
 
 labeling:
   base_seed: 42

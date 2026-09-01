@@ -30,6 +30,11 @@ from fastwam.gating.artifacts import (
     validate_merged_label_artifact,
 )
 from fastwam.gating.contracts import require_sha256
+from fastwam.gating.selection import (
+    SelectionArtifacts,
+    load_selection_artifacts,
+    selected_rows_for_coverage,
+)
 from fastwam.gating.source_guard import capture_selected_source_snapshot
 from fastwam.utils.config_resolvers import register_default_resolvers
 
@@ -44,6 +49,9 @@ _ROOT_KEYS = {
     "output",
     "runtime",
 }
+_SUBSET_ROOT_KEYS = {"label_selection", "label_coverage"}
+_LABEL_SELECTION_KEYS = {"directory", "expected_sha256"}
+_LABEL_COVERAGE_KEYS = {"tier", "expected_sha256"}
 
 
 def _resolved_config(config: DictConfig | Mapping[str, Any]) -> dict[str, Any]:
@@ -52,9 +60,17 @@ def _resolved_config(config: DictConfig | Mapping[str, Any]) -> dict[str, Any]:
     payload = OmegaConf.to_container(config, resolve=True)
     if not isinstance(payload, dict):
         raise TypeError("Stage 2 merge config must resolve to a mapping")
-    if set(payload) != _ROOT_KEYS:
-        missing = sorted(_ROOT_KEYS - set(payload))
-        unexpected = sorted(set(payload) - _ROOT_KEYS)
+    keys = set(payload)
+    has_selection = "label_selection" in keys
+    has_coverage = "label_coverage" in keys
+    if has_selection != has_coverage:
+        raise ValueError(
+            "label_selection and label_coverage must be provided together"
+        )
+    expected = _ROOT_KEYS | (_SUBSET_ROOT_KEYS if has_selection else set())
+    if keys != expected:
+        missing = sorted(expected - keys)
+        unexpected = sorted(keys - expected)
         raise ValueError(
             "Stage 2 merge config fields do not match schema; "
             f"missing={missing}, unexpected={unexpected}"
@@ -166,6 +182,57 @@ def _load_identity_inputs(
     return data_manifest, episode_split, contract
 
 
+def _load_selection_binding(
+    resolved: Mapping[str, Any],
+    *,
+    data_manifest: Mapping[str, Any],
+) -> tuple[SelectionArtifacts | None, str | None, Mapping[str, Any] | None]:
+    """Load the optional committed selection and exact requested coverage."""
+
+    if "label_selection" not in resolved:
+        return None, None, None
+    selection_spec = _exact_section(
+        resolved, "label_selection", _LABEL_SELECTION_KEYS
+    )
+    coverage_spec = _exact_section(
+        resolved, "label_coverage", _LABEL_COVERAGE_KEYS
+    )
+    directory = selection_spec["directory"]
+    if not isinstance(directory, str) or not directory:
+        raise ValueError("label_selection.directory must be a non-empty path")
+    artifacts = load_selection_artifacts(
+        Path(directory).expanduser().resolve(),
+        data_manifest=data_manifest,
+    )
+    expected_selection = require_sha256(
+        selection_spec["expected_sha256"],
+        field="label selection expected_sha256",
+    )
+    actual_selection = require_sha256(
+        artifacts.descriptor.get("selection_sha256"),
+        field="label selection selection_sha256",
+    )
+    if actual_selection != expected_selection:
+        raise ValueError("Stage 2 label selection SHA256 mismatch")
+    tier = coverage_spec["tier"]
+    if not isinstance(tier, str) or not tier:
+        raise ValueError("label_coverage.tier must be a non-empty string")
+    coverage = artifacts.coverages.get(tier)
+    if coverage is None:
+        raise ValueError(f"unknown Stage 2 label coverage tier: {tier}")
+    expected_coverage = require_sha256(
+        coverage_spec["expected_sha256"],
+        field="label coverage expected_sha256",
+    )
+    actual_coverage = require_sha256(
+        coverage.get("coverage_sha256"),
+        field="label coverage coverage_sha256",
+    )
+    if actual_coverage != expected_coverage:
+        raise ValueError("Stage 2 label coverage SHA256 mismatch")
+    return artifacts, tier, coverage
+
+
 def _check_planned_chunks(
     *,
     label_job_dir: Path,
@@ -201,6 +268,99 @@ def _check_planned_chunks(
     if non_files:
         raise ValueError(f"planned label chunks are not regular files: {non_files}")
     return tuple(planned_paths)
+
+
+def _check_subset_planned_chunks(
+    *,
+    label_job_dir: Path,
+    active_plans: tuple[Any, ...],
+    known_plans: tuple[Any, ...],
+    context: Any,
+    selection_sha256: str,
+) -> tuple[Path, ...]:
+    """Require active chunks, permit valid inactive cohorts, reject unknowns."""
+
+    root = label_job_dir.resolve()
+
+    def indexed(
+        plans: tuple[Any, ...],
+        *,
+        label: str,
+    ) -> tuple[list[Path], dict[Path, Any]]:
+        ordered: list[Path] = []
+        by_path: dict[Path, Any] = {}
+        for plan in plans:
+            path = Path(plan.path).expanduser().resolve()
+            try:
+                path.relative_to(root)
+            except ValueError as error:
+                raise ValueError(
+                    f"{label} label chunk escapes label_job_dir: {path}"
+                ) from error
+            if plan.cohort_index is None:
+                raise ValueError(f"{label} subset plan has no cohort_index")
+            if path in by_path:
+                raise ValueError(f"{label} label chunk plan contains duplicate paths")
+            ordered.append(path)
+            by_path[path] = plan
+        return ordered, by_path
+
+    active_paths, active_by_path = indexed(active_plans, label="active")
+    _, known_by_path = indexed(known_plans, label="known")
+    if not set(active_by_path).issubset(known_by_path):
+        raise ValueError("active label chunk plan is not part of the master selection")
+    for path, active in active_by_path.items():
+        known = known_by_path[path]
+        if (
+            active.cohort_index != known.cohort_index
+            or active.shard_index != known.shard_index
+            or active.chunk_index != known.chunk_index
+            or active.planned_sample_ids != known.planned_sample_ids
+        ):
+            raise ValueError("active label chunk plan differs from master selection")
+
+    discovered_entries = [
+        path
+        for path in root.rglob("chunk-*.json")
+        if os.path.lexists(path)
+    ]
+    non_files = sorted(
+        str(path)
+        for path in discovered_entries
+        if path.is_symlink() or not path.is_file()
+    )
+    if non_files:
+        raise ValueError(f"planned label chunks are not regular files: {non_files}")
+    discovered = {
+        path.resolve() for path in discovered_entries
+    }
+    missing = sorted(str(path) for path in set(active_paths) - discovered)
+    unexpected = sorted(str(path) for path in discovered - set(known_by_path))
+    if missing or unexpected:
+        raise ValueError(
+            "label chunk files differ from the immutable coverage plan: "
+            f"missing={missing}, unexpected={unexpected}"
+        )
+
+    for path in sorted(discovered):
+        plan = known_by_path[path]
+        chunk = load_complete_label_chunk_from_context(
+            path,
+            context=context,
+            planned_sample_ids=plan.planned_sample_ids,
+            selection_sha256=selection_sha256,
+            cohort_index=plan.cohort_index,
+        )
+        if (
+            chunk["cohort_index"] != plan.cohort_index
+            or chunk["shard_index"] != plan.shard_index
+            or chunk["chunk_index"] != plan.chunk_index
+        ):
+            raise ValueError(
+                "label chunk coordinates differ from the immutable plan: "
+                f"path={path}"
+            )
+    return tuple(active_paths)
 
 
 def _publish_file_no_clobber(source: Path, destination: Path) -> None:
@@ -239,6 +399,15 @@ def run_merge_gate_labels(
     )
     git_identity = _validated_git_identity(runtime)
     data_manifest, episode_split, contract = _load_identity_inputs(resolved)
+    selection_artifacts, coverage_tier, coverage = _load_selection_binding(
+        resolved,
+        data_manifest=data_manifest,
+    )
+    if (
+        selection_artifacts is not None
+        and dict(selection_artifacts.episode_split) != episode_split
+    ):
+        raise ValueError("configured episode split differs from label selection")
     if contract.get("git_identity") != git_identity:
         raise RuntimeError(
             "merge Git identity differs from the label-generation contract"
@@ -260,43 +429,133 @@ def run_merge_gate_labels(
         plan_label_chunks,
     )
 
-    samples = enumerate_label_samples(context)
-    expected_sample_ids = sorted(sample.sample_id for sample in samples)
-    if len(expected_sample_ids) != len(set(expected_sample_ids)):
-        raise ValueError("label sample enumeration contains duplicate sample IDs")
-    if len(expected_sample_ids) != int(data_manifest["num_frames"]):
-        raise ValueError("label sample enumeration does not cover the data manifest")
-    plans = plan_label_chunks(
-        context=context,
-        output_dir=label_job_dir,
-        chunk_size=chunk_size,
-        shard_indices=None,
-    )
-    planned_ids = sorted(
-        sample_id
-        for plan in plans
-        for sample_id in plan.planned_sample_ids
-    )
-    if planned_ids != expected_sample_ids:
-        raise ValueError("label chunk plan does not exactly cover expected samples")
-    chunk_paths = _check_planned_chunks(
-        label_job_dir=label_job_dir,
-        plans=plans,
-    )
-    for plan, path in zip(plans, chunk_paths, strict=True):
-        chunk = load_complete_label_chunk_from_context(
-            path,
-            context=context,
-            planned_sample_ids=plan.planned_sample_ids,
-        )
-        if (
-            chunk["shard_index"] != plan.shard_index
-            or chunk["chunk_index"] != plan.chunk_index
-        ):
+    subset_merge_kwargs: dict[str, Any] = {}
+    if selection_artifacts is None:
+        samples = enumerate_label_samples(context)
+        expected_sample_ids = sorted(sample.sample_id for sample in samples)
+        if len(expected_sample_ids) != len(set(expected_sample_ids)):
+            raise ValueError("label sample enumeration contains duplicate sample IDs")
+        if len(expected_sample_ids) != int(data_manifest["num_frames"]):
             raise ValueError(
-                "label chunk coordinates differ from the immutable plan: "
-                f"path={path}"
+                "label sample enumeration does not cover the data manifest"
             )
+        plans = plan_label_chunks(
+            context=context,
+            output_dir=label_job_dir,
+            chunk_size=chunk_size,
+            shard_indices=None,
+        )
+        planned_ids = sorted(
+            sample_id
+            for plan in plans
+            for sample_id in plan.planned_sample_ids
+        )
+        if planned_ids != expected_sample_ids:
+            raise ValueError(
+                "label chunk plan does not exactly cover expected samples"
+            )
+        chunk_paths = _check_planned_chunks(
+            label_job_dir=label_job_dir,
+            plans=plans,
+        )
+        for plan, path in zip(plans, chunk_paths, strict=True):
+            chunk = load_complete_label_chunk_from_context(
+                path,
+                context=context,
+                planned_sample_ids=plan.planned_sample_ids,
+            )
+            if (
+                chunk["shard_index"] != plan.shard_index
+                or chunk["chunk_index"] != plan.chunk_index
+            ):
+                raise ValueError(
+                    "label chunk coordinates differ from the immutable plan: "
+                    f"path={path}"
+                )
+    else:
+        if coverage_tier is None or coverage is None:
+            raise RuntimeError(
+                "subset selection and coverage binding was lost after validation"
+            )
+        selection_sha256 = require_sha256(
+            selection_artifacts.descriptor["selection_sha256"],
+            field="label selection selection_sha256",
+        )
+        coverage_sha256 = require_sha256(
+            coverage["coverage_sha256"],
+            field="label coverage coverage_sha256",
+        )
+        selected_rows = selected_rows_for_coverage(
+            selection_artifacts,
+            tier=coverage_tier,
+        )
+        expected_sample_ids = sorted(row["sample_id"] for row in selected_rows)
+        if len(expected_sample_ids) != len(set(expected_sample_ids)):
+            raise ValueError("label selection contains duplicate sample IDs")
+        if len(expected_sample_ids) != coverage["sample_count"]:
+            raise ValueError("label coverage sample_count differs from selection")
+        if canonical_json_sha256(expected_sample_ids) != coverage[
+            "sample_ids_sha256"
+        ]:
+            raise ValueError("label coverage sample IDs differ from selection")
+        plans = plan_label_chunks(
+            context=context,
+            output_dir=label_job_dir,
+            chunk_size=chunk_size,
+            shard_indices=None,
+            selection_artifacts=selection_artifacts,
+            coverage_tier=coverage_tier,
+        )
+        planned_ids = sorted(
+            sample_id
+            for plan in plans
+            for sample_id in plan.planned_sample_ids
+        )
+        if planned_ids != expected_sample_ids:
+            raise ValueError(
+                "label chunk plan does not exactly cover expected samples"
+            )
+
+        coverage_tiers = selection_artifacts.descriptor["coverage_tiers"]
+        if not isinstance(coverage_tiers, list) or not coverage_tiers:
+            raise ValueError("label selection has no coverage tiers")
+        master_tier = coverage_tiers[-1]["tier"]
+        master_coverage = selection_artifacts.coverages[master_tier]
+        all_cohort_indices = [
+            row["cohort_index"]
+            for row in selection_artifacts.descriptor["cohorts"]
+        ]
+        if master_coverage["active_cohort_indices"] != all_cohort_indices:
+            raise ValueError("last label coverage does not activate every cohort")
+        known_plans = plan_label_chunks(
+            context=context,
+            output_dir=label_job_dir,
+            chunk_size=chunk_size,
+            shard_indices=None,
+            selection_artifacts=selection_artifacts,
+            coverage_tier=master_tier,
+        )
+        known_ids = sorted(
+            sample_id
+            for plan in known_plans
+            for sample_id in plan.planned_sample_ids
+        )
+        if canonical_json_sha256(known_ids) != selection_artifacts.descriptor[
+            "sample_ids_sha256"
+        ]:
+            raise ValueError("master chunk plan differs from label selection")
+        chunk_paths = _check_subset_planned_chunks(
+            label_job_dir=label_job_dir,
+            active_plans=plans,
+            known_plans=known_plans,
+            context=context,
+            selection_sha256=selection_sha256,
+        )
+        subset_merge_kwargs = {
+            "selection_sha256": selection_sha256,
+            "coverage_sha256": coverage_sha256,
+            "active_cohort_indices": coverage["active_cohort_indices"],
+        }
 
     output = _exact_section(
         resolved,
@@ -335,6 +594,7 @@ def run_merge_gate_labels(
             contract=contract,
             data_manifest=data_manifest,
             episode_split=episode_split,
+            **subset_merge_kwargs,
         )
         if existing["expected_sample_ids_sha256"] != canonical_json_sha256(
             expected_sample_ids
@@ -364,12 +624,14 @@ def run_merge_gate_labels(
             expected_sample_ids=expected_sample_ids,
             rows_output=staged_rows,
             manifest_output=staged_manifest,
+            **subset_merge_kwargs,
         )
         staged_validated = validate_merged_label_artifact(
             staged_manifest,
             contract=contract,
             data_manifest=data_manifest,
             episode_split=episode_split,
+            **subset_merge_kwargs,
         )
         if staged_validated != manifest:
             raise RuntimeError("staged merged label artifact changed during build")
@@ -393,6 +655,7 @@ def run_merge_gate_labels(
         contract=contract,
         data_manifest=data_manifest,
         episode_split=episode_split,
+        **subset_merge_kwargs,
     )
     if validated != manifest:
         raise RuntimeError("merged label artifact changed during publication")

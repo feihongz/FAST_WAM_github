@@ -3,9 +3,8 @@ set -euo pipefail
 set +m
 
 # Formal, resumable LIBERO Stage 2 E0/E10 label generation on one 8xH100
-# JiHe node. Eight independent torchrun ranks share one immutable label job;
-# the Python entrypoint deterministically assigns 8 of the 64 shards to each
-# rank when labeling.shard_indices=null.
+# JiHe node. The formal tier labels a stratified nested subset; cohort chunks
+# remain reusable when the same selection campaign expands to the cap tier.
 
 fail() {
   echo "[error] $*" >&2
@@ -70,11 +69,29 @@ readonly NORMALIZATION_STATS="/root/feihong/FastWAM/formal_runs/FAST_WAM_github/
 readonly NORMALIZATION_STATS_SHA256="30f81ad7d5076e97323e3328bce003e01a04cb21327b5bacd21bb72846768638"
 readonly VAE_CHECKPOINT="/root/feihong/FastWAM/checkpoints/Wan-AI/Wan2.2-TI2V-5B/Wan2.2_VAE.pth"
 readonly VAE_SHA256="20eb789667fa5e60e7516bf509512f6cb61f01b0aa0695eadaea930c13892b36"
-readonly SPLIT_ASSIGNMENT_SHA256="78bd013dcd49dcafb01898e4c1e8ac5d00c26bee81536a1b5ff40aebd2098704"
-readonly EXPECTED_SAMPLE_COUNT="273465"
+readonly SELECTION_DIR="${FASTWAM_LIBERO_STAGE2_SELECTION_DIR:-/root/feihong/FastWAM/formal_runs/contracts/stage2/libero_nested64_stratified_v2_426b635d}"
+readonly SELECTION_SHA256="426b635d637a0f3e5d31dd13612ff5ad786fd5cfe9ce27b0e8689854d9aa9e9b"
+readonly COVERAGE_TIER="formal"
+readonly COVERAGE_SHA256="d114ac25b61ab30f18185c9ea69a33d537b5196b145a8c5c3d6f6fd9d884708f"
+readonly EXPECTED_SAMPLE_IDS_SHA256="e1122e20a0f48fd988baad3b70eea5258f4091918460bb78a7b50c4b30924aac"
+readonly SPLIT_ASSIGNMENT_SHA256="a77efa24249dab8cfacbc228b1da341947240b36fa77d90182701c07bdcf7787"
+readonly EXPECTED_SAMPLE_COUNT="54176"
+readonly EXPECTED_TRAIN_SAMPLE_COUNT="48768"
+readonly EXPECTED_VALIDATION_SAMPLE_COUNT="5408"
 readonly NUM_SHARDS="64"
 readonly CHUNK_SIZE="64"
-readonly EXPECTED_CHUNK_COUNT="4307"
+readonly EXPECTED_CHUNK_COUNT="977"
+readonly EXPECTED_ACTIVE_COHORTS="0,1,2,4"
+readonly EXPECTED_COHORT_CHUNK_COUNTS="0:218,1:219,2:413,4:127"
+readonly EXPECTED_NONEMPTY_COHORT_SHARDS="256"
+readonly EXPECTED_RANK_SAMPLE_COUNTS="6707,6855,6771,6803,6816,6693,6770,6761"
+readonly EXPECTED_RANK_CHUNK_COUNTS="120,123,121,125,127,118,122,121"
+readonly -a ACTIVE_COHORT_DIR_NAMES=(
+  cohort-00000
+  cohort-00001
+  cohort-00002
+  cohort-00004
+)
 readonly FFMPEG_APT_VERSION="7:4.4.2-0ubuntu0.22.04.1"
 readonly FFMPEG_RUNTIME_VERSION="4.4.2-0ubuntu0.22.04.1"
 
@@ -90,7 +107,8 @@ FASTWAM_REPO_DIR="$(cd -- "${FASTWAM_REPO_DIR}" && pwd -P)"
 
 GIT_COMMIT="$(git -C "${FASTWAM_REPO_DIR}" rev-parse HEAD)"
 GIT_SHORT="${GIT_COMMIT:0:7}"
-RUN_ID="${RUN_ID:-formal_${GIT_SHORT}}"
+CAMPAIGN_ID="selection_${SELECTION_SHA256:0:8}_${GIT_SHORT}"
+RUN_ID="${RUN_ID:-${CAMPAIGN_ID}}"
 ATTEMPT_ID="${ATTEMPT_ID:-$(date -u +%Y-%m-%d_%H-%M-%S)_${BASHPID}}"
 [[ "${RUN_ID}" =~ ^[A-Za-z0-9._-]+$ ]] ||
   fail "RUN_ID may contain only letters, digits, dot, underscore, and hyphen"
@@ -108,7 +126,7 @@ JOB_DIR="$(realpath -m -- "${RAW_JOB_DIR}")"
 
 LOG_DIR="${JOB_DIR}/logs"
 ATTEMPT_LOG="${LOG_DIR}/attempt-${ATTEMPT_ID}.log"
-SUCCESS_PATH="${JOB_DIR}/generation_success.json"
+SUCCESS_PATH="${JOB_DIR}/generation_success-${COVERAGE_TIER}-${COVERAGE_SHA256:0:8}.json"
 LOCK_PATH="${JOB_DIR}/.generation.lock"
 
 export FASTWAM_LIBERO_STAGE2_LABEL_JOB="${JOB_DIR}"
@@ -120,6 +138,9 @@ export FASTWAM_LIBERO_STAGE3_DATA_MANIFEST="${DATA_MANIFEST}"
 export FASTWAM_LIBERO_STAGE3_DATA_MANIFEST_SHA256="${DATA_MANIFEST_SHA256}"
 export FASTWAM_LIBERO_STAGE3_VAE="${VAE_CHECKPOINT}"
 export FASTWAM_LIBERO_STATS="${NORMALIZATION_STATS}"
+export FASTWAM_LIBERO_STAGE2_SELECTION_DIR="${SELECTION_DIR}"
+export FASTWAM_LIBERO_STAGE2_SELECTION_SHA256="${SELECTION_SHA256}"
+export FASTWAM_LIBERO_STAGE2_COVERAGE_SHA256="${COVERAGE_SHA256}"
 export FASTWAM_FFMPEG_APT_VERSION="${FFMPEG_APT_VERSION}"
 export FASTWAM_FFMPEG_RUNTIME_VERSION="${FFMPEG_RUNTIME_VERSION}"
 
@@ -140,6 +161,14 @@ export TRANSFORMERS_OFFLINE="1"
 # torchrun owns these values. Never let a stale outer distributed job leak
 # rank identity into this single-node campaign.
 unset RANK WORLD_SIZE LOCAL_RANK LOCAL_WORLD_SIZE GROUP_RANK ROLE_RANK NODE_RANK
+
+PREPARE_COMMAND=(
+  "${PYTHON_BIN}"
+  "${FASTWAM_REPO_DIR}/scripts/prepare_gate_label_selection.py"
+  --data-manifest "${DATA_MANIFEST}"
+  --expected-manifest-sha256 "${DATA_MANIFEST_SHA256}"
+  --output-dir "${SELECTION_DIR}"
+)
 
 COMMAND=(
   "${TORCHRUN_BIN}"
@@ -163,7 +192,11 @@ COMMAND=(
   "data.train.strict_data_mode=true"
   "data_manifest.path=${DATA_MANIFEST}"
   "data_manifest.expected_sha256=${DATA_MANIFEST_SHA256}"
-  "episode_split.path=${JOB_DIR}/episode_split.json"
+  "label_selection.directory=${SELECTION_DIR}"
+  "label_selection.expected_sha256=${SELECTION_SHA256}"
+  "label_coverage.tier=${COVERAGE_TIER}"
+  "label_coverage.expected_sha256=${COVERAGE_SHA256}"
+  "episode_split.path=${SELECTION_DIR}/episode_split.json"
   "episode_split.validation_fraction=0.1"
   "episode_split.split_seed=42"
   "episode_split.expected_assignment_sha256=${SPLIT_ASSIGNMENT_SHA256}"
@@ -193,10 +226,21 @@ cat <<EOF
   topology=1x8
   world_size=8
   rank_shards=rank_r_handles_r_r+8_..._r+56
+  selection_sha256=${SELECTION_SHA256}
+  coverage_tier=${COVERAGE_TIER}
+  coverage_sha256=${COVERAGE_SHA256}
+  expected_sample_ids_sha256=${EXPECTED_SAMPLE_IDS_SHA256}
   planned_sample_count=${EXPECTED_SAMPLE_COUNT}
+  train_sample_count=${EXPECTED_TRAIN_SAMPLE_COUNT}
+  validation_sample_count=${EXPECTED_VALIDATION_SAMPLE_COUNT}
   num_shards=${NUM_SHARDS}
   chunk_size=${CHUNK_SIZE}
   planned_chunk_count=${EXPECTED_CHUNK_COUNT}
+  active_cohort_indices=${EXPECTED_ACTIVE_COHORTS}
+  cohort_chunk_counts=${EXPECTED_COHORT_CHUNK_COUNTS}
+  nonempty_cohort_shards=${EXPECTED_NONEMPTY_COHORT_SHARDS}
+  rank_sample_counts=${EXPECTED_RANK_SAMPLE_COUNTS}
+  rank_chunk_counts=${EXPECTED_RANK_CHUNK_COUNTS}
   adapter_step=30000
   adapter_sha256=${ADAPTER_SHA256}
   data_manifest_sha256=${DATA_MANIFEST_SHA256}
@@ -209,11 +253,12 @@ cat <<EOF
   output_dir=${JOB_DIR}
   attempt_log=${ATTEMPT_LOG}
   generation_success=${SUCCESS_PATH}
-  resume=same_RUN_ID_and_same_git_commit
+  resume=same_selection_and_git_campaign
   formal_merge_allowed_after_generation_success=true
   merge_completed=false
   next_step=python scripts/merge_gate_labels.py
 EOF
+print_command "${PREPARE_COMMAND[@]}"
 print_command "${COMMAND[@]}"
 
 if [[ "${FASTWAM_DRY_RUN}" == "1" ]]; then
@@ -250,8 +295,86 @@ preflight() {
     fail "untracked source/config/script/test files: ${untracked_source}"
 }
 
-preflight
 cd "${FASTWAM_REPO_DIR}"
+[[ -x "${PYTHON_BIN}" ]] || fail "missing Python environment: ${PYTHON_BIN}"
+[[ -f "${FASTWAM_REPO_DIR}/scripts/prepare_gate_label_selection.py" ]] ||
+  fail "missing selection preparation entrypoint"
+echo "[prepare] creating or validating immutable nested selection artifacts"
+"${PREPARE_COMMAND[@]}"
+"${PYTHON_BIN}" - \
+  "${SELECTION_DIR}" \
+  "${DATA_MANIFEST}" \
+  "${SELECTION_SHA256}" \
+  "${COVERAGE_TIER}" \
+  "${COVERAGE_SHA256}" \
+  "${EXPECTED_SAMPLE_IDS_SHA256}" \
+  "${SPLIT_ASSIGNMENT_SHA256}" \
+  "${EXPECTED_SAMPLE_COUNT}" \
+  "${EXPECTED_TRAIN_SAMPLE_COUNT}" \
+  "${EXPECTED_VALIDATION_SAMPLE_COUNT}" \
+  "${EXPECTED_ACTIVE_COHORTS}" <<'PY'
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import sys
+
+from fastwam.gating.selection import load_selection_artifacts
+
+
+(
+    selection_dir_raw,
+    data_manifest_raw,
+    selection_sha256,
+    coverage_tier,
+    coverage_sha256,
+    sample_ids_sha256,
+    split_assignment_sha256,
+    expected_sample_count_raw,
+    expected_train_count_raw,
+    expected_validation_count_raw,
+    expected_active_cohorts_raw,
+) = sys.argv[1:]
+manifest = json.loads(Path(data_manifest_raw).read_text(encoding="utf-8"))
+artifacts = load_selection_artifacts(
+    selection_dir_raw,
+    data_manifest=manifest,
+)
+descriptor = artifacts.descriptor
+coverage = artifacts.coverages.get(coverage_tier)
+if descriptor.get("selection_sha256") != selection_sha256:
+    raise SystemExit("prepared selection SHA256 differs from formal contract")
+if artifacts.episode_split.get("assignment_sha256") != split_assignment_sha256:
+    raise SystemExit("prepared episode split differs from formal contract")
+if not isinstance(coverage, dict):
+    raise SystemExit(f"prepared selection lacks coverage tier {coverage_tier!r}")
+if coverage.get("coverage_sha256") != coverage_sha256:
+    raise SystemExit("prepared coverage SHA256 differs from formal contract")
+if coverage.get("sample_ids_sha256") != sample_ids_sha256:
+    raise SystemExit("prepared coverage sample IDs differ from formal contract")
+if coverage.get("sample_count") != int(expected_sample_count_raw):
+    raise SystemExit("prepared coverage sample count differs from formal contract")
+expected_split_counts = {
+    "train": int(expected_train_count_raw),
+    "validation": int(expected_validation_count_raw),
+}
+if coverage.get("split_counts") != expected_split_counts:
+    raise SystemExit("prepared coverage split counts differ from formal contract")
+expected_active_cohorts = [
+    int(value) for value in expected_active_cohorts_raw.split(",")
+]
+if coverage.get("active_cohort_indices") != expected_active_cohorts:
+    raise SystemExit("prepared coverage cohorts differ from formal contract")
+print(
+    "[selection] validated "
+    f"sha256={selection_sha256} tier={coverage_tier} "
+    f"samples={coverage['sample_count']} cohorts={expected_active_cohorts}"
+)
+PY
+
+# Selection preparation is metadata-only. Run the full environment, artifact,
+# and clean-Git preflight only after its immutable receipts have been checked.
+preflight
 
 # shellcheck source=ensure_torchcodec_runtime.sh
 source "${SCRIPT_DIR}/ensure_torchcodec_runtime.sh"
@@ -285,8 +408,13 @@ progress_monitor() {
   exec 8>&-
   while sleep 300; do
     kill -0 "${LAUNCHER_PID}" 2>/dev/null || exit 0
-    local count
-    count="$(find "${JOB_DIR}" -mindepth 2 -maxdepth 2 -type f -name 'chunk-*.json' -print 2>/dev/null | wc -l | tr -d ' ')"
+    local cohort_dir count partial_count
+    count=0
+    for cohort_dir in "${ACTIVE_COHORT_DIR_NAMES[@]}"; do
+      [[ -d "${JOB_DIR}/${cohort_dir}" ]] || continue
+      partial_count="$(find "${JOB_DIR}/${cohort_dir}" -mindepth 2 -maxdepth 2 -type f -name 'chunk-*.json' -print 2>/dev/null | wc -l | tr -d ' ')"
+      count="$((count + partial_count))"
+    done
     printf '[progress] time=%s chunks=%s/%s job_dir=%s\n' \
       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
       "${count}" \
@@ -392,19 +520,31 @@ if [[ "${TEE_STATUS}" != "0" ]]; then
   fail "tee failed with exit code ${TEE_STATUS}; generation status is not accepted"
 fi
 
-echo "[verify] rebuilding canonical 64-shard plan and validating every chunk"
+echo "[verify] rebuilding canonical cohort/shard plan and validating every chunk"
 setsid "${PYTHON_BIN}" - \
   "${JOB_DIR}" \
   "${DATA_MANIFEST}" \
+  "${SELECTION_DIR}" \
   "${GIT_COMMIT}" \
   "${BASE_SHA256}" \
   "${ADAPTER_SHA256}" \
   "${DATA_MANIFEST_SHA256}" \
   "${NORMALIZATION_STATS_SHA256}" \
   "${VAE_SHA256}" \
+  "${SELECTION_SHA256}" \
+  "${COVERAGE_TIER}" \
+  "${COVERAGE_SHA256}" \
+  "${EXPECTED_SAMPLE_IDS_SHA256}" \
   "${SPLIT_ASSIGNMENT_SHA256}" \
   "${EXPECTED_SAMPLE_COUNT}" \
+  "${EXPECTED_TRAIN_SAMPLE_COUNT}" \
+  "${EXPECTED_VALIDATION_SAMPLE_COUNT}" \
   "${EXPECTED_CHUNK_COUNT}" \
+  "${EXPECTED_ACTIVE_COHORTS}" \
+  "${EXPECTED_COHORT_CHUNK_COUNTS}" \
+  "${EXPECTED_NONEMPTY_COHORT_SHARDS}" \
+  "${EXPECTED_RANK_SAMPLE_COUNTS}" \
+  "${EXPECTED_RANK_CHUNK_COUNTS}" \
   "${SUCCESS_PATH}" <<'PY' &
 from __future__ import annotations
 
@@ -421,32 +561,67 @@ from fastwam.gating.artifacts import (
     load_complete_label_chunk_from_context,
 )
 from fastwam.gating.label_job import iter_label_chunks
+from fastwam.gating.selection import load_selection_artifacts
 
 
 (
     job_dir_raw,
     data_manifest_raw,
+    selection_dir_raw,
     git_commit,
     base_sha256,
     adapter_sha256,
     data_manifest_sha256,
     stats_sha256,
     vae_sha256,
+    selection_sha256,
+    coverage_tier,
+    coverage_sha256,
+    expected_sample_ids_sha256,
     split_assignment_sha256,
     expected_sample_count_raw,
+    expected_train_count_raw,
+    expected_validation_count_raw,
     expected_chunk_count_raw,
+    expected_active_cohorts_raw,
+    expected_cohort_chunk_counts_raw,
+    expected_nonempty_cohort_shards_raw,
+    expected_rank_sample_counts_raw,
+    expected_rank_chunk_counts_raw,
     success_path_raw,
 ) = sys.argv[1:]
 job_dir = Path(job_dir_raw).resolve()
 data_manifest_path = Path(data_manifest_raw).resolve()
+selection_dir = Path(selection_dir_raw).resolve()
 success_path = Path(os.path.abspath(os.fspath(success_path_raw)))
-expected_success_path = job_dir / "generation_success.json"
+expected_success_path = (
+    job_dir / f"generation_success-{coverage_tier}-{coverage_sha256[:8]}.json"
+)
 if success_path != expected_success_path:
     raise SystemExit(f"unexpected success marker path: {success_path}")
 if success_path.parent.resolve(strict=True) != job_dir:
     raise SystemExit(f"success marker parent contains a symlink: {success_path.parent}")
 expected_sample_count = int(expected_sample_count_raw)
+expected_train_count = int(expected_train_count_raw)
+expected_validation_count = int(expected_validation_count_raw)
 expected_chunk_count = int(expected_chunk_count_raw)
+expected_active_cohorts = [
+    int(value) for value in expected_active_cohorts_raw.split(",")
+]
+expected_cohort_chunk_counts = {
+    int(cohort): int(count)
+    for cohort, count in (
+        value.split(":", maxsplit=1)
+        for value in expected_cohort_chunk_counts_raw.split(",")
+    )
+}
+expected_nonempty_cohort_shards = int(expected_nonempty_cohort_shards_raw)
+expected_rank_sample_counts = [
+    int(value) for value in expected_rank_sample_counts_raw.split(",")
+]
+expected_rank_chunk_counts = [
+    int(value) for value in expected_rank_chunk_counts_raw.split(",")
+]
 
 
 def load_mapping(path: Path, label: str) -> dict:
@@ -460,12 +635,39 @@ def load_mapping(path: Path, label: str) -> dict:
 
 
 manifest = load_mapping(data_manifest_path, "data manifest")
-split = load_mapping(job_dir / "episode_split.json", "episode split")
+selection = load_selection_artifacts(
+    selection_dir,
+    data_manifest=manifest,
+)
+split = dict(selection.episode_split)
+descriptor = selection.descriptor
+coverage = selection.coverages.get(coverage_tier)
+if descriptor.get("selection_sha256") != selection_sha256:
+    raise SystemExit("formal label selection SHA256 mismatch")
+if not isinstance(coverage, dict):
+    raise SystemExit(f"formal selection lacks coverage tier {coverage_tier!r}")
+if coverage.get("selection_sha256") != selection_sha256:
+    raise SystemExit("formal coverage does not bind the selection")
+if coverage.get("coverage_sha256") != coverage_sha256:
+    raise SystemExit("formal label coverage SHA256 mismatch")
+if coverage.get("sample_count") != expected_sample_count:
+    raise SystemExit("formal label coverage sample count mismatch")
+if coverage.get("sample_ids_sha256") != expected_sample_ids_sha256:
+    raise SystemExit("formal label coverage sample IDs SHA256 mismatch")
+if coverage.get("split_counts") != {
+    "train": expected_train_count,
+    "validation": expected_validation_count,
+}:
+    raise SystemExit("formal label coverage split counts mismatch")
+if coverage.get("active_cohort_indices") != expected_active_cohorts:
+    raise SystemExit("formal label coverage active cohorts mismatch")
+if split.get("assignment_sha256") != split_assignment_sha256:
+    raise SystemExit("formal label episode split assignment SHA256 mismatch")
+
 contract = load_mapping(job_dir / "label_contract.json", "label contract")
 runtime_config = load_mapping(
     job_dir / "label_runtime_config.json", "label runtime config"
 )
-
 expected_contract_fields = {
     "kind": "stage2_gate_label_contract",
     "schema_version": 2,
@@ -485,7 +687,9 @@ expected_contract_fields = {
     "tiled": False,
     "num_shards": 64,
     "chunk_size": 64,
-    "chunk_plan_algorithm": "sample_id_sorted_fixed_chunks_per_shard_v1",
+    "chunk_plan_algorithm": (
+        "sample_id_sorted_fixed_chunks_per_cohort_shard_v1"
+    ),
     "shard_algorithm": "sample_sha256_prefix_mod_v1",
     "seed_algorithm": "stage2_pair_seed_v1",
     "label_rule": "e10_lt_one_minus_margin_times_e0_v1",
@@ -506,10 +710,6 @@ if contract.get("git_identity") != expected_git_identity:
     raise SystemExit("formal label contract Git identity mismatch")
 if manifest.get("manifest_sha256") != data_manifest_sha256:
     raise SystemExit("formal label data manifest SHA256 mismatch")
-if int(manifest.get("num_frames", -1)) != expected_sample_count:
-    raise SystemExit("formal label data manifest sample count mismatch")
-if split.get("assignment_sha256") != split_assignment_sha256:
-    raise SystemExit("formal label episode split assignment SHA256 mismatch")
 if runtime_config.get("kind") != "stage2_label_runtime_config":
     raise SystemExit("formal label runtime kind mismatch")
 if runtime_config.get("mixed_precision") != "bf16":
@@ -528,10 +728,65 @@ context = build_label_artifact_context(
     data_manifest=manifest,
     episode_split=split,
 )
+
+
+def lexical_chunk_path(path_value: Path) -> tuple[Path, Path]:
+    # Preserve the lexical path until lstat has rejected the leaf and every
+    # ancestor symlink. Resolving first would silently accept a redirected file.
+    path = Path(os.path.abspath(os.fspath(path_value)))
+    try:
+        relative_path = path.relative_to(job_dir)
+    except ValueError as error:
+        raise SystemExit(f"planned chunk escapes label job: {path}") from error
+    return path, relative_path
+
+
+def validate_chunk(
+    path: Path,
+    *,
+    cohort_index: int,
+    shard_index: int,
+    chunk_index: int,
+    planned_sample_ids: tuple[str, ...],
+) -> tuple[Path, int]:
+    metadata = os.lstat(path)
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise SystemExit(f"planned chunk is not a regular file: {path}")
+    resolved_path = path.resolve(strict=True)
+    try:
+        resolved_path.relative_to(job_dir)
+    except ValueError as error:
+        raise SystemExit(f"planned chunk resolves outside label job: {path}") from error
+    if resolved_path != path:
+        raise SystemExit(f"planned chunk path contains a symlink: {path}")
+    chunk = load_complete_label_chunk_from_context(
+        path,
+        context=context,
+        planned_sample_ids=planned_sample_ids,
+        selection_sha256=selection_sha256,
+        cohort_index=cohort_index,
+    )
+    if (
+        chunk.get("cohort_index") != cohort_index
+        or chunk.get("shard_index") != shard_index
+        or chunk.get("chunk_index") != chunk_index
+    ):
+        raise SystemExit(f"chunk coordinates disagree with its plan: {path}")
+    rows = chunk.get("rows")
+    if not isinstance(rows, list):
+        raise SystemExit(f"chunk rows are invalid: {path}")
+    return path.relative_to(job_dir), len(rows)
+
+
 expected_paths: set[Path] = set()
-expected_shard_dirs = {f"shard-{index:05d}" for index in range(64)}
+active_bindings: dict[Path, tuple[int, int, int, tuple[str, ...]]] = {}
 missing: list[str] = []
 chunk_inventory: list[dict[str, object]] = []
+planned_sample_ids: list[str] = []
+rank_sample_counts = [0] * 8
+rank_chunk_counts = [0] * 8
+cohort_chunk_counts = {cohort: 0 for cohort in expected_active_cohorts}
+nonempty_cohort_shards: set[tuple[int, int]] = set()
 planned_samples = 0
 planned_chunks = 0
 validated_rows = 0
@@ -541,51 +796,52 @@ plans = iter_label_chunks(
     output_dir=job_dir,
     chunk_size=64,
     shard_indices=None,
+    selection_artifacts=selection,
+    coverage_tier=coverage_tier,
 )
 try:
     for plan in plans:
+        if plan.cohort_index is None:
+            raise SystemExit("formal cohort plan lacks cohort_index")
         planned_chunks += 1
         planned_samples += len(plan.samples)
-        # Preserve the lexical path until lstat has rejected the leaf symlink.
-        # Resolving first would silently turn a symlink into its target.
-        path = Path(os.path.abspath(os.fspath(plan.path)))
-        try:
-            relative_path = path.relative_to(job_dir)
-        except ValueError as error:
-            raise SystemExit(f"planned chunk escapes label job: {path}") from error
+        planned_sample_ids.extend(plan.planned_sample_ids)
+        rank = plan.shard_index % 8
+        rank_sample_counts[rank] += len(plan.samples)
+        rank_chunk_counts[rank] += 1
+        if plan.cohort_index not in cohort_chunk_counts:
+            raise SystemExit(
+                f"formal plan emitted an inactive cohort: {plan.cohort_index}"
+            )
+        cohort_chunk_counts[plan.cohort_index] += 1
+        nonempty_cohort_shards.add((plan.cohort_index, plan.shard_index))
+        path, relative_path = lexical_chunk_path(plan.path)
+        binding = (
+            plan.cohort_index,
+            plan.shard_index,
+            plan.chunk_index,
+            plan.planned_sample_ids,
+        )
+        if path in active_bindings:
+            raise SystemExit(f"canonical plan repeats a chunk path: {path}")
+        active_bindings[path] = binding
         expected_paths.add(path)
         if not os.path.lexists(path):
             missing.append(str(path))
             continue
-        metadata = os.lstat(path)
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-            raise SystemExit(f"planned chunk is not a regular file: {path}")
-        resolved_path = path.resolve(strict=True)
-        try:
-            resolved_path.relative_to(job_dir)
-        except ValueError as error:
-            raise SystemExit(f"planned chunk resolves outside label job: {path}") from error
-        if resolved_path != path:
-            raise SystemExit(f"planned chunk path contains a symlink: {path}")
-        chunk = load_complete_label_chunk_from_context(
+        relative_path, row_count = validate_chunk(
             path,
-            context=context,
+            cohort_index=plan.cohort_index,
+            shard_index=plan.shard_index,
+            chunk_index=plan.chunk_index,
             planned_sample_ids=plan.planned_sample_ids,
         )
-        if (
-            chunk.get("shard_index") != plan.shard_index
-            or chunk.get("chunk_index") != plan.chunk_index
-        ):
-            raise SystemExit(f"chunk coordinates disagree with its plan: {path}")
-        rows = chunk.get("rows")
-        if not isinstance(rows, list):
-            raise SystemExit(f"chunk rows are invalid: {path}")
-        validated_rows += len(rows)
+        validated_rows += row_count
         chunk_inventory.append(
             {
                 "relative_path": relative_path.as_posix(),
                 "chunk_sha256": sha256_file(path),
-                "row_count": len(rows),
+                "row_count": row_count,
             }
         )
 finally:
@@ -594,21 +850,81 @@ finally:
         close()
 
 if planned_samples != expected_sample_count:
-    raise SystemExit(
-        f"canonical plan sample count mismatch: {planned_samples}"
-    )
+    raise SystemExit(f"canonical plan sample count mismatch: {planned_samples}")
 if planned_chunks != expected_chunk_count:
+    raise SystemExit(f"canonical plan chunk count mismatch: {planned_chunks}")
+if rank_sample_counts != expected_rank_sample_counts:
     raise SystemExit(
-        f"canonical plan chunk count mismatch: {planned_chunks}"
+        f"canonical per-rank sample counts mismatch: {rank_sample_counts}"
     )
+if rank_chunk_counts != expected_rank_chunk_counts:
+    raise SystemExit(
+        f"canonical per-rank chunk counts mismatch: {rank_chunk_counts}"
+    )
+if cohort_chunk_counts != expected_cohort_chunk_counts:
+    raise SystemExit(
+        f"canonical per-cohort chunk counts mismatch: {cohort_chunk_counts}"
+    )
+if len(nonempty_cohort_shards) != expected_nonempty_cohort_shards:
+    raise SystemExit(
+        "canonical nonempty cohort-shard count mismatch: "
+        f"{len(nonempty_cohort_shards)}"
+    )
+if len(planned_sample_ids) != len(set(planned_sample_ids)):
+    raise SystemExit("canonical formal plan repeats sample IDs")
+if canonical_json_sha256(sorted(planned_sample_ids)) != expected_sample_ids_sha256:
+    raise SystemExit("canonical formal plan sample IDs SHA256 mismatch")
 if missing:
     raise SystemExit(
         f"formal label chunks are missing ({len(missing)}): {missing[:20]}"
     )
 
+# A campaign directory is keyed by selection+Git, not coverage. Preserve chunks
+# from known inactive cohorts so formal -> cap expansion resumes already-computed
+# work, but reject any path that is not part of the immutable master selection.
+all_cohort_indices = {int(row["cohort_index"]) for row in selection.rows}
+master_tiers = [
+    name
+    for name, candidate in selection.coverages.items()
+    if set(candidate["active_cohort_indices"]) == all_cohort_indices
+]
+if len(master_tiers) != 1:
+    raise SystemExit("selection must expose exactly one full master coverage tier")
+master_tier = master_tiers[0]
+known_bindings: dict[Path, tuple[int, int, int, tuple[str, ...]]] = {}
+master_plans = iter_label_chunks(
+    context=context,
+    output_dir=job_dir,
+    chunk_size=64,
+    shard_indices=None,
+    selection_artifacts=selection,
+    coverage_tier=master_tier,
+)
+try:
+    for plan in master_plans:
+        if plan.cohort_index is None:
+            raise SystemExit("master cohort plan lacks cohort_index")
+        path, _ = lexical_chunk_path(plan.path)
+        binding = (
+            plan.cohort_index,
+            plan.shard_index,
+            plan.chunk_index,
+            plan.planned_sample_ids,
+        )
+        if path in known_bindings:
+            raise SystemExit(f"master selection repeats a chunk path: {path}")
+        known_bindings[path] = binding
+finally:
+    close = getattr(master_plans, "close", None)
+    if callable(close):
+        close()
+for path, binding in active_bindings.items():
+    if known_bindings.get(path) != binding:
+        raise SystemExit(f"formal plan is not nested in master selection: {path}")
+
 discovered_paths: set[Path] = set()
-for candidate in job_dir.glob("shard-*/chunk-*.json"):
-    path = Path(os.path.abspath(os.fspath(candidate)))
+for candidate in job_dir.rglob("chunk-*.json"):
+    path, _ = lexical_chunk_path(candidate)
     if not os.path.lexists(path):
         continue
     metadata = os.lstat(path)
@@ -622,44 +938,44 @@ for candidate in job_dir.glob("shard-*/chunk-*.json"):
     if resolved_path != path:
         raise SystemExit(f"discovered chunk path contains a symlink: {path}")
     discovered_paths.add(path)
-extra = sorted(str(path) for path in discovered_paths - expected_paths)
-if extra:
+unknown = sorted(str(path) for path in discovered_paths - set(known_bindings))
+if unknown:
     raise SystemExit(
-        f"formal label job contains unexpected chunks ({len(extra)}): {extra[:20]}"
+        f"formal label job contains unknown chunks ({len(unknown)}): {unknown[:20]}"
     )
-if discovered_paths != expected_paths:
-    raise SystemExit("formal label discovered chunk set differs from canonical plan")
+undiscovered_active = sorted(str(path) for path in expected_paths - discovered_paths)
+if undiscovered_active:
+    raise SystemExit(
+        "formal label discovered chunk set lacks active chunks: "
+        f"{undiscovered_active[:20]}"
+    )
+for path in sorted(discovered_paths - expected_paths):
+    cohort_index, shard_index, chunk_index, sample_ids = known_bindings[path]
+    validate_chunk(
+        path,
+        cohort_index=cohort_index,
+        shard_index=shard_index,
+        chunk_index=chunk_index,
+        planned_sample_ids=sample_ids,
+    )
 
-actual_shard_dirs: set[str] = set()
-with os.scandir(job_dir) as entries:
-    for entry in entries:
-        if not entry.name.startswith("shard-"):
-            continue
-        if not entry.is_dir(follow_symlinks=False):
-            raise SystemExit(f"formal shard path is not a directory: {entry.path}")
-        actual_shard_dirs.add(entry.name)
-if actual_shard_dirs != expected_shard_dirs:
-    missing_dirs = sorted(expected_shard_dirs - actual_shard_dirs)
-    extra_dirs = sorted(actual_shard_dirs - expected_shard_dirs)
-    raise SystemExit(
-        f"formal shard directories mismatch: missing={missing_dirs}, extra={extra_dirs}"
-    )
 if validated_rows != expected_sample_count:
-    raise SystemExit(
-        f"validated label row count mismatch: {validated_rows}"
-    )
+    raise SystemExit(f"validated label row count mismatch: {validated_rows}")
 if len(chunk_inventory) != expected_chunk_count:
     raise SystemExit("formal chunk inventory count differs from canonical plan")
 chunk_inventory_sha256 = canonical_json_sha256(chunk_inventory)
 
-# This marker contains only immutable job identity and coverage. It is byte
-# stable across retries and deliberately does not claim that merge has run.
+# This marker contains only immutable formal-tier identity and coverage. It is
+# byte stable if later coverage tiers add known inactive cohort chunks.
 success = {
+    "active_cohort_indices": expected_active_cohorts,
     "adapter_checkpoint_sha256": adapter_sha256,
     "benchmark": "LIBERO",
     "chunk_count": planned_chunks,
     "chunk_inventory_sha256": chunk_inventory_sha256,
     "contract_sha256": contract["contract_sha256"],
+    "coverage_sha256": coverage_sha256,
+    "coverage_tier": coverage_tier,
     "data_manifest_sha256": data_manifest_sha256,
     "formal_merge_allowed": True,
     "git_commit": git_commit,
@@ -669,7 +985,9 @@ success = {
     "planned_chunk_count": planned_chunks,
     "planned_sample_count": planned_samples,
     "sample_count": validated_rows,
-    "schema_version": 1,
+    "sample_ids_sha256": expected_sample_ids_sha256,
+    "schema_version": 2,
+    "selection_sha256": selection_sha256,
 }
 encoded = (json.dumps(success, indent=2, sort_keys=True) + "\n").encode("utf-8")
 descriptor, temporary_raw = tempfile.mkstemp(
@@ -753,7 +1071,8 @@ finally:
 
 print(
     "[verify] canonical formal label job passed: "
-    f"samples={validated_rows} chunks={planned_chunks} shards=64"
+    f"samples={validated_rows} chunks={planned_chunks} "
+    f"cohorts={expected_active_cohorts} shards=64"
 )
 print(f"[verify] generation_success={success_path}")
 print(f"[verify] chunk_inventory_sha256={chunk_inventory_sha256}")

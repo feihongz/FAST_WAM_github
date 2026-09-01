@@ -16,6 +16,19 @@ from scripts.generate_gate_labels import _resolved_config
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TASK_NAME = "libero_stage2_gate_labels_2cam224"
 MANIFEST_SHA256 = "08da49109a57b55c67f3fa4ac31fbfa44e44dd541a194a5d3420838537d0d320"
+SELECTION_DIR = (
+    "/root/feihong/FastWAM/formal_runs/contracts/stage2/"
+    "libero_nested64_stratified_v2_426b635d"
+)
+SELECTION_SHA256 = (
+    "426b635d637a0f3e5d31dd13612ff5ad786fd5cfe9ce27b0e8689854d9aa9e9b"
+)
+FORMAL_COVERAGE_SHA256 = (
+    "d114ac25b61ab30f18185c9ea69a33d537b5196b145a8c5c3d6f6fd9d884708f"
+)
+SPLIT_ASSIGNMENT_SHA256 = (
+    "a77efa24249dab8cfacbc228b1da341947240b36fa77d90182701c07bdcf7787"
+)
 FINAL_ADAPTER_PATH = (
     "/root/feihong/FastWAM/formal_runs/stage3/full/"
     "libero_stage3_alignment_2cam224_1e-4/2026-08-30_10-29-08/"
@@ -34,6 +47,9 @@ LIBERO_ENVIRONMENT_OVERRIDES = (
     "FASTWAM_LIBERO_STATS",
     "FASTWAM_LIBERO_STAGE3_DATA_MANIFEST",
     "FASTWAM_LIBERO_STAGE3_DATA_MANIFEST_SHA256",
+    "FASTWAM_LIBERO_STAGE2_SELECTION_DIR",
+    "FASTWAM_LIBERO_STAGE2_SELECTION_SHA256",
+    "FASTWAM_LIBERO_STAGE2_COVERAGE_SHA256",
 )
 
 
@@ -114,12 +130,20 @@ def test_libero_stage2_label_task_locks_formal_contract(monkeypatch):
         "checkpoint": FINAL_ADAPTER_PATH,
         "expected_sha256": FINAL_ADAPTER_SHA256,
     }
+    assert resolved["label_selection"] == {
+        "directory": SELECTION_DIR,
+        "expected_sha256": SELECTION_SHA256,
+    }
+    assert resolved["label_coverage"] == {
+        "tier": "formal",
+        "expected_sha256": FORMAL_COVERAGE_SHA256,
+    }
 
     assert resolved["episode_split"] == {
-        "path": "/durable/formal_runs/libero/stage2/label_job/episode_split.json",
+        "path": f"{SELECTION_DIR}/episode_split.json",
         "validation_fraction": 0.1,
         "split_seed": 42,
-        "expected_assignment_sha256": "",
+        "expected_assignment_sha256": SPLIT_ASSIGNMENT_SHA256,
     }
     assert resolved["labeling"] == {
         "base_seed": 42,

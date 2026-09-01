@@ -32,6 +32,11 @@ from fastwam.gating.artifacts import (
 )
 from fastwam.gating.contracts import require_sha256
 from fastwam.gating.dataset import Stage2GateDataset
+from fastwam.gating.selection import (
+    SelectionArtifacts,
+    load_selection_artifacts,
+    selected_rows_for_coverage,
+)
 from fastwam.gating.runtime_identity import (
     collect_numerical_runtime_environment,
 )
@@ -58,6 +63,7 @@ _ROOT_KEYS = {
     "checkpoint",
     "runtime",
 }
+_SUBSET_ROOT_KEYS = _ROOT_KEYS | {"label_selection", "label_coverage"}
 _TRAINING_CONFIG_SCHEMA_VERSION = 1
 _TRAINING_CONFIG_KIND = "stage2_binary_video_gate_training_contract"
 _WRITER_LOCK_FILE = ".stage2-gate-writer.lock"
@@ -69,9 +75,17 @@ def _resolved_config(config: DictConfig | Mapping[str, Any]) -> dict[str, Any]:
     payload = OmegaConf.to_container(config, resolve=True)
     if not isinstance(payload, dict):
         raise TypeError("Stage 2 Gate training config must resolve to a mapping")
-    if set(payload) != _ROOT_KEYS:
-        missing = sorted(_ROOT_KEYS - set(payload))
-        unexpected = sorted(set(payload) - _ROOT_KEYS)
+    root_keys = set(payload)
+    has_selection = "label_selection" in root_keys
+    has_coverage = "label_coverage" in root_keys
+    if has_selection != has_coverage:
+        raise ValueError(
+            "label_selection and label_coverage must be provided together"
+        )
+    expected = _SUBSET_ROOT_KEYS if has_selection else _ROOT_KEYS
+    if root_keys != expected:
+        missing = sorted(expected - root_keys)
+        unexpected = sorted(root_keys - expected)
         raise ValueError(
             "Stage 2 Gate training config fields do not match schema; "
             f"missing={missing}, unexpected={unexpected}"
@@ -578,6 +592,64 @@ def _load_identity_inputs(
     return data_manifest, episode_split, contract
 
 
+def _load_optional_selection(
+    resolved: Mapping[str, Any],
+    *,
+    data_manifest: Mapping[str, Any],
+    episode_split: Mapping[str, Any],
+) -> tuple[
+    SelectionArtifacts | None,
+    Mapping[str, Any] | None,
+    tuple[str, ...] | None,
+]:
+    """Load the exact sparse-label coverage, or retain the legacy full path."""
+
+    has_selection = "label_selection" in resolved
+    has_coverage = "label_coverage" in resolved
+    if has_selection != has_coverage:
+        raise ValueError(
+            "label_selection and label_coverage must be provided together"
+        )
+    if not has_selection:
+        return None, None, None
+
+    selection_spec = _exact_section(
+        resolved, "label_selection", {"directory", "expected_sha256"}
+    )
+    coverage_spec = _exact_section(
+        resolved, "label_coverage", {"tier", "expected_sha256"}
+    )
+    artifacts = load_selection_artifacts(
+        selection_spec["directory"], data_manifest=data_manifest
+    )
+    expected_selection_sha = require_sha256(
+        selection_spec["expected_sha256"],
+        field="label selection expected_sha256",
+    )
+    if artifacts.descriptor["selection_sha256"] != expected_selection_sha:
+        raise ValueError("Stage 2 label selection SHA256 mismatch")
+    if dict(artifacts.episode_split) != dict(episode_split):
+        raise ValueError("Stage 2 label selection episode split mismatch")
+
+    tier = coverage_spec["tier"]
+    if not isinstance(tier, str) or not tier:
+        raise TypeError("label_coverage.tier must be a non-empty string")
+    coverage = artifacts.coverages.get(tier)
+    if coverage is None:
+        raise ValueError(f"unknown Stage 2 label coverage tier: {tier}")
+    expected_coverage_sha = require_sha256(
+        coverage_spec["expected_sha256"],
+        field="label coverage expected_sha256",
+    )
+    if coverage["coverage_sha256"] != expected_coverage_sha:
+        raise ValueError("Stage 2 label coverage SHA256 mismatch")
+    selected_rows = selected_rows_for_coverage(artifacts, tier=tier)
+    expected_sample_ids = tuple(sorted(row["sample_id"] for row in selected_rows))
+    if len(expected_sample_ids) != coverage["sample_count"]:
+        raise ValueError("Stage 2 label coverage sample count mismatch")
+    return artifacts, coverage, expected_sample_ids
+
+
 def _run_train_video_gate_resolved(
     resolved: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -600,6 +672,11 @@ def _run_train_video_gate_resolved(
         resolved["data"], repo_dir=_repo_dir(runtime)
     )
     data_manifest, episode_split, contract = _load_identity_inputs(resolved)
+    selection, coverage, expected_sample_ids = _load_optional_selection(
+        resolved,
+        data_manifest=data_manifest,
+        episode_split=episode_split,
+    )
 
     sources = _exact_section(
         resolved,
@@ -618,11 +695,20 @@ def _run_train_video_gate_resolved(
     label_manifest_spec = _exact_section(
         resolved, "label_manifest", {"path", "expected_sha256"}
     )
+    merged_binding: dict[str, Any] = {}
+    if selection is not None:
+        assert coverage is not None
+        merged_binding = {
+            "selection_sha256": selection.descriptor["selection_sha256"],
+            "coverage_sha256": coverage["coverage_sha256"],
+            "active_cohort_indices": coverage["active_cohort_indices"],
+        }
     merged = load_validated_merged_label_artifact(
         label_manifest_spec["path"],
         contract=contract,
         data_manifest=data_manifest,
         episode_split=episode_split,
+        **merged_binding,
     )
     expected_label_manifest_sha = require_sha256(
         label_manifest_spec["expected_sha256"],
@@ -666,12 +752,16 @@ def _run_train_video_gate_resolved(
     gate_source = raw_dataset.current_only()
     source_snapshot.check_stats()
     del raw_dataset
+    dataset_binding: dict[str, Any] = {}
+    if expected_sample_ids is not None:
+        dataset_binding["expected_sample_ids"] = expected_sample_ids
     train_dataset = Stage2GateDataset(
         gate_source,
         label_rows=merged.rows,
         data_manifest=data_manifest,
         episode_split=episode_split,
         split="train",
+        **dataset_binding,
     )
     val_dataset = Stage2GateDataset(
         gate_source,
@@ -679,6 +769,7 @@ def _run_train_video_gate_resolved(
         data_manifest=data_manifest,
         episode_split=episode_split,
         split="validation",
+        **dataset_binding,
     )
 
     gate_config = _exact_section(

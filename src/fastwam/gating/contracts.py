@@ -342,6 +342,19 @@ def validate_episode_split(
     data_manifest: Mapping[str, Any],
 ) -> dict[str, Any]:
     payload = dict(split)
+    if (
+        payload.get("schema_version") == 2
+        or payload.get("algorithm")
+        == "stratified_sha256_rank_largest_remainder_v2"
+    ):
+        # Local import avoids a module cycle: selection uses the shared
+        # identity helpers above, while this dispatcher makes all downstream
+        # Stage 2 contracts accept the immutable stratified split.
+        from fastwam.gating.selection import (  # pylint: disable=import-outside-toplevel
+            validate_stratified_episode_split,
+        )
+
+        return validate_stratified_episode_split(payload, data_manifest)
     expected = build_episode_split(
         data_manifest,
         validation_fraction=payload.get("validation_fraction"),

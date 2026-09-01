@@ -11,12 +11,18 @@ import torch
 from fastwam.alignment.checkpointing import canonical_json_sha256, sha256_file
 from fastwam.alignment.data_identity import canonical_data_manifest_sha256
 from fastwam.gating.artifacts import (
+    COHORT_CHUNK_PLAN_ALGORITHM,
+    LABEL_MANIFEST_SCHEMA_VERSION_V2,
     build_label_artifact_context,
     build_label_contract,
     build_label_row_from_context,
     publish_label_chunk_atomic_from_context,
 )
 from fastwam.gating.contracts import build_episode_split
+from fastwam.gating.selection import (
+    build_selection_artifacts,
+    write_selection_artifacts,
+)
 from fastwam.gating.label_job import (
     enumerate_label_samples,
     plan_label_chunks,
@@ -198,6 +204,184 @@ def _merge_job(tmp_path: Path) -> dict:
     }
 
 
+def _subset_data_manifest() -> dict:
+    roots = []
+    for dataset_index in range(2):
+        roots.append(
+            {
+                "dataset_index": dataset_index,
+                "root": f"/data/subset-{dataset_index}",
+                "selected_episodes": [0, 1],
+                "num_frames": 16,
+                "episode_boundaries": [
+                    {"episode_index": 0, "from": 0, "to": 8, "length": 8},
+                    {"episode_index": 1, "from": 8, "to": 16, "length": 8},
+                ],
+                "video_keys": [],
+                "files": [],
+            }
+        )
+    manifest = {
+        "schema_version": 1,
+        "kind": "stage3_libero_data_manifest",
+        "sampling": {},
+        "num_frames": 32,
+        "dataset_roots": roots,
+        "text_embedding_cache": {},
+        "normalization_stats": {},
+        "decoder": {},
+    }
+    manifest["manifest_sha256"] = canonical_data_manifest_sha256(manifest)
+    return manifest
+
+
+def _subset_merge_job(tmp_path: Path) -> dict:
+    data_manifest = _subset_data_manifest()
+    episode_strata = [
+        {
+            "dataset_index": dataset_index,
+            "episode_index": episode_index,
+            "stratum_id": f"root-{dataset_index}",
+        }
+        for dataset_index in range(2)
+        for episode_index in range(2)
+    ]
+    selection_artifacts = build_selection_artifacts(
+        data_manifest,
+        episode_strata=episode_strata,
+        validation_fraction=0.5,
+        split_seed=9,
+        selection_seed=11,
+        max_temporal_bins=4,
+        train_targets=(1, 2, 4),
+        validation_target=2,
+        coverage_names=("pilot", "formal", "cap"),
+    )
+    selection_dir = tmp_path / "selection"
+    write_selection_artifacts(
+        selection_dir,
+        selection_artifacts,
+        data_manifest=data_manifest,
+        episode_strata=episode_strata,
+    )
+    episode_split = dict(selection_artifacts.episode_split)
+    contract = build_label_contract(
+        data_manifest=data_manifest,
+        episode_split=episode_split,
+        base_checkpoint_sha256="a" * 64,
+        adapter_checkpoint_sha256="b" * 64,
+        normalization_stats_sha256="c" * 64,
+        data_config_sha256="d" * 64,
+        git_identity=GIT_IDENTITY,
+        base_seed=42,
+        num_seed_pairs=2,
+        relative_margin=0.05,
+        num_shards=2,
+        chunk_size=2,
+        vae_sha256="9" * 64,
+        label_runtime_config_sha256="8" * 64,
+        chunk_plan_algorithm=COHORT_CHUNK_PLAN_ALGORITHM,
+    )
+    context = build_label_artifact_context(
+        contract=contract,
+        data_manifest=data_manifest,
+        episode_split=episode_split,
+    )
+    rows_by_id = {}
+    for index, sample in enumerate(
+        enumerate_label_samples(
+            context,
+            selection_artifacts=selection_artifacts,
+            coverage_tier="cap",
+        )
+    ):
+        e10 = 0.8 if index % 2 == 0 else 1.0
+        rows_by_id[sample.sample_id] = build_label_row_from_context(
+            context=context,
+            identity=sample.identity,
+            e0=1.0,
+            e10=e10,
+            relative_gain=1.0 - e10,
+            label=e10 < 0.95,
+            sample_weight=1.0,
+            num_video_frames=5,
+        )
+
+    job_dir = tmp_path / "subset-job"
+    cap_plans = plan_label_chunks(
+        context=context,
+        output_dir=job_dir,
+        chunk_size=2,
+        selection_artifacts=selection_artifacts,
+        coverage_tier="cap",
+    )
+    for plan in cap_plans:
+        assert plan.cohort_index is not None
+        published = publish_label_chunk_atomic_from_context(
+            plan.path,
+            context=context,
+            shard_index=plan.shard_index,
+            chunk_index=plan.chunk_index,
+            planned_sample_ids=plan.planned_sample_ids,
+            rows=[rows_by_id[sample_id] for sample_id in plan.planned_sample_ids],
+            selection_sha256=selection_artifacts.descriptor["selection_sha256"],
+            cohort_index=plan.cohort_index,
+        )
+        assert published
+    formal_plans = plan_label_chunks(
+        context=context,
+        output_dir=job_dir,
+        chunk_size=2,
+        selection_artifacts=selection_artifacts,
+        coverage_tier="formal",
+    )
+
+    manifest_path = tmp_path / "subset_data_manifest.json"
+    contract_path = tmp_path / "subset_label_contract.json"
+    _write_json(manifest_path, data_manifest)
+    _write_json(contract_path, contract)
+    output_dir = tmp_path / "subset-merged"
+    coverage = selection_artifacts.coverages["formal"]
+    config = {
+        "label_job_dir": str(job_dir),
+        "data_manifest": {
+            "path": str(manifest_path),
+            "expected_sha256": data_manifest["manifest_sha256"],
+        },
+        "episode_split": {
+            "path": str(selection_dir / "episode_split.json"),
+            "expected_assignment_sha256": episode_split["assignment_sha256"],
+        },
+        "label_contract": {
+            "path": str(contract_path),
+            "expected_sha256": contract["contract_sha256"],
+        },
+        "output": {
+            "directory": str(output_dir),
+            "rows_file": "labels.jsonl",
+            "manifest_file": "manifest.json",
+            "expected_manifest_sha256": "",
+        },
+        "runtime": {"repo_dir": str(tmp_path), "require_clean_git": True},
+        "label_selection": {
+            "directory": str(selection_dir),
+            "expected_sha256": selection_artifacts.descriptor["selection_sha256"],
+        },
+        "label_coverage": {
+            "tier": "formal",
+            "expected_sha256": coverage["coverage_sha256"],
+        },
+    }
+    return {
+        "config": config,
+        "artifacts": selection_artifacts,
+        "cap_plans": cap_plans,
+        "formal_plans": formal_plans,
+        "job_dir": job_dir,
+        "output_dir": output_dir,
+    }
+
+
 def _allow_contract_git(monkeypatch) -> None:
     monkeypatch.setattr(
         merge_cli,
@@ -222,6 +406,142 @@ def test_merge_cli_validates_exact_plans_and_recovers_rows_only(
     resumed = merge_cli.run_merge_gate_labels(job["config"])
     assert resumed == first
     assert manifest_path.read_bytes() == expected_manifest_bytes
+
+
+@pytest.mark.parametrize("module", [generate_cli, merge_cli])
+def test_stage2_subset_root_fields_must_be_paired(module):
+    legacy = {key: None for key in module._ROOT_KEYS}
+    assert module._resolved_config(legacy) == legacy
+
+    subset = deepcopy(legacy)
+    subset["label_selection"] = {
+        "directory": "/selection",
+        "expected_sha256": "a" * 64,
+    }
+    subset["label_coverage"] = {
+        "tier": "formal",
+        "expected_sha256": "b" * 64,
+    }
+    assert module._resolved_config(subset) == subset
+
+    missing_coverage = deepcopy(subset)
+    missing_coverage.pop("label_coverage")
+    with pytest.raises(ValueError, match="must be provided together"):
+        module._resolved_config(missing_coverage)
+
+
+def test_generate_subset_uses_pinned_selection_split(tmp_path, monkeypatch):
+    job = _subset_merge_job(tmp_path)
+    artifacts = job["artifacts"]
+    data_manifest = _subset_data_manifest()
+    loaded, tier, coverage = generate_cli._load_selection_binding(
+        job["config"],
+        data_manifest=data_manifest,
+    )
+    assert loaded == artifacts
+    assert tier == "formal"
+    assert coverage == artifacts.coverages["formal"]
+
+    wrong_receipt = deepcopy(job["config"])
+    wrong_receipt["label_coverage"]["expected_sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="coverage SHA256 mismatch"):
+        generate_cli._load_selection_binding(
+            wrong_receipt,
+            data_manifest=data_manifest,
+        )
+
+    split_spec = {
+        "validation_fraction": artifacts.episode_split["validation_fraction"],
+        "split_seed": artifacts.episode_split["split_seed"],
+    }
+    monkeypatch.setattr(
+        generate_cli,
+        "build_episode_split",
+        lambda *_args, **_kwargs: pytest.fail(
+            "subset generation must not rebuild its episode split"
+        ),
+    )
+
+    actual = generate_cli._episode_split_for_generation(
+        data_manifest,
+        split_spec,
+        selection_artifacts=artifacts,
+    )
+
+    assert actual == artifacts.episode_split
+    drifted = dict(split_spec)
+    drifted["split_seed"] += 1
+    with pytest.raises(ValueError, match="differs from label selection"):
+        generate_cli._episode_split_for_generation(
+            _subset_data_manifest(),
+            drifted,
+            selection_artifacts=artifacts,
+        )
+
+
+def test_subset_merge_emits_v2_and_allows_known_inactive_chunks(
+    tmp_path,
+    monkeypatch,
+):
+    job = _subset_merge_job(tmp_path)
+    _allow_contract_git(monkeypatch)
+    active_paths = {plan.path for plan in job["formal_plans"]}
+    inactive_paths = {
+        plan.path for plan in job["cap_plans"]
+    } - active_paths
+    assert inactive_paths
+    assert all(path.is_file() for path in inactive_paths)
+
+    manifest = merge_cli.run_merge_gate_labels(job["config"])
+    coverage = job["artifacts"].coverages["formal"]
+
+    assert manifest["schema_version"] == LABEL_MANIFEST_SCHEMA_VERSION_V2
+    assert manifest["selection_sha256"] == job["artifacts"].descriptor[
+        "selection_sha256"
+    ]
+    assert manifest["coverage_sha256"] == coverage["coverage_sha256"]
+    assert manifest["active_cohort_indices"] == coverage[
+        "active_cohort_indices"
+    ]
+    assert manifest["row_count"] == coverage["sample_count"]
+    assert {
+        row["cohort_index"] for row in manifest["chunks"]
+    } <= set(coverage["active_cohort_indices"])
+
+
+def test_subset_merge_rejects_missing_active_and_unknown_chunks(
+    tmp_path,
+    monkeypatch,
+):
+    missing_job = _subset_merge_job(tmp_path / "missing")
+    _allow_contract_git(monkeypatch)
+    missing_job["formal_plans"][0].path.unlink()
+    with pytest.raises(ValueError, match="immutable coverage plan"):
+        merge_cli.run_merge_gate_labels(missing_job["config"])
+
+    unknown_job = _subset_merge_job(tmp_path / "unknown")
+    unknown_path = (
+        unknown_job["job_dir"]
+        / "cohort-99999"
+        / "shard-00000"
+        / "chunk-00000000.json"
+    )
+    unknown_path.parent.mkdir(parents=True)
+    unknown_path.write_bytes(unknown_job["cap_plans"][0].path.read_bytes())
+    with pytest.raises(ValueError, match="immutable coverage plan"):
+        merge_cli.run_merge_gate_labels(unknown_job["config"])
+
+
+def test_subset_merge_rejects_symlinked_chunk(tmp_path, monkeypatch):
+    job = _subset_merge_job(tmp_path)
+    _allow_contract_git(monkeypatch)
+    chunk_path = job["formal_plans"][0].path
+    external = job["job_dir"] / "external.json"
+    chunk_path.rename(external)
+    chunk_path.symlink_to(external)
+
+    with pytest.raises(ValueError, match="not regular files"):
+        merge_cli.run_merge_gate_labels(job["config"])
 
 
 def test_merge_source_drift_before_publish_leaves_no_artifact(

@@ -19,6 +19,15 @@ FINAL_ADAPTER = (
 FINAL_ADAPTER_SHA256 = (
     "cbc593bc6ce99c0249a65e5c7cef754c9a1d7ea602f81fdae2b8cb158a25858c"
 )
+SELECTION_SHA256 = (
+    "426b635d637a0f3e5d31dd13612ff5ad786fd5cfe9ce27b0e8689854d9aa9e9b"
+)
+FORMAL_COVERAGE_SHA256 = (
+    "d114ac25b61ab30f18185c9ea69a33d537b5196b145a8c5c3d6f6fd9d884708f"
+)
+FORMAL_SAMPLE_IDS_SHA256 = (
+    "e1122e20a0f48fd988baad3b70eea5258f4091918460bb78a7b50c4b30924aac"
+)
 
 
 def _run_launcher(
@@ -78,7 +87,11 @@ def test_dry_run_plans_exact_formal_eight_gpu_job_without_writes(
     assert "--nproc_per_node=auto" not in output
     assert "--max_restarts=0" in output
     assert "scripts/generate_gate_labels.py" in output
+    assert "scripts/prepare_gate_label_selection.py" in output
     assert "task=libero_stage2_gate_labels_2cam224" in output
+    assert f"label_selection.expected_sha256={SELECTION_SHA256}" in output
+    assert "label_coverage.tier=formal" in output
+    assert f"label_coverage.expected_sha256={FORMAL_COVERAGE_SHA256}" in output
     assert "labeling.num_shards=64" in output
     assert "labeling.chunk_size=64" in output
     assert "labeling.shard_indices=null" in output
@@ -86,7 +99,15 @@ def test_dry_run_plans_exact_formal_eight_gpu_job_without_writes(
     assert "runtime.require_clean_git=true" in output
     assert f"output_dir={expected_output}" in output
     assert str(storage_root) in output
-    assert "generation_success.json" in output
+    assert "generation_success-formal-d114ac25.json" in output
+    assert "planned_sample_count=54176" in output
+    assert "train_sample_count=48768" in output
+    assert "validation_sample_count=5408" in output
+    assert "planned_chunk_count=977" in output
+    assert "active_cohort_indices=0,1,2,4" in output
+    assert "cohort_chunk_counts=0:218,1:219,2:413,4:127" in output
+    assert "nonempty_cohort_shards=256" in output
+    assert FORMAL_SAMPLE_IDS_SHA256 in output
     assert "merge_completed=false" in output
     assert "merge_gate_labels.py" in output
     assert "ffmpeg_apt_version=7:4.4.2-0ubuntu0.22.04.1" in output
@@ -113,7 +134,7 @@ def test_default_run_id_is_stable_for_same_commit_resume(tmp_path: Path) -> None
     ).stdout.strip()
     expected_job_dir = (
         f"{storage_root}/FastWAM/formal_runs/stage2/labels/"
-        f"libero_stage2_gate_labels_2cam224/formal_{git_short}"
+        f"libero_stage2_gate_labels_2cam224/selection_426b635d_{git_short}"
     )
 
     first = _run_launcher(environment=environment)
@@ -123,7 +144,7 @@ def test_default_run_id_is_stable_for_same_commit_resume(tmp_path: Path) -> None
         assert result.returncode == 0, result.stderr
         output = _unescape_printed_shell_arguments(result.stdout + result.stderr)
         assert f"output_dir={expected_job_dir}" in output
-        assert f"run_id=formal_{git_short}" in output
+        assert f"run_id=selection_426b635d_{git_short}" in output
         assert "--nproc_per_node=8" in output
     # Attempt-log names may vary, but the immutable/resumable job directory may not.
     assert not storage_root.exists()
@@ -235,14 +256,39 @@ def test_dry_run_locks_final_adapter_and_formal_contract(tmp_path: Path) -> None
 def test_launcher_declares_strict_generation_receipt_before_formal_merge() -> None:
     script = LAUNCHER.read_text(encoding="utf-8")
 
-    assert "generation_success.json" in script
+    assert "generation_success-${COVERAGE_TIER}-${COVERAGE_SHA256:0:8}.json" in script
     assert "merge_completed" in script
     assert "merge_completed=false" in script
     assert "planned_sample_count" in script
-    assert "273465" in script
+    assert 'readonly EXPECTED_SAMPLE_COUNT="54176"' in script
+    assert 'readonly EXPECTED_TRAIN_SAMPLE_COUNT="48768"' in script
+    assert 'readonly EXPECTED_VALIDATION_SAMPLE_COUNT="5408"' in script
+    assert 'readonly EXPECTED_SAMPLE_COUNT="273465"' not in script
     assert "planned_chunk_count" in script
-    assert "4307" in script
+    assert 'readonly EXPECTED_CHUNK_COUNT="977"' in script
+    assert 'readonly EXPECTED_CHUNK_COUNT="4307"' not in script
+    assert "sample_id_sorted_fixed_chunks_per_cohort_shard_v1" in script
+    assert 'job_dir.rglob("chunk-*.json")' in script
+    assert "known inactive cohorts" in script
+    assert "selection_sha256" in script
+    assert "coverage_sha256" in script
+    assert '"schema_version": 2' in script
     assert "merge_gate_labels.py" in script
+
+
+def test_launcher_prepares_selection_before_full_preflight_and_model_load() -> None:
+    script = LAUNCHER.read_text(encoding="utf-8")
+
+    prepare_call = '\n"${PREPARE_COMMAND[@]}"\n'
+    preflight_call = "\npreflight\n"
+    model_launch = 'setsid "${COMMAND[@]}"'
+    assert prepare_call in script
+    assert script.index(prepare_call) < script.index(preflight_call)
+    assert script.index(preflight_call) < script.index(model_launch)
+    assert "load_selection_artifacts" in script
+    assert SELECTION_SHA256 in script
+    assert FORMAL_COVERAGE_SHA256 in script
+    assert FORMAL_SAMPLE_IDS_SHA256 in script
 
 
 def test_launcher_guards_verifier_signals_and_receipt_symlinks() -> None:
