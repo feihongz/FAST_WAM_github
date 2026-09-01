@@ -3,6 +3,7 @@
 defaults:
   - _self_
   - data: null
+  - task: null
 
 output_dir: ???
 

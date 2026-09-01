@@ -221,6 +221,38 @@ data manifest 和输出目录。不要把 LIBERO chunk 与 RoboTwin chunk 放进
 
 ## 第三步：只训练 BinaryVideoGate
 
+当前已合并的 LIBERO formal 子集先运行完整一轮单卡验收：
+
+```bash
+bash /root/feihong/FAST_WAM_github/scripts/jihe/run_libero_stage2_gate_smoke
+```
+
+这个短入口固定消费 `selection_426b635d_d75c04a_formal_d114ac25`，使用普通单进程
+Python（不能用 torchrun），在一张 H100 上训练 1 epoch：48,768 个 train 样本、5,408 个
+validation 样本、batch 64、共 762 次更新。它只实例化 658,977 参数的
+`BinaryVideoGate`；5B base 和 Stage 3 Adapter 只校验 SHA，不加载权重。视频解码期间每
+60 秒输出一次 heartbeat，完整 epoch 结束后才发布训练指标。
+
+验收通过必须同时得到：
+
+```text
+gate_run/run_identity.json
+gate_run/training_state.pt
+gate_run/gate_best.pt
+gate_run/gate_last.pt
+gate_run/summary.json
+verification_receipt.json
+```
+
+验收器会严格加载 best/last 两份 Gate export，检查 epoch/step、样本数、有限指标、参数量、
+当前 clean Git 身份以及 label/base/Adapter/data/split 的全部哈希绑定；同时重算完整训练
+contract 的 canonical SHA，并用正式标签类别计数重建 Gate/AdamW，真实恢复
+`training_state.pt`。恢复后会核对 optimizer 的 762 step、best/last 权重，并额外执行一次
+不落盘的 synthetic update，确认状态确实能够继续训练。该 1-epoch smoke 的训练身份与正式
+20-epoch run 不同，不能把 smoke checkpoint 直接续成正式训练。
+
+通用的显式 Gate 命令仍如下；正式 launcher 应从新目录 fresh 启动：
+
 ```bash
 export FASTWAM_LABEL_MANIFEST_SHA256=LABEL_MANIFEST_SHA256
 
