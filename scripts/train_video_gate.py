@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import fcntl
 import json
 import os
@@ -18,7 +18,9 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 import numpy as np
 import torch
+from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 
 from fastwam.alignment.checkpointing import (
     canonical_json_sha256,
@@ -32,6 +34,7 @@ from fastwam.gating.artifacts import (
 )
 from fastwam.gating.contracts import require_sha256
 from fastwam.gating.dataset import Stage2GateDataset
+from fastwam.gating.distributed import DistributedGateContext
 from fastwam.gating.selection import (
     SelectionArtifacts,
     load_selection_artifacts,
@@ -65,6 +68,7 @@ _ROOT_KEYS = {
 }
 _SUBSET_ROOT_KEYS = _ROOT_KEYS | {"label_selection", "label_coverage"}
 _TRAINING_CONFIG_SCHEMA_VERSION = 1
+_DISTRIBUTED_TRAINING_CONFIG_SCHEMA_VERSION = 2
 _TRAINING_CONFIG_KIND = "stage2_binary_video_gate_training_contract"
 _WRITER_LOCK_FILE = ".stage2-gate-writer.lock"
 
@@ -358,13 +362,53 @@ def build_training_config_contract(
     training: Mapping[str, Any],
     runtime: Mapping[str, Any],
     numerical_runtime: Mapping[str, Any],
+    distributed_context: DistributedGateContext | None = None,
 ) -> dict[str, Any]:
     """Return the stable, resume-bound training semantics (no output paths)."""
 
     if not isinstance(numerical_runtime, Mapping):
         raise TypeError("numerical_runtime must be a mapping")
+    distributed: dict[str, Any] | None = None
+    dataloader_seed_algorithm = "base_seed_plus_zero_based_epoch_v1"
+    schema_version = _TRAINING_CONFIG_SCHEMA_VERSION
+    if distributed_context is not None:
+        global_batch_size = _positive_int(
+            training["batch_size"], field="training.batch_size"
+        )
+        if global_batch_size % distributed_context.world_size != 0:
+            raise ValueError(
+                "distributed global batch size must be divisible by world_size"
+            )
+        per_rank_batch_size = global_batch_size // distributed_context.world_size
+        schema_version = _DISTRIBUTED_TRAINING_CONFIG_SCHEMA_VERSION
+        dataloader_seed_algorithm = (
+            "distributed_sampler_base_seed_plus_zero_based_epoch_v1"
+        )
+        distributed = {
+            "backend": distributed_context.backend,
+            "world_size": distributed_context.world_size,
+            "global_batch_size": global_batch_size,
+            "per_rank_batch_size": per_rank_batch_size,
+            "sampler_algorithm": (
+                "torch_distributed_sampler_exact_divisible_v1"
+            ),
+            "objective_reduction_algorithm": (
+                "global_weighted_mean_all_reduce_v1"
+            ),
+            "metric_reduction_algorithm": (
+                "variable_length_all_gather_rank_order_v1"
+            ),
+            "device_visibility_algorithm": (
+                "one_visible_cuda_device_per_rank_v1"
+            ),
+            "worker_seed_algorithm": (
+                "base_plus_epoch_plus_rank_times_10000000_v1"
+            ),
+            "checkpoint_writer_rank": 0,
+            "rng_state_algorithm": "distributed_per_rank_rng_v1",
+        }
     payload = {
-        "schema_version": _TRAINING_CONFIG_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "kind": _TRAINING_CONFIG_KIND,
         "data": dict(data),
         "gate": dict(gate),
@@ -375,8 +419,10 @@ def build_training_config_contract(
             "deterministic_algorithms": runtime["deterministic_algorithms"],
             "numerical_runtime": dict(numerical_runtime),
         },
-        "dataloader_seed_algorithm": "base_seed_plus_zero_based_epoch_v1",
+        "dataloader_seed_algorithm": dataloader_seed_algorithm,
     }
+    if distributed is not None:
+        payload["distributed"] = distributed
     # Round-trip rejects tensors, NaN, and other non-portable metadata.
     encoded = json.dumps(
         payload,
@@ -402,32 +448,93 @@ def _epoch_loaders(
     val_dataset: Stage2GateDataset,
     training: Mapping[str, Any],
     epoch_index: int,
+    distributed_context: DistributedGateContext | None = None,
 ) -> tuple[DataLoader, DataLoader]:
     """Build resume-stable loaders for one zero-based epoch."""
 
     base_seed = int(training["seed"])
+    global_batch_size = _positive_int(
+        training["batch_size"], field="training.batch_size"
+    )
+    rank = 0 if distributed_context is None else distributed_context.rank
+    world_size = (
+        1 if distributed_context is None else distributed_context.world_size
+    )
+    if global_batch_size % world_size != 0:
+        raise ValueError(
+            "distributed global batch size must be divisible by world_size"
+        )
+    if distributed_context is not None:
+        for name, dataset in (
+            ("train", train_dataset),
+            ("validation", val_dataset),
+        ):
+            if len(dataset) % world_size != 0:
+                raise ValueError(
+                    f"distributed {name} dataset size must be divisible by "
+                    "world_size for exact no-padding shards"
+                )
+
     train_generator = torch.Generator(device="cpu")
-    train_generator.manual_seed(base_seed + epoch_index)
+    train_generator.manual_seed(
+        base_seed + epoch_index + rank * 10_000_000
+    )
     val_generator = torch.Generator(device="cpu")
-    val_generator.manual_seed(base_seed + 1_000_000_000 + epoch_index)
+    val_generator.manual_seed(
+        base_seed + 1_000_000_000 + epoch_index + rank * 10_000_000
+    )
     common = {
-        "batch_size": training["batch_size"],
+        "batch_size": global_batch_size // world_size,
         "num_workers": training["num_workers"],
         "pin_memory": training["pin_memory"],
         "drop_last": False,
         "worker_init_fn": _seed_data_worker,
         "persistent_workers": False,
     }
+    if distributed_context is None:
+        return (
+            DataLoader(
+                train_dataset,
+                shuffle=True,
+                generator=train_generator,
+                **common,
+            ),
+            DataLoader(
+                val_dataset,
+                shuffle=False,
+                generator=val_generator,
+                **common,
+            ),
+        )
+
+    train_sampler = DistributedSampler(
+        train_dataset,
+        num_replicas=world_size,
+        rank=rank,
+        shuffle=True,
+        seed=base_seed,
+        drop_last=False,
+    )
+    val_sampler = DistributedSampler(
+        val_dataset,
+        num_replicas=world_size,
+        rank=rank,
+        shuffle=False,
+        seed=base_seed + 1_000_000_000,
+        drop_last=False,
+    )
+    train_sampler.set_epoch(epoch_index)
+    val_sampler.set_epoch(epoch_index)
     return (
         DataLoader(
             train_dataset,
-            shuffle=True,
+            sampler=train_sampler,
             generator=train_generator,
             **common,
         ),
         DataLoader(
             val_dataset,
-            shuffle=False,
+            sampler=val_sampler,
             generator=val_generator,
             **common,
         ),
@@ -652,10 +759,18 @@ def _load_optional_selection(
 
 def _run_train_video_gate_resolved(
     resolved: Mapping[str, Any],
+    *,
+    distributed_context: DistributedGateContext | None = None,
 ) -> dict[str, Any]:
     """Validate labels/data, then train only the small BinaryVideoGate."""
 
     resolved = dict(resolved)
+    is_main = distributed_context is None or distributed_context.is_main
+    if distributed_context is not None:
+        distributed_context.assert_same(
+            resolved,
+            label="resolved Gate training config",
+        )
     runtime = _exact_section(
         resolved,
         "runtime",
@@ -668,6 +783,11 @@ def _run_train_video_gate_resolved(
         },
     )
     git_identity = _validated_git_identity(runtime)
+    if distributed_context is not None:
+        distributed_context.assert_same(
+            git_identity,
+            label="Gate Git identity",
+        )
     resolved["data"] = _canonicalize_data_paths(
         resolved["data"], repo_dir=_repo_dir(runtime)
     )
@@ -829,13 +949,24 @@ def _run_train_video_gate_resolved(
     torch.use_deterministic_algorithms(bool(runtime["deterministic_algorithms"]))
     device = _device(runtime)
     numerical_runtime = collect_numerical_runtime_environment(device)
+    if distributed_context is not None:
+        distributed_context.assert_same(
+            numerical_runtime,
+            label="Gate numerical runtime",
+        )
     training_contract = build_training_config_contract(
         data=resolved["data"],
         gate=gate_config,
         training=training,
         runtime=runtime,
         numerical_runtime=numerical_runtime,
+        distributed_context=distributed_context,
     )
+    if distributed_context is not None:
+        distributed_context.assert_same(
+            training_contract,
+            label="Gate training contract",
+        )
     training_config_sha = canonical_json_sha256(training_contract)
     training_identity = build_training_identity(
         label_manifest_sha256=expected_label_manifest_sha,
@@ -845,6 +976,21 @@ def _run_train_video_gate_resolved(
     )
 
     gate = BinaryVideoGate(**gate_config).to(device=device)
+    forward_gate: torch.nn.Module | None = None
+    if distributed_context is not None:
+        if device.type != "cuda":
+            raise RuntimeError("distributed formal Gate training requires CUDA")
+        device_index = (
+            torch.cuda.current_device()
+            if device.index is None
+            else device.index
+        )
+        forward_gate = DistributedDataParallel(
+            gate,
+            device_ids=[device_index],
+            output_device=device_index,
+            broadcast_buffers=False,
+        )
     train_labels = [
         row["label"] for row in merged.rows if row["split"] == "train"
     ]
@@ -855,6 +1001,8 @@ def _run_train_video_gate_resolved(
         lr=float(training["learning_rate"]),
         weight_decay=float(training["weight_decay"]),
         max_grad_norm=float(training["max_grad_norm"]),
+        forward_gate=forward_gate,
+        distributed_context=distributed_context,
     )
 
     checkpoint = _exact_section(
@@ -919,9 +1067,24 @@ def _run_train_video_gate_resolved(
         state_path=state_path,
         resume_path=resume_path,
     )
+    if distributed_context is not None:
+        distributed_context.barrier()
     if resume_path is not None:
         trainer.load_training_state(resume_path)
         initial_epoch = trainer.epoch
+    if distributed_context is not None:
+        distributed_context.assert_same(
+            {
+                "epoch": trainer.epoch,
+                "global_step": trainer.global_step,
+                "best_epoch": trainer.best_epoch,
+                "best_global_step": trainer.best_global_step,
+                "epochs_without_improvement": (
+                    trainer.epochs_without_improvement
+                ),
+            },
+            label="Gate resume progress",
+        )
     prior_history, history_complete = _load_prior_epoch_history(
         summary_path,
         training_identity=training_identity,
@@ -931,15 +1094,21 @@ def _run_train_video_gate_resolved(
     if trainer.epoch > target_epochs:
         raise ValueError("Gate resume epoch exceeds training.num_epochs")
     source_snapshot.check_stats()
-    published_identity = publish_json_atomic_no_clobber(
-        run_identity_path, run_identity
-    )
-    if not published_identity:
+    published_identity: bool | None = None
+    if is_main:
+        published_identity = publish_json_atomic_no_clobber(
+            run_identity_path, run_identity
+        )
+    if distributed_context is not None:
+        distributed_context.barrier()
+    if not is_main or published_identity is False:
         existing_identity = _load_json_mapping(
             run_identity_path, label="existing Gate run identity"
         )
         if existing_identity != run_identity:
             raise RuntimeError("Gate run identity differs from this launch")
+    if distributed_context is not None:
+        distributed_context.barrier()
 
     # Materialize imported state at the canonical destination even when no new
     # epoch runs. It also leaves a resumable epoch-zero state for a fresh run.
@@ -960,6 +1129,7 @@ def _run_train_video_gate_resolved(
             val_dataset=val_dataset,
             training=training,
             epoch_index=trainer.epoch,
+            distributed_context=distributed_context,
         )
         fit = trainer.fit(
             train_loader,
@@ -973,6 +1143,23 @@ def _run_train_video_gate_resolved(
         source_snapshot.check_stats()
         if len(fit.epochs) != 1 or fit.epochs[0].get("epoch") != trainer.epoch:
             raise RuntimeError("GateTrainer returned an inconsistent epoch record")
+        if distributed_context is not None:
+            distributed_context.assert_same(
+                {
+                    "epoch_record": dict(fit.epochs[0]),
+                    "stopped_early": fit.stopped_early,
+                    "best_epoch": trainer.best_epoch,
+                    "best_global_step": trainer.best_global_step,
+                    "best_val_bce": trainer.best_val_bce,
+                    "best_metrics": dict(trainer.best_metrics),
+                    "epoch": trainer.epoch,
+                    "global_step": trainer.global_step,
+                    "epochs_without_improvement": (
+                        trainer.epochs_without_improvement
+                    ),
+                },
+                label="Gate epoch decision",
+            )
         history.extend(dict(record) for record in fit.epochs)
         progress = _training_summary(
             trainer,
@@ -989,7 +1176,10 @@ def _run_train_video_gate_resolved(
         # Publishing history first makes an interrupted summary at most one
         # epoch ahead of state; resume trims that record and repeats the epoch.
         source_snapshot.check_stats()
-        write_json_atomic(summary_path, progress)
+        if is_main:
+            write_json_atomic(summary_path, progress)
+        if distributed_context is not None:
+            distributed_context.barrier()
         source_snapshot.check_stats()
         trainer.save_training_state(state_path)
         if fit.stopped_early:
@@ -1010,12 +1200,18 @@ def _run_train_video_gate_resolved(
         "git_identity": training_identity["git_identity"],
     }
     # One final content pass gates the durable final state and both exports.
-    source_snapshot.check_content()
+    if is_main:
+        source_snapshot.check_content()
+    if distributed_context is not None:
+        distributed_context.barrier()
     trainer.save_training_state(state_path)
     source_snapshot.check_stats()
-    trainer.export_checkpoint(best_path, selection="best", **export_kwargs)
-    source_snapshot.check_stats()
-    trainer.export_checkpoint(last_path, selection="last", **export_kwargs)
+    if is_main:
+        trainer.export_checkpoint(best_path, selection="best", **export_kwargs)
+        source_snapshot.check_stats()
+        trainer.export_checkpoint(last_path, selection="last", **export_kwargs)
+    if distributed_context is not None:
+        distributed_context.barrier()
     summary = _training_summary(
         trainer,
         training_identity=training_identity,
@@ -1029,7 +1225,10 @@ def _run_train_video_gate_resolved(
         last_path=last_path,
     )
     source_snapshot.check_stats()
-    write_json_atomic(summary_path, summary)
+    if is_main:
+        write_json_atomic(summary_path, summary)
+    if distributed_context is not None:
+        distributed_context.barrier()
     return summary
 
 
@@ -1043,6 +1242,35 @@ def run_train_video_gate(
     output_dir = Path(str(resolved["output_dir"])).expanduser().resolve()
     with _exclusive_output_writer(output_dir):
         return _run_train_video_gate_resolved(resolved)
+
+
+def run_train_video_gate_distributed(
+    config: DictConfig | Mapping[str, Any],
+    *,
+    distributed_context: DistributedGateContext,
+) -> dict[str, Any]:
+    """Run one strict multi-rank job with rank zero as its sole writer."""
+
+    if not isinstance(distributed_context, DistributedGateContext):
+        raise TypeError(
+            "distributed_context must be a DistributedGateContext"
+        )
+    resolved = _resolved_config(config)
+    output_dir = Path(str(resolved["output_dir"])).expanduser().resolve()
+    writer = (
+        _exclusive_output_writer(output_dir)
+        if distributed_context.is_main
+        else nullcontext()
+    )
+    with writer:
+        # Rank zero creates and locks output_dir before peers inspect it.
+        distributed_context.barrier()
+        summary = _run_train_video_gate_resolved(
+            resolved,
+            distributed_context=distributed_context,
+        )
+        distributed_context.barrier()
+        return summary
 
 
 @hydra.main(

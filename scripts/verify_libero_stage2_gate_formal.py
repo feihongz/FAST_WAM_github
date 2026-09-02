@@ -8,10 +8,13 @@ import hashlib
 import json
 import math
 import os
+import random
 import stat
+import tempfile
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
+import numpy as np
 import torch
 
 from fastwam.gating.artifacts import (
@@ -172,6 +175,12 @@ def _finite_metrics(
 def _validate_training_contract(
     run_identity: Mapping[str, Any],
     training_identity: Mapping[str, Any],
+    *,
+    expected_schema_version: int = 1,
+    expected_dataloader_seed_algorithm: str = (
+        "base_seed_plus_zero_based_epoch_v1"
+    ),
+    expected_distributed: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if set(run_identity) != {
         "schema_version",
@@ -185,7 +194,7 @@ def _validate_training_contract(
     if not isinstance(contract, Mapping):
         raise TypeError("Gate run training_config must be a mapping")
     contract = dict(contract)
-    if set(contract) != {
+    expected_contract_fields = {
         "schema_version",
         "kind",
         "data",
@@ -193,14 +202,17 @@ def _validate_training_contract(
         "training",
         "runtime",
         "dataloader_seed_algorithm",
-    }:
+    }
+    if expected_distributed is not None:
+        expected_contract_fields.add("distributed")
+    if set(contract) != expected_contract_fields:
         raise ValueError("Gate training contract fields do not match schema")
     if (
-        contract.get("schema_version") != 1
+        contract.get("schema_version") != expected_schema_version
         or contract.get("kind")
         != "stage2_binary_video_gate_training_contract"
         or contract.get("dataloader_seed_algorithm")
-        != "base_seed_plus_zero_based_epoch_v1"
+        != expected_dataloader_seed_algorithm
     ):
         raise ValueError("Gate training contract schema mismatch")
 
@@ -219,6 +231,10 @@ def _validate_training_contract(
         raise ValueError("Gate formal architecture config mismatch")
     if contract.get("training") != EXPECTED_TRAINING_CONFIG:
         raise ValueError("Gate formal training config mismatch")
+    if expected_distributed is not None and contract.get(
+        "distributed"
+    ) != dict(expected_distributed):
+        raise ValueError("Gate formal distributed config mismatch")
 
     runtime = contract.get("runtime")
     if not isinstance(runtime, Mapping) or set(runtime) != {
@@ -423,6 +439,108 @@ def _validate_optimizer_state(
                 raise ValueError(f"Gate AdamW {field} is invalid")
 
 
+def _validate_rank_rng_state(
+    payload: Any,
+    *,
+    rank: int,
+    expected_cuda_states: int,
+) -> dict[str, Any]:
+    label = f"Gate distributed rank {rank} RNG state"
+    if not isinstance(payload, Mapping) or set(payload) != {
+        "python",
+        "numpy",
+        "torch_cpu",
+        "torch_cuda",
+    }:
+        raise ValueError(f"{label} fields do not match schema")
+
+    try:
+        random.Random().setstate(payload["python"])
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(f"{label} Python state is invalid") from error
+    try:
+        np.random.RandomState().set_state(payload["numpy"])
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(f"{label} NumPy state is invalid") from error
+
+    torch_cpu = payload["torch_cpu"]
+    if (
+        not isinstance(torch_cpu, torch.Tensor)
+        or torch_cpu.device.type != "cpu"
+        or torch_cpu.dtype != torch.uint8
+        or torch_cpu.ndim != 1
+        or torch_cpu.numel() == 0
+    ):
+        raise ValueError(f"{label} torch CPU state is invalid")
+    try:
+        torch.Generator(device="cpu").set_state(torch_cpu)
+    except RuntimeError as error:
+        raise ValueError(f"{label} torch CPU state is invalid") from error
+
+    torch_cuda = payload["torch_cuda"]
+    if not isinstance(torch_cuda, list) or len(torch_cuda) != expected_cuda_states:
+        raise ValueError(
+            f"{label} must contain exactly {expected_cuda_states} CUDA state"
+        )
+    for state in torch_cuda:
+        if (
+            not isinstance(state, torch.Tensor)
+            or state.device.type != "cpu"
+            or state.dtype != torch.uint8
+            or state.ndim != 1
+            or state.numel() == 0
+        ):
+            raise ValueError(f"{label} torch CUDA state is invalid")
+        if torch.cuda.is_available() and torch.cuda.device_count() == 1:
+            try:
+                torch.Generator(device="cuda:0").set_state(state)
+            except RuntimeError as error:
+                raise ValueError(
+                    f"{label} torch CUDA state is invalid"
+                ) from error
+    return dict(payload)
+
+
+def _rank_zero_distributed_rng_state(
+    payload: Any,
+    *,
+    expected_world_size: int,
+) -> dict[str, Any]:
+    if not isinstance(payload, Mapping) or set(payload) != {
+        "kind",
+        "world_size",
+        "states",
+    }:
+        raise ValueError(
+            "Gate canonical training state must contain "
+            "distributed_per_rank_rng_v1"
+        )
+    if payload.get("kind") != "distributed_per_rank_rng_v1":
+        raise ValueError("Gate distributed RNG kind mismatch")
+    world_size = payload.get("world_size")
+    if (
+        isinstance(world_size, bool)
+        or not isinstance(world_size, int)
+        or world_size != expected_world_size
+    ):
+        raise ValueError("Gate distributed RNG world_size mismatch")
+    states = payload.get("states")
+    if not isinstance(states, list) or len(states) != expected_world_size:
+        raise ValueError(
+            "Gate distributed RNG states must contain exactly "
+            f"{expected_world_size} rank states"
+        )
+    validated = [
+        _validate_rank_rng_state(
+            state,
+            rank=rank,
+            expected_cuda_states=1,
+        )
+        for rank, state in enumerate(states)
+    ]
+    return validated[0]
+
+
 def _validate_training_state(
     path: Path,
     *,
@@ -432,6 +550,7 @@ def _validate_training_state(
     best_gate: BinaryVideoGate,
     last_gate: BinaryVideoGate,
     resume_device: str | torch.device,
+    expected_distributed_rng_world_size: int | None = None,
 ) -> None:
     training = training_contract["training"]
     device = torch.device(resume_device)
@@ -451,7 +570,37 @@ def _validate_training_state(
         max_grad_norm=float(training["max_grad_norm"]),
     )
     expected_optimizer_groups = _optimizer_group_contract(trainer.optimizer)
-    trainer.load_training_state(path)
+    raw_state: Mapping[str, Any]
+    if expected_distributed_rng_world_size is None:
+        trainer.load_training_state(path)
+        raw_state = torch.load(path, map_location="cpu", weights_only=False)
+    else:
+        raw_state = torch.load(path, map_location="cpu", weights_only=False)
+        if not isinstance(raw_state, Mapping):
+            raise ValueError("Gate canonical training state must be a mapping")
+        rank_zero_rng = _rank_zero_distributed_rng_state(
+            raw_state.get("rng_state"),
+            expected_world_size=expected_distributed_rng_world_size,
+        )
+        if device.type == "cuda" and torch.cuda.device_count() != 1:
+            raise RuntimeError(
+                "distributed Gate synthetic resume requires exactly one "
+                "visible CUDA device"
+            )
+        resume_rng = dict(rank_zero_rng)
+        if device.type != "cuda":
+            # The explicit CPU override is a unit-test probe. The original
+            # per-rank CUDA state was validated above, while the production
+            # verifier restores it on its one visible H100.
+            resume_rng["torch_cuda"] = []
+        resume_state = dict(raw_state)
+        resume_state["rng_state"] = resume_rng
+        with tempfile.TemporaryDirectory(
+            prefix="fastwam-gate-verifier-"
+        ) as temporary_dir:
+            resume_path = Path(temporary_dir) / "rank0-training-state.pt"
+            torch.save(resume_state, resume_path)
+            trainer.load_training_state(resume_path)
     if _optimizer_group_contract(trainer.optimizer) != expected_optimizer_groups:
         raise ValueError("Gate canonical training state optimizer config mismatch")
     if (
@@ -474,7 +623,6 @@ def _validate_training_state(
         raise ValueError("Gate canonical training state progress/metrics mismatch")
     _validate_optimizer_state(trainer, expected_step=int(replay["global_step"]))
 
-    raw_state = torch.load(path, map_location="cpu", weights_only=False)
     _assert_same_gate_state(
         trainer.gate.state_dict(), last_gate.state_dict(), label="last/resume"
     )
@@ -534,12 +682,19 @@ def _validate_training_state(
     )
 
 
-def verify(
+def _verify_with_profile(
     *,
     output_dir: Path,
     expected_git_commit: str,
     receipt: Path,
     resume_device: str | torch.device | None = None,
+    training_contract_validator: Callable[
+        [Mapping[str, Any], Mapping[str, Any]], dict[str, Any]
+    ] = _validate_training_contract,
+    expected_distributed_rng_world_size: int | None = None,
+    allow_resumed_summary: bool = False,
+    verification_kind: str = "libero_stage2_gate_formal_verification",
+    result_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if resume_device is None:
         if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
@@ -582,7 +737,7 @@ def verify(
     if not isinstance(training_identity, Mapping):
         raise TypeError("Gate run identity lacks training_identity")
     training_identity = dict(training_identity)
-    training_contract = _validate_training_contract(
+    training_contract = training_contract_validator(
         run_identity, training_identity
     )
     if training_identity.get("label_manifest_sha256") != LABEL_MANIFEST_SHA256:
@@ -629,17 +784,42 @@ def verify(
         or summary.get("kind")
         != "stage2_binary_video_gate_training_summary"
         or summary.get("training_identity") != training_identity
-        or summary.get("initial_epoch") != 0
         or summary.get("history_complete") is not True
         or summary.get("state_file") != "training_state.pt"
         or summary.get("best_file") != "gate_best.pt"
         or summary.get("last_file") != "gate_last.pt"
     ):
         raise ValueError("Gate formal summary identity/schema mismatch")
+    initial_epoch = summary.get("initial_epoch")
+    if allow_resumed_summary:
+        if (
+            isinstance(initial_epoch, bool)
+            or not isinstance(initial_epoch, int)
+            or initial_epoch < 0
+        ):
+            raise ValueError("Gate resumed summary initial_epoch is invalid")
+    elif initial_epoch != 0:
+        raise ValueError("Gate formal summary identity/schema mismatch")
+
     history = summary.get("epoch_history")
-    if history != summary.get("new_epoch_history"):
+    new_history = summary.get("new_epoch_history")
+    if not allow_resumed_summary and history != new_history:
         raise ValueError("fresh Gate formal history/new history mismatch")
     replay = _validate_epoch_history(history)
+    if allow_resumed_summary:
+        if initial_epoch > replay["final_epoch"]:
+            raise ValueError(
+                "Gate resumed summary initial_epoch exceeds final_epoch"
+            )
+        expected_new_history = [
+            record
+            for record in history
+            if record["epoch"] > initial_epoch
+        ]
+        if new_history != expected_new_history:
+            raise ValueError(
+                "Gate resumed summary new history is not the exact epoch suffix"
+            )
     summary_best_val_bce = summary.get("best_val_bce")
     if (
         isinstance(summary_best_val_bce, bool)
@@ -684,6 +864,7 @@ def verify(
         best_gate=best_gate,
         last_gate=last_gate,
         resume_device=resume_device,
+        expected_distributed_rng_world_size=expected_distributed_rng_world_size,
     )
 
     result = {
@@ -698,7 +879,7 @@ def verify(
         "final_epoch": replay["final_epoch"],
         "git_commit": expected_git_commit,
         "global_step": replay["global_step"],
-        "kind": "libero_stage2_gate_formal_verification",
+        "kind": verification_kind,
         "label_manifest_sha256": LABEL_MANIFEST_SHA256,
         "parameter_count": EXPECTED_PARAMETER_COUNT,
         "schema_version": 1,
@@ -707,6 +888,14 @@ def verify(
         "train_examples": EXPECTED_TRAIN_EXAMPLES,
         "validation_examples": EXPECTED_VALIDATION_EXAMPLES,
     }
+    if result_metadata is not None:
+        overlap = set(result).intersection(result_metadata)
+        if overlap:
+            raise ValueError(
+                "verification result metadata collides with core fields: "
+                f"{sorted(overlap)}"
+            )
+        result.update(dict(result_metadata))
     receipt = receipt.expanduser().resolve()
     published = publish_json_atomic_no_clobber(receipt, result)
     if not published:
@@ -717,6 +906,23 @@ def verify(
         if existing != result:
             raise RuntimeError("existing verification receipt differs")
     return result
+
+
+def verify(
+    *,
+    output_dir: Path,
+    expected_git_commit: str,
+    receipt: Path,
+    resume_device: str | torch.device | None = None,
+) -> dict[str, Any]:
+    """Verify the original single-H100 schema-v1 formal artifact."""
+
+    return _verify_with_profile(
+        output_dir=output_dir,
+        expected_git_commit=expected_git_commit,
+        receipt=receipt,
+        resume_device=resume_device,
+    )
 
 
 def main() -> None:

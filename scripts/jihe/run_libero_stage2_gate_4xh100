@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Stable one-click JiHe entrypoint for formal 4xH100 LIBERO Gate training.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+exec bash "${SCRIPT_DIR}/run_libero_stage2_gate_full_4xh100.sh" "$@"

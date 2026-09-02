@@ -19,6 +19,7 @@ from fastwam.models.video_gate import BinaryVideoGate
 
 from .checkpointing import save_gate_checkpoint
 from .contracts import require_sha256
+from .distributed import DistributedGateContext
 from .metrics import GateBinaryMetrics, compute_gate_binary_metrics
 
 
@@ -254,23 +255,50 @@ def _capture_rng_state() -> dict[str, Any]:
     }
 
 
-def _restore_rng_state(payload: Mapping[str, Any]) -> None:
+def _validate_rng_state(payload: Mapping[str, Any]) -> None:
+    if not isinstance(payload, Mapping):
+        raise TypeError("Gate training RNG state must be a mapping")
     if set(payload) != {"python", "numpy", "torch_cpu", "torch_cuda"}:
         raise ValueError("Gate training RNG state fields do not match schema")
     cpu_state = payload["torch_cpu"]
     cuda_states = payload["torch_cuda"]
-    if not isinstance(cpu_state, torch.Tensor) or cpu_state.dtype != torch.uint8:
+    if (
+        not isinstance(cpu_state, torch.Tensor)
+        or cpu_state.dtype != torch.uint8
+        or cpu_state.device.type != "cpu"
+    ):
         raise ValueError("Gate training torch CPU RNG state is invalid")
     if not isinstance(cuda_states, list) or any(
-        not isinstance(state, torch.Tensor) or state.dtype != torch.uint8
+        not isinstance(state, torch.Tensor)
+        or state.dtype != torch.uint8
+        or state.device.type != "cpu"
         for state in cuda_states
     ):
         raise ValueError("Gate training torch CUDA RNG state is invalid")
+    try:
+        random.Random().setstate(payload["python"])
+        np.random.RandomState().set_state(payload["numpy"])
+        torch.Generator(device="cpu").set_state(cpu_state)
+    except (TypeError, ValueError, RuntimeError, OverflowError) as error:
+        raise ValueError("Gate training RNG state payload is invalid") from error
     if cuda_states:
         if not torch.cuda.is_available():
             raise RuntimeError("cannot restore CUDA Gate state without CUDA")
         if len(cuda_states) != torch.cuda.device_count():
             raise RuntimeError("Gate training CUDA device count changed on resume")
+        try:
+            for index, state in enumerate(cuda_states):
+                torch.Generator(device=f"cuda:{index}").set_state(state)
+        except RuntimeError as error:
+            raise ValueError(
+                "Gate training CUDA RNG state payload is invalid"
+            ) from error
+
+
+def _restore_rng_state(payload: Mapping[str, Any]) -> None:
+    _validate_rng_state(payload)
+    cpu_state = payload["torch_cpu"]
+    cuda_states = payload["torch_cuda"]
     random.setstate(payload["python"])
     np.random.set_state(payload["numpy"])
     torch.set_rng_state(cpu_state.to(device="cpu"))
@@ -298,6 +326,8 @@ class GateTrainer:
         weight_decay: float = 1e-4,
         max_grad_norm: float = 1.0,
         optimizer: torch.optim.Optimizer | None = None,
+        forward_gate: torch.nn.Module | None = None,
+        distributed_context: DistributedGateContext | None = None,
     ):
         if not isinstance(gate, BinaryVideoGate):
             raise TypeError("gate must be a BinaryVideoGate")
@@ -320,6 +350,23 @@ class GateTrainer:
         parameters = tuple(self.gate.parameters())
         if not parameters:
             raise ValueError("Gate has no trainable parameters")
+        if (forward_gate is None) != (distributed_context is None):
+            raise ValueError(
+                "forward_gate and distributed_context must be provided together"
+            )
+        if forward_gate is not None:
+            forward_parameters = tuple(forward_gate.parameters())
+            if [id(parameter) for parameter in forward_parameters] != [
+                id(parameter) for parameter in parameters
+            ]:
+                raise ValueError(
+                    "distributed forward_gate parameters must be exactly "
+                    "Gate parameters"
+                )
+        self._forward_gate = (
+            self.gate if forward_gate is None else forward_gate
+        )
+        self._distributed_context = distributed_context
         self.optimizer = optimizer or torch.optim.AdamW(
             parameters,
             lr=float(lr),
@@ -420,7 +467,7 @@ class GateTrainer:
         batch: Mapping[str, Any],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         validated = self._validate_batch(batch)
-        logits = self.gate(**validated.model_inputs)
+        logits = self._forward_gate(**validated.model_inputs)
         labels = validated.labels.to(dtype=logits.dtype)
         weights = validated.sample_weights.to(dtype=logits.dtype)
         elementwise = F.binary_cross_entropy_with_logits(
@@ -440,13 +487,48 @@ class GateTrainer:
             raise RuntimeError("Gate objective became non-finite")
         return loss, logits, labels, weights
 
+    def _loss_for_backward(
+        self,
+        loss: torch.Tensor,
+        weights: torch.Tensor,
+    ) -> torch.Tensor:
+        """Scale a local mean so DDP averaging is the global weighted mean."""
+
+        context = self._distributed_context
+        if context is None:
+            return loss
+        local_denominator = weights.detach().sum()
+        global_denominator = context.sum_tensor(local_denominator)
+        if not bool(torch.isfinite(global_denominator).all().item()) or not float(
+            global_denominator.detach().cpu().item()
+        ) > 0.0:
+            raise RuntimeError("distributed Gate weight sum is invalid")
+        return loss * (
+            float(context.world_size) * local_denominator / global_denominator
+        )
+
+    def _global_objective_value(
+        self,
+        loss: torch.Tensor,
+        weights: torch.Tensor,
+    ) -> float:
+        local_denominator = weights.detach().double().sum()
+        totals = torch.stack(
+            (loss.detach().double() * local_denominator, local_denominator)
+        )
+        context = self._distributed_context
+        if context is not None:
+            totals = context.sum_tensor(totals)
+        totals = totals.to(device="cpu")
+        return float((totals[0] / totals[1]).item())
+
     def train_batch(self, batch: Mapping[str, Any]) -> float:
         """Apply one optimizer update and return its weighted objective BCE."""
 
-        self.gate.train()
+        self._forward_gate.train()
         self.optimizer.zero_grad(set_to_none=True)
-        loss, _, _, _ = self._forward_loss(batch)
-        loss.backward()
+        loss, _, _, weights = self._forward_loss(batch)
+        self._loss_for_backward(loss, weights).backward()
         if any(
             parameter.grad is not None
             and not torch.isfinite(parameter.grad).all()
@@ -460,7 +542,7 @@ class GateTrainer:
         )
         self.optimizer.step()
         self.global_step += 1
-        return float(loss.detach().cpu().item())
+        return self._global_objective_value(loss, weights)
 
     def _epoch(
         self,
@@ -470,7 +552,7 @@ class GateTrainer:
         threshold: float,
         num_calibration_bins: int,
     ) -> GateEpochResult:
-        self.gate.train(mode=training)
+        self._forward_gate.train(mode=training)
         all_logits: list[torch.Tensor] = []
         all_labels: list[torch.Tensor] = []
         objective_numerator = 0.0
@@ -482,7 +564,7 @@ class GateTrainer:
             with torch.set_grad_enabled(training):
                 loss, logits, labels, weights = self._forward_loss(batch)
             if training:
-                loss.backward()
+                self._loss_for_backward(loss, weights).backward()
                 if any(
                     parameter.grad is not None
                     and not torch.isfinite(parameter.grad).all()
@@ -504,9 +586,42 @@ class GateTrainer:
             num_batches += 1
         if num_batches == 0:
             raise ValueError("Gate epoch requires at least one batch")
+        epoch_logits = torch.cat(all_logits)
+        epoch_labels = torch.cat(all_labels)
+        context = self._distributed_context
+        if context is not None:
+            epoch_logits = context.gather_tensor(
+                epoch_logits.to(device=self.device),
+                label="epoch logits",
+            ).to(device="cpu")
+            epoch_labels = context.gather_tensor(
+                epoch_labels.to(device=self.device),
+                label="epoch labels",
+            ).to(device="cpu")
+            totals = context.sum_tensor(
+                torch.tensor(
+                    [objective_numerator, objective_denominator],
+                    dtype=torch.float64,
+                    device=self.device,
+                )
+            ).to(device="cpu")
+            objective_numerator = float(totals[0].item())
+            objective_denominator = float(totals[1].item())
+            batch_counts = context.gather_tensor(
+                torch.tensor(
+                    [num_batches],
+                    dtype=torch.int64,
+                    device=self.device,
+                ),
+                label="epoch batch counts",
+            ).to(device="cpu")
+            if len(set(int(value) for value in batch_counts.tolist())) != 1:
+                raise RuntimeError(
+                    "distributed Gate batch counts differ across ranks"
+                )
         metrics = compute_gate_binary_metrics(
-            logits=torch.cat(all_logits),
-            labels=torch.cat(all_labels),
+            logits=epoch_logits,
+            labels=epoch_labels,
             threshold=threshold,
             num_calibration_bins=num_calibration_bins,
         )
@@ -619,6 +734,16 @@ class GateTrainer:
     def save_training_state(self, path: str | Path) -> Path:
         """Atomically save exact optimizer, progress, best model, and RNG state."""
 
+        local_rng_state = _capture_rng_state()
+        context = self._distributed_context
+        if context is None:
+            rng_state: Mapping[str, Any] = local_rng_state
+        else:
+            rng_state = {
+                "kind": "distributed_per_rank_rng_v1",
+                "world_size": context.world_size,
+                "states": list(context.gather_objects(local_rng_state)),
+            }
         payload = {
             "schema_version": GATE_TRAINING_STATE_SCHEMA_VERSION,
             "kind": GATE_TRAINING_STATE_KIND,
@@ -640,13 +765,16 @@ class GateTrainer:
             "best_metrics": dict(self.best_metrics),
             "epochs_without_improvement": self.epochs_without_improvement,
             "best_gate_state_dict": _cpu_tree(self._best_gate_state),
-            "rng_state": _capture_rng_state(),
+            "rng_state": rng_state,
         }
         output = Path(path)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        temporary = output.with_name(f".{output.name}.tmp")
-        torch.save(payload, temporary)
-        temporary.replace(output)
+        if context is None or context.is_main:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            temporary = output.with_name(f".{output.name}.tmp")
+            torch.save(payload, temporary)
+            temporary.replace(output)
+        if context is not None:
+            context.barrier()
         return output
 
     def load_training_state(self, path: str | Path) -> None:
@@ -735,6 +863,32 @@ class GateTrainer:
         best_state = payload["best_gate_state_dict"]
         if (best_epoch == -1) != (best_state is None):
             raise ValueError("Gate training best-state presence is inconsistent")
+        rng_state = payload["rng_state"]
+        context = self._distributed_context
+        if (
+            isinstance(rng_state, Mapping)
+            and rng_state.get("kind") == "distributed_per_rank_rng_v1"
+        ):
+            world_size = rng_state.get("world_size")
+            states = rng_state.get("states")
+            if (
+                isinstance(world_size, bool)
+                or not isinstance(world_size, int)
+                or world_size <= 1
+                or not isinstance(states, (list, tuple))
+                or len(states) != world_size
+            ):
+                raise ValueError("distributed Gate RNG state is invalid")
+            if context is not None and context.world_size != world_size:
+                raise ValueError("distributed Gate RNG world_size mismatch")
+            rng_index = 0 if context is None else context.rank
+            selected_rng_state = states[rng_index]
+        else:
+            if context is not None:
+                raise ValueError("distributed Gate resume lacks per-rank RNG state")
+            selected_rng_state = rng_state
+        # Validate the selected rank RNG before mutating model/optimizer/progress.
+        _validate_rng_state(selected_rng_state)
 
         self.gate.load_state_dict(dict(payload["gate_state_dict"]), strict=True)
         self.optimizer.load_state_dict(dict(payload["optimizer_state_dict"]))
@@ -748,7 +902,7 @@ class GateTrainer:
         self._best_gate_state = (
             None if best_state is None else dict(best_state)
         )
-        _restore_rng_state(payload["rng_state"])
+        _restore_rng_state(selected_rng_state)
         self.gate.zero_grad(set_to_none=True)
 
     def export_checkpoint(
