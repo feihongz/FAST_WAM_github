@@ -70,6 +70,7 @@ def _training_contract() -> dict:
                 "task=libero_stage2_gate_2cam224",
                 "output_dir=/tmp/test-libero-gate-smoke",
                 "training.num_epochs=1",
+                "training.min_delta=0.0",
             ],
         )
     resolved = train_cli._resolved_config(config)

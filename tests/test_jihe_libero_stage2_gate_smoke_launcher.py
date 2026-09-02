@@ -61,6 +61,7 @@ def test_dry_run_is_single_process_full_epoch_and_makes_no_writes(tmp_path):
     assert not storage_root.exists()
     assert list(tmp_path.iterdir()) == []
     output = _normalized(result.stdout + result.stderr)
+    assert "profile=smoke" in output
     assert "benchmark=LIBERO" in output
     assert "topology=1x1" in output
     assert "process_mode=single_python_no_torchrun" in output
@@ -74,28 +75,37 @@ def test_dry_run_is_single_process_full_epoch_and_makes_no_writes(tmp_path):
     assert "cublas_workspace_config=:4096:8" in output
     assert "train_samples=48768" in output
     assert "validation_samples=5408" in output
-    assert "expected_updates=762" in output
+    assert "updates_per_epoch=762" in output
+    assert "maximum_updates=762" in output
+    assert "run_root=" in output
+    assert "/formal_runs/smokes/stage2/gate/libero_1xh100_" in output
+    assert "pytest-libero-gate-smoke" in output
     assert "gate_parameters=658977" in output
     assert LABEL_MANIFEST_SHA256 in output
     assert "verify_libero_stage2_gate_smoke.py" in output
     assert "no files, GPUs, packages, or output directories were touched" in output
 
 
-def test_short_launcher_forwards_to_reviewed_smoke_launcher(tmp_path):
+def test_short_launcher_forces_smoke_over_an_ambient_formal_profile(tmp_path):
     environment = os.environ.copy()
     environment.update(
         {
             "FASTWAM_DRY_RUN": "1",
             "FASTWAM_STORAGE_ROOT": str(tmp_path / "persistent"),
             "RUN_ID": "pytest-short-gate-smoke",
+            "FASTWAM_GATE_PROFILE": "formal",
         }
     )
 
     result = _run(SHORT_LAUNCHER, environment=environment)
 
     assert result.returncode == 0, result.stderr
+    assert "profile=smoke" in result.stdout
     assert "task=libero_stage2_gate_2cam224" in result.stdout
     assert "training.num_epochs=1" in result.stdout
+    assert "maximum_updates=762" in result.stdout
+    assert "verify_libero_stage2_gate_smoke.py" in result.stdout
+    assert "verify_libero_stage2_gate_formal.py" not in result.stdout
     assert "cublas_workspace_config=:4096:8" in result.stdout
     assert not (tmp_path / "persistent").exists()
 

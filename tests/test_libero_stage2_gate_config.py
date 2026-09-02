@@ -88,7 +88,7 @@ def test_libero_gate_task_pins_formal_merged_artifact_and_small_model_contract(
         "max_grad_norm": pytest.approx(1.0),
         "num_epochs": 20,
         "early_stop_patience": 3,
-        "min_delta": pytest.approx(0.0),
+        "min_delta": pytest.approx(1.0e-4),
         "threshold": pytest.approx(0.5),
         "num_calibration_bins": 10,
     }

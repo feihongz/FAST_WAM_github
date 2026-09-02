@@ -251,7 +251,38 @@ contract 的 canonical SHA，并用正式标签类别计数重建 Gate/AdamW，�
 不落盘的 synthetic update，确认状态确实能够继续训练。该 1-epoch smoke 的训练身份与正式
 20-epoch run 不同，不能把 smoke checkpoint 直接续成正式训练。
 
-通用的显式 Gate 命令仍如下；正式 launcher 应从新目录 fresh 启动：
+Smoke 通过后，用下面这个稳定短入口从新目录启动正式 Gate：
+
+```bash
+bash /root/feihong/FAST_WAM_github/scripts/jihe/run_libero_stage2_gate
+```
+
+正式入口仍是普通单进程 Python 和一张 H100，固定 batch 64、学习率/weight decay
+`1e-4`、最多 20 epoch、patience 3、`min_delta=1e-4`。每个 epoch 是 762 次更新，
+最多 15,240 次；只有验证 objective BCE 至少改善 `1e-4` 才重置 patience。默认输出为：
+
+```text
+/root/feihong/FastWAM/formal_runs/stage2/gate/
+  libero_stage2_gate_2cam224_20ep/<git7>_<UTC_RUN_ID>/
+├── train.log
+├── gate_run/
+└── verification_receipt.json
+```
+
+训练器只在完整 epoch 结束时保存，所以中断最多损失一个 epoch。按一轮 smoke 的实测
+`1h40m`，8--12 epoch 早停约需 13--20 小时，20 epoch 上限约 33.5 小时。正式验收器
+重放完整 objective/early-stop 历史，严格核对 best/last/state/optimizer、全部 SHA 和一次
+不落盘恢复更新。机械验收与模型质量分开：通过机械验收不等于 Gate 已能提升策略。建议
+离线质量先按以下等级处理：
+
+- RED：AUROC < 0.60、AUPRC < 0.55，或 predicted-positive-rate 不在 [0.10, 0.90]；
+- YELLOW：AUROC 0.60--0.65 或 AUPRC 0.55--0.60，可进入 threshold sweep 和小规模 eval；
+- GREEN：AUROC >= 0.65、AUPRC >= 0.60、raw BCE <= 0.68、ECE <= 0.08。
+
+最终仍须在 held-out 数据上比较 Gate 路由、固定 N=0、固定 N=10 和 oracle 路由的
+route utility；全局 AUROC 不能替代策略评测。
+
+通用的显式 Gate 命令仍如下：
 
 ```bash
 export FASTWAM_LABEL_MANIFEST_SHA256=LABEL_MANIFEST_SHA256

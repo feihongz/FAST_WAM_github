@@ -67,7 +67,7 @@ training:
   max_grad_norm: 1.0
   num_epochs: 20
   early_stop_patience: 3
-  min_delta: 0.0
+  min_delta: 1.0e-4
   threshold: 0.5
   num_calibration_bins: 10
 

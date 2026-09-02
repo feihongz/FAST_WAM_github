@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Full one-epoch acceptance smoke for the small LIBERO BinaryVideoGate.
-# This is intentionally one ordinary Python process on one visible H100.
+# Reviewed single-H100 engine for the small LIBERO BinaryVideoGate.
+# Public wrappers pin either the one-epoch smoke or the fresh formal profile.
 
 fail() {
   echo "[error] $*" >&2
@@ -27,6 +27,7 @@ FASTWAM_DRY_RUN="${FASTWAM_DRY_RUN:-0}"
 PYTHON_BIN="${FASTWAM_ENV}/bin/python"
 RUN_ID="${RUN_ID:-$(date -u +%Y-%m-%d_%H-%M-%S)}"
 VISIBLE_GPU="${FASTWAM_CUDA_VISIBLE_DEVICES:-0}"
+PROFILE="${FASTWAM_GATE_PROFILE:-smoke}"
 
 readonly DATA_MANIFEST="/root/feihong/FastWAM/formal_runs/contracts/stage3/libero_current_273465f_1693e/libero_stage3_data_manifest.json"
 readonly DATA_MANIFEST_SHA256="08da49109a57b55c67f3fa4ac31fbfa44e44dd541a194a5d3420838537d0d320"
@@ -46,7 +47,7 @@ readonly FFMPEG_APT_VERSION="7:4.4.2-0ubuntu0.22.04.1"
 readonly FFMPEG_RUNTIME_VERSION="4.4.2-0ubuntu0.22.04.1"
 readonly EXPECTED_TRAIN_SAMPLES="48768"
 readonly EXPECTED_VALIDATION_SAMPLES="5408"
-readonly EXPECTED_UPDATES="762"
+readonly UPDATES_PER_EPOCH="762"
 readonly EXPECTED_PARAMETER_COUNT="658977"
 
 [[ "${FASTWAM_DRY_RUN}" == "0" || "${FASTWAM_DRY_RUN}" == "1" ]] ||
@@ -55,6 +56,8 @@ readonly EXPECTED_PARAMETER_COUNT="658977"
   fail "RUN_ID may contain only letters, digits, dot, underscore, and hyphen"
 [[ "${VISIBLE_GPU}" != *","* && -n "${VISIBLE_GPU}" && "${VISIBLE_GPU}" != *[[:space:]]* ]] ||
   fail "FASTWAM_CUDA_VISIBLE_DEVICES must name exactly one device without whitespace"
+[[ "${PROFILE}" == "smoke" || "${PROFILE}" == "formal" ]] ||
+  fail "FASTWAM_GATE_PROFILE must be smoke or formal, got ${PROFILE}"
 [[ -d "${FASTWAM_REPO_DIR}" ]] ||
   fail "FASTWAM_REPO_DIR does not exist: ${FASTWAM_REPO_DIR}"
 FASTWAM_REPO_DIR="$(cd -- "${FASTWAM_REPO_DIR}" && pwd -P)"
@@ -66,19 +69,33 @@ FASTWAM_REPO_DIR="$(cd -- "${FASTWAM_REPO_DIR}" && pwd -P)"
 GIT_COMMIT="$(git -C "${FASTWAM_REPO_DIR}" rev-parse HEAD)"
 GIT_SHORT="${GIT_COMMIT:0:7}"
 PERSISTENT_ROOT="$(realpath -m -- "${FASTWAM_STORAGE_ROOT}/FastWAM")"
-DEFAULT_SMOKE_ROOT="${PERSISTENT_ROOT}/formal_runs/smokes/stage2/gate/libero_1xh100_${GIT_SHORT}_${RUN_ID}"
-RAW_SMOKE_ROOT="${FASTWAM_LIBERO_GATE_SMOKE_ROOT:-${DEFAULT_SMOKE_ROOT}}"
-[[ "${RAW_SMOKE_ROOT}" == /* ]] ||
-  fail "FASTWAM_LIBERO_GATE_SMOKE_ROOT must be absolute"
-SMOKE_ROOT="$(realpath -m -- "${RAW_SMOKE_ROOT}")"
-if [[ "${FASTWAM_DRY_RUN}" == "0" ]]; then
-  [[ "${SMOKE_ROOT}" == "${PERSISTENT_ROOT}/"* ]] ||
-    fail "smoke output must stay under ${PERSISTENT_ROOT}"
+if [[ "${PROFILE}" == "smoke" ]]; then
+  readonly NUM_EPOCHS="1"
+  readonly MIN_DELTA="0.0"
+  readonly MAXIMUM_UPDATES="${UPDATES_PER_EPOCH}"
+  DEFAULT_RUN_ROOT="${PERSISTENT_ROOT}/formal_runs/smokes/stage2/gate/libero_1xh100_${GIT_SHORT}_${RUN_ID}"
+  RAW_RUN_ROOT="${FASTWAM_LIBERO_GATE_SMOKE_ROOT:-${DEFAULT_RUN_ROOT}}"
+  OUTPUT_ENV_NAME="FASTWAM_LIBERO_GATE_SMOKE_ROOT"
+  VERIFIER="${FASTWAM_REPO_DIR}/scripts/verify_libero_stage2_gate_smoke.py"
+else
+  readonly NUM_EPOCHS="20"
+  readonly MIN_DELTA="1.0e-4"
+  readonly MAXIMUM_UPDATES="$((UPDATES_PER_EPOCH * NUM_EPOCHS))"
+  DEFAULT_RUN_ROOT="${PERSISTENT_ROOT}/formal_runs/stage2/gate/libero_stage2_gate_2cam224_20ep/${GIT_SHORT}_${RUN_ID}"
+  RAW_RUN_ROOT="${FASTWAM_LIBERO_GATE_FORMAL_ROOT:-${DEFAULT_RUN_ROOT}}"
+  OUTPUT_ENV_NAME="FASTWAM_LIBERO_GATE_FORMAL_ROOT"
+  VERIFIER="${FASTWAM_REPO_DIR}/scripts/verify_libero_stage2_gate_formal.py"
 fi
-GATE_RUN="${SMOKE_ROOT}/gate_run"
-TRAIN_LOG="${SMOKE_ROOT}/train.log"
-RECEIPT="${SMOKE_ROOT}/verification_receipt.json"
-VERIFIER="${FASTWAM_REPO_DIR}/scripts/verify_libero_stage2_gate_smoke.py"
+[[ "${RAW_RUN_ROOT}" == /* ]] ||
+  fail "${OUTPUT_ENV_NAME} must be absolute"
+RUN_ROOT="$(realpath -m -- "${RAW_RUN_ROOT}")"
+if [[ "${FASTWAM_DRY_RUN}" == "0" ]]; then
+  [[ "${RUN_ROOT}" == "${PERSISTENT_ROOT}/"* ]] ||
+    fail "${PROFILE} output must stay under ${PERSISTENT_ROOT}"
+fi
+GATE_RUN="${RUN_ROOT}/gate_run"
+TRAIN_LOG="${RUN_ROOT}/train.log"
+RECEIPT="${RUN_ROOT}/verification_receipt.json"
 
 export FASTWAM_LIBERO_STAGE2_GATE_RUN="${GATE_RUN}"
 export FASTWAM_LIBERO_STAGE3_DATA_MANIFEST="${DATA_MANIFEST}"
@@ -139,9 +156,9 @@ COMMAND=(
   "training.learning_rate=1.0e-4"
   "training.weight_decay=1.0e-4"
   "training.max_grad_norm=1.0"
-  "training.num_epochs=1"
+  "training.num_epochs=${NUM_EPOCHS}"
   "training.early_stop_patience=3"
-  "training.min_delta=0.0"
+  "training.min_delta=${MIN_DELTA}"
   "training.threshold=0.5"
   "training.num_calibration_bins=10"
   "checkpoint.strict_resume=true"
@@ -161,7 +178,8 @@ VERIFY_COMMAND=(
 )
 
 cat <<EOF
-[stage2-gate-smoke]
+[stage2-gate-${PROFILE}]
+  profile=${PROFILE}
   benchmark=LIBERO
   topology=1x1
   process_mode=single_python_no_torchrun
@@ -169,11 +187,14 @@ cat <<EOF
   train_samples=${EXPECTED_TRAIN_SAMPLES}
   validation_samples=${EXPECTED_VALIDATION_SAMPLES}
   batch_size=64
-  expected_updates=${EXPECTED_UPDATES}
-  epochs=1
+  updates_per_epoch=${UPDATES_PER_EPOCH}
+  maximum_updates=${MAXIMUM_UPDATES}
+  epochs=${NUM_EPOCHS}
+  early_stop_patience=3
+  min_delta=${MIN_DELTA}
   cublas_workspace_config=${CUBLAS_WORKSPACE_CONFIG}
   label_manifest_sha256=${MERGED_MANIFEST_SHA256}
-  smoke_root=${SMOKE_ROOT}
+  run_root=${RUN_ROOT}
   git_commit=${GIT_COMMIT}
 EOF
 print_command "${COMMAND[@]}"
@@ -184,27 +205,34 @@ if [[ "${FASTWAM_DRY_RUN}" == "1" ]]; then
   exit 0
 fi
 
+verify_repository_immutability() {
+  local phase="$1"
+  [[ "$(git -C "${FASTWAM_REPO_DIR}" rev-parse HEAD)" == "${GIT_COMMIT}" ]] ||
+    fail "Git HEAD changed after ${phase}"
+  git -C "${FASTWAM_REPO_DIR}" diff --quiet ||
+    fail "tracked worktree is dirty at ${phase}"
+  git -C "${FASTWAM_REPO_DIR}" diff --cached --quiet ||
+    fail "Git index is dirty at ${phase}"
+  local untracked_source
+  untracked_source="$(
+    git -C "${FASTWAM_REPO_DIR}" ls-files --others --exclude-standard -- src configs scripts tests
+  )"
+  [[ -z "${untracked_source}" ]] ||
+    fail "untracked source/config/script/test files at ${phase}: ${untracked_source}"
+}
+
 preflight() {
   [[ -x "${PYTHON_BIN}" ]] || fail "missing Python environment: ${PYTHON_BIN}"
-  [[ -f "${VERIFIER}" ]] || fail "missing Gate smoke verifier: ${VERIFIER}"
+  [[ -f "${VERIFIER}" ]] || fail "missing Gate ${PROFILE} verifier: ${VERIFIER}"
   [[ -f "${SCRIPT_DIR}/ensure_torchcodec_runtime.sh" ]] ||
     fail "missing TorchCodec runtime helper"
   local asset
   for asset in     "${DATA_MANIFEST}"     "${SELECTION_DIR}/episode_split.json"     "${LABEL_JOB}/label_contract.json"     "${MERGED_MANIFEST}"     "${MERGED_MANIFEST%/*}/labels.jsonl"     "${NORMALIZATION_STATS}"; do
     [[ -f "${asset}" ]] || fail "locked Stage 2 artifact is missing: ${asset}"
   done
-  git -C "${FASTWAM_REPO_DIR}" diff --quiet ||
-    fail "tracked worktree is dirty"
-  git -C "${FASTWAM_REPO_DIR}" diff --cached --quiet ||
-    fail "Git index is dirty"
-  local untracked_source
-  untracked_source="$(
-    git -C "${FASTWAM_REPO_DIR}" ls-files --others --exclude-standard --       src configs scripts tests
-  )"
-  [[ -z "${untracked_source}" ]] ||
-    fail "untracked source/config/script/test files: ${untracked_source}"
-  [[ ! -e "${SMOKE_ROOT}" && ! -L "${SMOKE_ROOT}" ]] ||
-    fail "fresh smoke output already exists: ${SMOKE_ROOT}"
+  verify_repository_immutability "preflight"
+  [[ ! -e "${RUN_ROOT}" && ! -L "${RUN_ROOT}" ]] ||
+    fail "fresh ${PROFILE} output already exists: ${RUN_ROOT}"
 }
 
 preflight
@@ -223,7 +251,9 @@ if "H100" not in name:
 print(f"[gpu] count=1 name={name}")
 PY
 
-mkdir -p -- "${SMOKE_ROOT}"
+mkdir -p -- "${RUN_ROOT%/*}"
+mkdir -- "${RUN_ROOT}" ||
+  fail "failed to atomically claim fresh ${PROFILE} output: ${RUN_ROOT}"
 HEARTBEAT_PID=""
 ACTIVE_PID=""
 cleanup_heartbeat() {
@@ -252,7 +282,7 @@ trap 'terminate_on_signal TERM 143' TERM
 trap 'terminate_on_signal HUP 129' HUP
 heartbeat() {
   while sleep 60; do
-    echo "[heartbeat] Gate smoke is running; elapsed=${SECONDS}s (epoch logs publish only after a full pass)"
+    echo "[heartbeat] Gate ${PROFILE} is running; elapsed=${SECONDS}s (epoch logs publish only after a full pass)"
     nvidia-smi --query-gpu=utilization.gpu,memory.used       --format=csv,noheader,nounits 2>/dev/null |
       sed 's/^/[heartbeat] gpu_util_percent,memory_used_MiB=/'
   done
@@ -270,7 +300,8 @@ ACTIVE_PID=""
 set -e
 cleanup_heartbeat
 [[ "${TRAIN_STATUS}" == "0" ]] ||
-  fail "LIBERO Gate smoke training failed with exit code ${TRAIN_STATUS}"
+  fail "LIBERO Gate ${PROFILE} training failed with exit code ${TRAIN_STATUS}"
+verify_repository_immutability "training"
 
 set +e
 "${VERIFY_COMMAND[@]}" &
@@ -280,10 +311,15 @@ VERIFY_STATUS="$?"
 ACTIVE_PID=""
 set -e
 [[ "${VERIFY_STATUS}" == "0" ]] ||
-  fail "LIBERO Gate smoke verification failed with exit code ${VERIFY_STATUS}"
+  fail "LIBERO Gate ${PROFILE} verification failed with exit code ${VERIFY_STATUS}"
+verify_repository_immutability "verification"
 trap - EXIT INT TERM HUP
 
-echo "[ok] LIBERO Stage 2 Gate full one-epoch smoke passed"
+echo "[ok] LIBERO Stage 2 Gate ${PROFILE} run passed"
 echo "[ok] gate_run=${GATE_RUN}"
 echo "[ok] verification_receipt=${RECEIPT}"
-echo "[next] inspect smoke metrics, then start a separate fresh formal Gate run"
+if [[ "${PROFILE}" == "smoke" ]]; then
+  echo "[next] inspect smoke metrics, then start a separate fresh formal Gate run"
+else
+  echo "[next] grade offline Gate quality, sweep the routing threshold, then run held-out policy eval"
+fi
