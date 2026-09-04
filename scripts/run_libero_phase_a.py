@@ -18,6 +18,7 @@ import ast
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -1764,6 +1765,33 @@ def _prepare_parent_simulator_environment(assets: FrozenAssets) -> None:
         if configured is not None and configured.strip().lower() != "egl":
             raise ValueError(f"{key} must be egl for formal LIBERO evaluation")
         os.environ[key] = "egl"
+    cudnn_spec = importlib.util.find_spec("nvidia.cudnn")
+    cudnn_locations = (
+        ()
+        if cudnn_spec is None or cudnn_spec.submodule_search_locations is None
+        else tuple(cudnn_spec.submodule_search_locations)
+    )
+    if len(cudnn_locations) != 1:
+        raise RuntimeError(
+            "formal LIBERO evaluation requires one installed nvidia.cudnn package"
+        )
+    cudnn_lib = (Path(cudnn_locations[0]) / "lib").resolve(strict=True)
+    if not cudnn_lib.is_dir() or not tuple(cudnn_lib.glob("libcudnn*.so*")):
+        raise RuntimeError(f"cuDNN shared libraries are missing: {cudnn_lib}")
+    inherited_library_paths = [
+        item for item in os.environ.get("LD_LIBRARY_PATH", "").split(":") if item
+    ]
+    canonical_cudnn_lib = str(cudnn_lib)
+    os.environ["LD_LIBRARY_PATH"] = ":".join(
+        [
+            canonical_cudnn_lib,
+            *[
+                item
+                for item in inherited_library_paths
+                if item != canonical_cudnn_lib
+            ],
+        ]
+    )
     # The parent owns no renderer. Each standalone child gets its assigned
     # physical EGL device together with the matching CUDA_VISIBLE_DEVICES token.
     os.environ.pop("MUJOCO_EGL_DEVICE_ID", None)

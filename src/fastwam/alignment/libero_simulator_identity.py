@@ -47,6 +47,7 @@ _RUNTIME_ENVIRONMENT_KEYS = (
     "PYOPENGL_PLATFORM",
     "PYTHONPATH",
 )
+_SEARCH_PATH_ENVIRONMENT_KEYS = frozenset({"LD_LIBRARY_PATH", "PYTHONPATH"})
 _IMAGE_DIGEST_ENV_KEYS = (
     "FASTWAM_CONTAINER_IMAGE_DIGEST",
     "FASTWAM_JIHE_IMAGE_DIGEST",
@@ -328,6 +329,22 @@ def _consistent_environment_identity(
     }
 
 
+def _canonical_runtime_environment_value(key: str, value: str) -> str:
+    text = str(value)
+    if key not in _SEARCH_PATH_ENVIRONMENT_KEYS:
+        return text
+    # Some binary-extension imports prepend an already-present loader path.
+    # Repeating one path does not change search precedence, so represent these
+    # semantically equivalent environments with one stable ordered value.
+    unique: list[str] = []
+    seen: set[str] = set()
+    for item in text.split(":"):
+        if item not in seen:
+            seen.add(item)
+            unique.append(item)
+    return ":".join(unique)
+
+
 def capture_libero_simulator_runtime_identity(
     libero_root: str | Path,
     *,
@@ -406,7 +423,11 @@ def capture_libero_simulator_runtime_identity(
         "runtime_environment": {
             "renderer_policy": _RENDERER_POLICY,
             "variables": {
-                key: (str(environment[key]) if key in environment else None)
+                key: (
+                    _canonical_runtime_environment_value(key, environment[key])
+                    if key in environment
+                    else None
+                )
                 for key in _RUNTIME_ENVIRONMENT_KEYS
             },
             "container_image_digest": _consistent_environment_identity(
@@ -810,6 +831,13 @@ def _validate_deep_identity_schema(normalized: dict[str, Any]) -> None:
         if variable is not None and not isinstance(variable, str):
             raise ValueError(
                 f"runtime_environment.variables.{key} must be a string or null"
+            )
+        if (
+            variable is not None
+            and variable != _canonical_runtime_environment_value(key, variable)
+        ):
+            raise ValueError(
+                f"runtime_environment.variables.{key} is not canonical"
             )
     configured_libero_root = variables["FASTWAM_LIBERO_ROOT"]
     if configured_libero_root is not None:

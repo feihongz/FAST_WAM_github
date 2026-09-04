@@ -474,6 +474,27 @@ def test_simulator_identity_records_required_runtime_components():
     )
 
 
+def test_simulator_identity_canonicalizes_duplicate_search_paths():
+    source_root = Path(
+        _SIMULATOR_RUNTIME_IDENTITY["libero_source_tree"]["root"]
+    )
+    libero_root = source_root.parents[1]
+    identity = capture_libero_simulator_runtime_identity(
+        libero_root,
+        environ={
+            "FASTWAM_LIBERO_ROOT": str(libero_root),
+            "LD_LIBRARY_PATH": "/first:/second:/first:/second",
+            "PYTHONPATH": "/source:/repo:/source",
+            "MUJOCO_GL": "egl",
+            "PYOPENGL_PLATFORM": "egl",
+        },
+    )
+
+    variables = identity["runtime_environment"]["variables"]
+    assert variables["LD_LIBRARY_PATH"] == "/first:/second"
+    assert variables["PYTHONPATH"] == "/source:/repo"
+
+
 def test_simulator_identity_schema_rejects_rehashed_missing_nested_field():
     contract = _contract()
     identity = contract["simulator_runtime_identity"]

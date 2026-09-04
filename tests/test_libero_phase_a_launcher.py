@@ -294,6 +294,26 @@ def test_single_gpu_child_environment_rejects_a_gpu_list():
         phase_a.single_gpu_child_environment({}, gpu_device="0,1")
 
 
+def test_parent_simulator_environment_pins_venv_cudnn_first(
+    monkeypatch, tmp_path
+):
+    libero_root = tmp_path / "LIBERO"
+    libero_root.mkdir()
+    assets = replace(phase_a.FrozenAssets(), libero_root=str(libero_root))
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/system/one:/system/two")
+    monkeypatch.delenv("FASTWAM_LIBERO_ROOT", raising=False)
+    monkeypatch.delenv("MUJOCO_EGL_DEVICE_ID", raising=False)
+
+    phase_a._prepare_parent_simulator_environment(assets)
+
+    paths = phase_a.os.environ["LD_LIBRARY_PATH"].split(":")
+    assert paths[0].endswith("/site-packages/nvidia/cudnn/lib")
+    assert paths[1:] == ["/system/one", "/system/two"]
+    assert phase_a.os.environ["FASTWAM_LIBERO_ROOT"] == str(libero_root.resolve())
+    assert phase_a.os.environ["MUJOCO_GL"] == "egl"
+    assert phase_a.os.environ["PYOPENGL_PLATFORM"] == "egl"
+
+
 def _valid_result(module, *, task, condition, assets, identity):
     w_queries = 0 if condition.inference_mode == "wo" else 6
     wo_queries = 0 if condition.inference_mode == "w" else 4
