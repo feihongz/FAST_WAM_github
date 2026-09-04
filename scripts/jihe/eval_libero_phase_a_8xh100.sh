@@ -123,7 +123,23 @@ fi
 [[ "${RUN_ROOT}" == /* ]] || fail "RUN_ROOT must be absolute"
 
 export PATH="${FASTWAM_ENV}/bin:${PATH}"
-export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+FASTWAM_CUDNN_LIB="$("${PYTHON_BIN}" - <<'PY'
+import importlib.util
+from pathlib import Path
+
+spec = importlib.util.find_spec("nvidia.cudnn")
+locations = () if spec is None or spec.submodule_search_locations is None else tuple(spec.submodule_search_locations)
+if len(locations) != 1:
+    raise SystemExit(f"expected one nvidia.cudnn package, found {locations}")
+library_dir = (Path(locations[0]) / "lib").resolve(strict=True)
+if not library_dir.is_dir() or not tuple(library_dir.glob("libcudnn*.so*")):
+    raise SystemExit(f"cuDNN shared libraries are missing: {library_dir}")
+print(library_dir)
+PY
+)"
+# This must be set before the parent imports torch.  Changing the loader path
+# later inside Python cannot replace a cuDNN library that is already resident.
+export LD_LIBRARY_PATH="${FASTWAM_CUDNN_LIB}:/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 export PYTHONPATH="/root/feihong/FastWAM/third_party/LIBERO:${FASTWAM_REPO_DIR}:${FASTWAM_REPO_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"
 export PYTHONUNBUFFERED=1
 export HYDRA_FULL_ERROR=1
