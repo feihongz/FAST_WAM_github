@@ -35,7 +35,26 @@ EVALUATION:
   black_screen_min_frame_fraction: 0.8
 
   # Action inference
+  # Keep static routing as the default so legacy wo/w evaluations preserve
+  # their exact dispatch behavior. Gate/random routing makes one decision per
+  # action-chunk query and executes only the selected endpoint.
+  routing_mode: static  # static | gate | random
+  use_manifest_text_cache: false
   inference_mode: wo
+  gate_checkpoint: null
+  gate_checkpoint_sha256: null
+  gate_threshold: 0.5
+  gate_expected_label_manifest_sha256: null
+  gate_expected_episode_split_assignment_sha256: null
+  gate_expected_training_config_sha256: null
+  gate_expected_git_commit: null
+  gate_expected_git_tracked_dirty: false
+  gate_expected_git_untracked_source_files: []
+  random_video_probability: 0.5
+  random_seed: 42
+  timing_enabled: true
+  timing_warmup_queries: 3
+  save_query_metrics: true
   action_horizon: null
   num_inference_steps: ${eval_num_inference_steps}
   sigma_shift: null

@@ -67,17 +67,31 @@ except ModuleNotFoundError as exc:
     _ensure_libero_compat_alias()
     from libero import benchmark
 
-from action_ensembler import ActionEnsembler
+from experiments.libero.action_ensembler import ActionEnsembler
 
 from fastwam.alignment.eval_loading import (
     inspect_aligned_model_artifacts,
     load_prepared_aligned_model,
     verify_aligned_runtime_asset,
 )
+from fastwam.alignment.checkpointing import read_git_identity
+from fastwam.gating.eval_runtime import (
+    BoundPromptContext,
+    ManifestBoundPromptContextProvider,
+    load_gate_for_evaluation,
+)
+from fastwam.gating.routing import (
+    BinaryVideoRouter,
+    summarize_routing_telemetry,
+)
 
-OmegaConf.register_new_resolver("eval", eval)
-OmegaConf.register_new_resolver("max", lambda x: max(x))
-OmegaConf.register_new_resolver("split", lambda s, idx: s.split("/")[int(idx)])
+for _resolver_name, _resolver in (
+    ("eval", eval),
+    ("max", lambda x: max(x)),
+    ("split", lambda s, idx: s.split("/")[int(idx)]),
+):
+    if not OmegaConf.has_resolver(_resolver_name):
+        OmegaConf.register_new_resolver(_resolver_name, _resolver)
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -270,6 +284,183 @@ def _prepare_stage3_eval_artifacts(
     )
 
 
+def _required_evaluation_text(cfg: DictConfig, key: str) -> str:
+    value = _optional_text(cfg.EVALUATION.get(key))
+    if value is None:
+        raise ValueError(f"EVALUATION.{key} is required")
+    return value
+
+
+def _configured_inference_steps(cfg: DictConfig) -> int:
+    value = cfg.EVALUATION.get("num_inference_steps", None)
+    steps = int(cfg.get("eval_num_inference_steps", 20) if value is None else value)
+    if steps <= 0:
+        raise ValueError(
+            f"EVALUATION.num_inference_steps must be positive, got {steps}"
+        )
+    return steps
+
+
+def _prepare_video_router(
+    cfg: DictConfig,
+    *,
+    stage3_artifact_identity: Optional[dict[str, Any]],
+    model_device: str,
+) -> tuple[
+    BinaryVideoRouter,
+    Optional[ManifestBoundPromptContextProvider],
+    dict[str, Any],
+]:
+    """Build one query router and bind every learned-Gate input artifact."""
+
+    routing_mode = str(cfg.EVALUATION.get("routing_mode", "static")).strip().lower()
+    configured_video_steps = _configured_inference_steps(cfg)
+    use_manifest_text_cache = bool(
+        cfg.EVALUATION.get("use_manifest_text_cache", False)
+    )
+    prompt_context_provider: Optional[ManifestBoundPromptContextProvider] = None
+    gate_identity: Optional[dict[str, Any]] = None
+
+    if routing_mode == "static":
+        inference_mode = str(
+            cfg.EVALUATION.get("inference_mode", "wo")
+        ).strip().lower()
+        router = BinaryVideoRouter(
+            routing_mode="static",
+            configured_video_steps=configured_video_steps,
+            inference_mode=inference_mode,
+        )
+    elif routing_mode == "gate":
+        if stage3_artifact_identity is None:
+            raise ValueError("Gate routing requires a strictly verified Stage 3 endpoint")
+        # The Stage 2 labels and Gate checkpoint are defined for the complete
+        # N=10 with-video branch.  Silently changing N would change the target.
+        if configured_video_steps != 10:
+            raise ValueError(
+                "Gate routing is bound to N=10; set "
+                "EVALUATION.num_inference_steps=10"
+            )
+        untracked = OmegaConf.to_container(
+            cfg.EVALUATION.get("gate_expected_git_untracked_source_files", []),
+            resolve=True,
+        )
+        if not isinstance(untracked, list) or any(
+            not isinstance(path, str) for path in untracked
+        ):
+            raise ValueError(
+                "EVALUATION.gate_expected_git_untracked_source_files must be a list of strings"
+            )
+        loaded_gate = load_gate_for_evaluation(
+            _required_evaluation_text(cfg, "gate_checkpoint"),
+            expected_checkpoint_sha256=_required_evaluation_text(
+                cfg, "gate_checkpoint_sha256"
+            ),
+            expected_label_manifest_sha256=_required_evaluation_text(
+                cfg, "gate_expected_label_manifest_sha256"
+            ),
+            expected_adapter_checkpoint_sha256=stage3_artifact_identity[
+                "alignment_export"
+            ]["sha256"],
+            expected_base_checkpoint_sha256=stage3_artifact_identity[
+                "base_checkpoint"
+            ]["sha256"],
+            expected_data_manifest_sha256=stage3_artifact_identity[
+                "data_manifest_sha256"
+            ],
+            expected_episode_split_assignment_sha256=_required_evaluation_text(
+                cfg, "gate_expected_episode_split_assignment_sha256"
+            ),
+            expected_training_config_sha256=_required_evaluation_text(
+                cfg, "gate_expected_training_config_sha256"
+            ),
+            expected_git_identity={
+                "commit": _required_evaluation_text(
+                    cfg, "gate_expected_git_commit"
+                ),
+                "tracked_dirty": bool(
+                    cfg.EVALUATION.get("gate_expected_git_tracked_dirty", False)
+                ),
+                "untracked_source_files": untracked,
+            },
+            device=model_device,
+        )
+        gate_identity = loaded_gate.identity
+        router = BinaryVideoRouter(
+            routing_mode="gate",
+            configured_video_steps=configured_video_steps,
+            gate=loaded_gate.gate,
+            threshold=float(cfg.EVALUATION.get("gate_threshold", 0.5)),
+        )
+        use_manifest_text_cache = True
+    elif routing_mode == "random":
+        router = BinaryVideoRouter(
+            routing_mode="random",
+            configured_video_steps=configured_video_steps,
+            random_seed=int(cfg.EVALUATION.get("random_seed", 42)),
+            random_video_probability=float(
+                cfg.EVALUATION.get("random_video_probability", 0.5)
+            ),
+        )
+    else:
+        raise ValueError(
+            "EVALUATION.routing_mode must be one of: static, gate, random"
+        )
+
+    if use_manifest_text_cache:
+        if stage3_artifact_identity is None:
+            raise ValueError(
+                "Manifest text-cache inference requires a strictly verified Stage 3 endpoint"
+            )
+        manifest_path = _optional_text(OmegaConf.select(cfg, "data_manifest.path"))
+        if manifest_path is None:
+            raise ValueError("data_manifest.path is required for cached-context eval")
+        prompt_context_provider = ManifestBoundPromptContextProvider(
+            manifest_path,
+            expected_manifest_sha256=stage3_artifact_identity[
+                "data_manifest_sha256"
+            ],
+            expected_prompt_template=DEFAULT_PROMPT,
+        )
+
+    identity = {
+        "schema_version": 1,
+        "kind": "binary_video_routing_runtime",
+        "routing_mode": routing_mode,
+        "inference_mode": router.inference_mode,
+        "configured_video_steps": configured_video_steps,
+        "gate_threshold": router.threshold,
+        "gate_decision_rule": (
+            "sigmoid(logit) >= gate_threshold -> w"
+            if routing_mode == "gate"
+            else None
+        ),
+        "random_video_probability": router.random_video_probability,
+        "random_seed": (
+            int(cfg.EVALUATION.get("random_seed", 42))
+            if routing_mode == "random"
+            else None
+        ),
+        "use_manifest_text_cache": use_manifest_text_cache,
+        "prompt_template": DEFAULT_PROMPT,
+        "gate_input_preprocessing": (
+            "processor.val_transforms_per_camera_then_concat_then_2x_minus_1"
+            if routing_mode == "gate"
+            else None
+        ),
+        "timing": {
+            "enabled": bool(cfg.EVALUATION.get("timing_enabled", True)),
+            "warmup_queries_per_task": int(
+                cfg.EVALUATION.get("timing_warmup_queries", 0)
+            ),
+            "save_query_metrics": bool(
+                cfg.EVALUATION.get("save_query_metrics", True)
+            ),
+        },
+        "gate_checkpoint": gate_identity,
+    }
+    return router, prompt_context_provider, identity
+
+
 def _load_model_checkpoint(
     model: torch.nn.Module,
     ckpt: str,
@@ -381,6 +572,80 @@ def _obs_to_model_input(
     return x, proprio, imgs
 
 
+def _obs_to_gate_input(
+    imgs: dict[str, np.ndarray],
+    *,
+    cfg: DictConfig,
+    processor: FastWAMProcessor,
+    device: str,
+) -> torch.Tensor:
+    """Apply the exact processor image transforms used by Gate training."""
+
+    transforms = processor.val_transforms
+    if transforms is None:
+        raise ValueError("Gate eval requires processor.val_transforms")
+    camera_tensors: list[torch.Tensor] = []
+    for camera_idx, meta in enumerate(processor.shape_meta["images"]):
+        if camera_idx >= int(processor.num_output_cameras):
+            break
+        key = str(meta["key"])
+        if key not in imgs:
+            raise KeyError(f"LIBERO observation is missing Gate camera {key!r}")
+        array = np.ascontiguousarray(imgs[key])
+        if array.ndim != 3 or array.shape[-1] != 3 or array.dtype != np.uint8:
+            raise ValueError(
+                f"Gate camera {key!r} must be uint8 HWC RGB, got "
+                f"shape={array.shape}, dtype={array.dtype}"
+            )
+        image = torch.from_numpy(array).permute(2, 0, 1).unsqueeze(0)
+        current_transforms = (
+            transforms[key]
+            if isinstance(transforms, (dict, DictConfig))
+            else transforms
+        )
+        for transform in current_transforms:
+            image = transform(image)
+        expected_shape = (1, *tuple(int(x) for x in meta["shape"]))
+        if tuple(image.shape) != expected_shape:
+            raise ValueError(
+                f"Gate camera {key!r} preprocessing shape mismatch: "
+                f"expected={expected_shape}, actual={tuple(image.shape)}"
+            )
+        camera_tensors.append(image)
+
+    num_cameras = int(processor.num_output_cameras)
+    if len(camera_tensors) != num_cameras:
+        raise ValueError(
+            f"Gate expected {num_cameras} cameras, prepared {len(camera_tensors)}"
+        )
+    concatenation = str(cfg.data.train.get("concat_multi_camera", "horizontal"))
+    if num_cameras == 1:
+        image = camera_tensors[0]
+    elif concatenation == "horizontal":
+        image = torch.cat(camera_tensors, dim=-1)
+    elif concatenation == "vertical":
+        image = torch.cat(camera_tensors, dim=-2)
+    else:
+        raise ValueError(
+            "LIBERO Gate preprocessing supports horizontal/vertical camera concat, "
+            f"got {concatenation!r}"
+        )
+
+    expected_h, expected_w = (int(x) for x in cfg.data.train.video_size)
+    if tuple(image.shape) != (1, 3, expected_h, expected_w):
+        raise ValueError(
+            "Gate concatenated image shape mismatch: "
+            f"expected={(1, 3, expected_h, expected_w)}, actual={tuple(image.shape)}"
+        )
+    if not image.is_floating_point():
+        raise ValueError("Gate processor image transforms must produce floating point")
+    if not bool(torch.isfinite(image).all().item()):
+        raise ValueError("Gate processor image contains non-finite values")
+    if float(image.min().item()) < 0.0 or float(image.max().item()) > 1.0:
+        raise ValueError("Gate processor image must be in [0,1] before normalization")
+    return (image.to(device=device, dtype=torch.float32) * 2.0) - 1.0
+
+
 def _extract_sim_state(obs: dict) -> np.ndarray:
     """Build simulator state from current observation.
 
@@ -422,6 +687,12 @@ def _get_num_video_frames(cfg: DictConfig) -> int:
 def _validate_visualize_future_video_cfg(cfg: DictConfig) -> None:
     if not bool(cfg.EVALUATION.get("visualize_future_video", False)):
         return
+
+    routing_mode = str(cfg.EVALUATION.get("routing_mode", "static")).lower()
+    if routing_mode != "static":
+        raise ValueError(
+            "Gate/random routing requires EVALUATION.visualize_future_video=false"
+        )
 
     action_conditioned = cfg.model.video_dit_config.get("action_conditioned", None)
     if action_conditioned is not False:
@@ -536,6 +807,14 @@ def _invalid_episode_reason(replay_images: list, cfg: DictConfig) -> Optional[st
     return None
 
 
+def _synchronize_for_timing(device: str, *, enabled: bool) -> None:
+    if not enabled:
+        return
+    target = torch.device(device)
+    if target.type == "cuda":
+        torch.cuda.synchronize(target)
+
+
 def _predict_action_chunk(
     obs: dict,
     task_description: str,
@@ -547,15 +826,20 @@ def _predict_action_chunk(
     input_w: int,
     input_h: int,
     model_device: str,
-) -> tuple[np.ndarray, dict, Optional[list[Image.Image]]]:
-    num_inference_steps_cfg = cfg.EVALUATION.get("num_inference_steps", None)
-    if num_inference_steps_cfg is None:
-        num_inference_steps = int(cfg.get("eval_num_inference_steps", 20))
-    else:
-        num_inference_steps = int(num_inference_steps_cfg)
+    router: BinaryVideoRouter,
+    prompt_context: Optional[BoundPromptContext],
+) -> tuple[
+    np.ndarray,
+    dict,
+    Optional[list[Image.Image]],
+    dict[str, Any],
+]:
+    num_inference_steps = _configured_inference_steps(cfg)
     prompt_template = DEFAULT_PROMPT
     prompt = prompt_template.format(task=task_description)
+    timing_enabled = bool(cfg.EVALUATION.get("timing_enabled", True))
 
+    total_started_at = time.perf_counter()
     image, proprio, imgs = _obs_to_model_input(
         obs,
         cfg=cfg,
@@ -565,9 +849,28 @@ def _predict_action_chunk(
         device=model_device,
         dtype=model.torch_dtype,
     )
+    if router.routing_mode == "gate":
+        if prompt_context is None:
+            raise ValueError("Gate routing requires a manifest-bound prompt context")
+        gate_image = _obs_to_gate_input(
+            imgs,
+            cfg=cfg,
+            processor=processor,
+            device=model_device,
+        )
+        route_decision = router.route(
+            input_image=gate_image,
+            context=prompt_context.context,
+            context_mask=prompt_context.gate_context_mask,
+            proprio=proprio.to(device=model_device, dtype=torch.float32),
+        )
+    else:
+        route_decision = router.route()
+    inference_mode = str(route_decision["selected_mode"])
+    preprocessing_finished_at = time.perf_counter()
 
     infer_kwargs = {
-        "prompt": prompt,
+        "prompt": prompt if prompt_context is None else None,
         "input_image": image,
         "action_horizon": action_horizon,
         "negative_prompt": str(cfg.EVALUATION.get("negative_prompt", "")),
@@ -583,14 +886,21 @@ def _predict_action_chunk(
         "rand_device": str(cfg.EVALUATION.get("rand_device", "cpu")),
         "tiled": bool(cfg.EVALUATION.get("tiled", False)),
     }
+    if prompt_context is not None:
+        infer_kwargs["context"] = prompt_context.context
+        infer_kwargs["context_mask"] = prompt_context.model_context_mask
     visualize_future_video = bool(cfg.EVALUATION.get("visualize_future_video", False))
-    inference_mode = str(cfg.EVALUATION.get("inference_mode", "wo")).lower()
     predicted_future_frames = None
     if visualize_future_video or inference_mode == "w":
         infer_kwargs["num_video_frames"] = _get_num_video_frames(cfg)
-    elif "num_video_frames" in inspect.signature(model.infer_action).parameters:
+    elif (
+        not hasattr(model, "infer_action_mode")
+        and "num_video_frames" in inspect.signature(model.infer_action).parameters
+    ):
         infer_kwargs["num_video_frames"] = _get_num_video_frames(cfg)
 
+    _synchronize_for_timing(model_device, enabled=timing_enabled)
+    policy_started_at = time.perf_counter()
     with torch.no_grad():
         if visualize_future_video:
             if hasattr(model, "infer_joint_mode"):
@@ -614,6 +924,8 @@ def _predict_action_chunk(
                     f"Model {type(model).__name__} does not support inference_mode={inference_mode}"
                 )
             pred = model.infer_action(**infer_kwargs)
+    _synchronize_for_timing(model_device, enabled=timing_enabled)
+    policy_finished_at = time.perf_counter()
     action = pred["action"]  # [T, D]
 
     action = _denormalize_action(action, processor)[0]  # [T, D]
@@ -624,7 +936,19 @@ def _predict_action_chunk(
     action = invert_gripper_action(action)
     if bool(cfg.EVALUATION.get("binarize_gripper", False)):
         action[..., -1] = np.sign(action[..., -1])
-    return action, imgs, predicted_future_frames
+    total_finished_at = time.perf_counter()
+    query_metrics = dict(route_decision)
+    query_metrics.update(
+        {
+            "preprocess_plus_gate_latency_s": float(
+                preprocessing_finished_at - total_started_at
+            ),
+            "policy_latency_s": float(policy_finished_at - policy_started_at),
+            "total_latency_s": float(total_finished_at - total_started_at),
+            "timing_synchronized": timing_enabled,
+        }
+    )
+    return action, imgs, predicted_future_frames, query_metrics
 
 
 def _get_max_steps(task_suite_name: str) -> int:
@@ -640,6 +964,87 @@ def _get_max_steps(task_suite_name: str) -> int:
     return suite_steps[task_suite_name]
 
 
+def _query_latency_summary(
+    query_metrics: list[dict[str, Any]],
+    key: str,
+) -> dict[str, Any]:
+    values = [
+        float(query[key])
+        for query in query_metrics
+        if bool(query.get("timing_included", True)) and query.get(key) is not None
+    ]
+    if not values:
+        return {"count": 0, "mean": None, "p50": None, "p95": None, "p99": None}
+    return {
+        "count": len(values),
+        "mean": float(np.mean(values)),
+        "p50": float(np.percentile(values, 50)),
+        "p95": float(np.percentile(values, 95)),
+        "p99": float(np.percentile(values, 99)),
+    }
+
+
+def _summarize_routing_queries(
+    query_metrics: list[dict[str, Any]],
+) -> dict[str, Any]:
+    decisions = [dict(query) for query in query_metrics]
+    policy_latencies = [float(query["policy_latency_s"]) for query in query_metrics]
+    summary = summarize_routing_telemetry(
+        decisions,
+        policy_latencies_s=policy_latencies,
+    )
+    timed = [query for query in query_metrics if bool(query.get("timing_included", True))]
+    if timed:
+        timed_summary = summarize_routing_telemetry(
+            timed,
+            policy_latencies_s=[float(query["policy_latency_s"]) for query in timed],
+        )
+        summary["latency_s"] = timed_summary["latency_s"]
+        for route in ("wo", "w"):
+            summary["by_route"][route]["latency_s"] = timed_summary["by_route"][
+                route
+            ]["latency_s"]
+    else:
+        summary["latency_s"] = {
+            "gate": {"mean": None, "p50": None, "p95": None},
+            "policy": {"mean": None, "p50": None, "p95": None},
+        }
+        for route in ("wo", "w"):
+            summary["by_route"][route]["latency_s"] = {
+                "gate": {"mean": None, "p50": None, "p95": None},
+                "policy": {"mean": None, "p50": None, "p95": None},
+            }
+
+    summary["latency_s"]["preprocess_plus_gate"] = _query_latency_summary(
+        query_metrics,
+        "preprocess_plus_gate_latency_s",
+    )
+    summary["latency_s"]["total"] = _query_latency_summary(
+        query_metrics,
+        "total_latency_s",
+    )
+    for route in ("wo", "w"):
+        route_queries = [
+            query for query in query_metrics if query["selected_mode"] == route
+        ]
+        summary["by_route"][route]["latency_s"][
+            "preprocess_plus_gate"
+        ] = _query_latency_summary(route_queries, "preprocess_plus_gate_latency_s")
+        summary["by_route"][route]["latency_s"]["total"] = (
+            _query_latency_summary(route_queries, "total_latency_s")
+        )
+    summary["timing"] = {
+        "query_count": len(timed),
+        "warmup_query_count": len(query_metrics) - len(timed),
+        "cuda_synchronized": bool(
+            all(bool(query.get("timing_synchronized", False)) for query in query_metrics)
+        )
+        if query_metrics
+        else None,
+    }
+    return summary
+
+
 def run_single_episode(
     env,
     initial_state,
@@ -653,6 +1058,9 @@ def run_single_episode(
     input_w: int,
     input_h: int,
     model_device: str,
+    router: BinaryVideoRouter,
+    prompt_context: Optional[BoundPromptContext],
+    routing_trace: list[dict[str, Any]],
 ) -> tuple[bool, list, list[dict[str, Any]], Optional[float]]:
     max_steps = _get_max_steps(cfg.EVALUATION.task_suite_name)
     replan_steps = int(cfg.EVALUATION.get("replan_steps", 5))
@@ -686,7 +1094,8 @@ def run_single_episode(
             continue
 
         if len(pending_actions) == 0:
-            action_chunk, imgs, predicted_future_frames = _predict_action_chunk(
+            current_replan_idx += 1
+            action_chunk, imgs, predicted_future_frames, query_metrics = _predict_action_chunk(
                 obs=obs,
                 task_description=task_description,
                 model=model,
@@ -696,9 +1105,23 @@ def run_single_episode(
                 input_w=input_w,
                 input_h=input_h,
                 model_device=model_device,
+                router=router,
+                prompt_context=prompt_context,
             )
+            query_metrics.update(
+                {
+                    "episode_index": int(episode_idx),
+                    "replan_index": int(current_replan_idx),
+                    "environment_step": int(t),
+                    "query_id": (
+                        f"{cfg.EVALUATION.task_suite_name}/"
+                        f"{int(cfg.EVALUATION.task_id)}/"
+                        f"{episode_idx}/{current_replan_idx}"
+                    ),
+                }
+            )
+            routing_trace.append(query_metrics)
             if predicted_future_frames is not None:
-                current_replan_idx += 1
                 current_predicted_future_clip = {
                     "replan_idx": current_replan_idx,
                     "gt_frames": [imgs.copy()],
@@ -792,12 +1215,24 @@ def run_single_task(
     input_w: int,
     input_h: int,
     model_device: str,
+    router: BinaryVideoRouter,
+    prompt_context_provider: Optional[ManifestBoundPromptContextProvider],
 ) -> dict:
     env, task_description = get_libero_env(task, LIBERO_ENV_RESOLUTION, cfg.get("seed"))
     visualize_future_video = bool(cfg.EVALUATION.get("visualize_future_video", False))
     save_videos = bool(cfg.EVALUATION.get("save_videos", True))
     retry_invalid_episodes = bool(cfg.EVALUATION.get("retry_invalid_episodes", False))
     max_invalid_retries = int(cfg.EVALUATION.get("max_invalid_episode_retries", 20))
+    save_query_metrics = bool(cfg.EVALUATION.get("save_query_metrics", True))
+    timing_warmup_queries = int(cfg.EVALUATION.get("timing_warmup_queries", 0))
+    if timing_warmup_queries < 0:
+        raise ValueError("EVALUATION.timing_warmup_queries must be non-negative")
+    prompt_context = None
+    if prompt_context_provider is not None:
+        prompt_context = prompt_context_provider.load(
+            DEFAULT_PROMPT.format(task=task_description),
+            device=model_device,
+        )
     results = {
         "successes": 0,
         "failure_episodes": [],
@@ -806,6 +1241,14 @@ def run_single_task(
         "invalid_episode_count": 0,
         "attempted_episodes": 0,
         "task_description": task_description,
+        "routing": {
+            "summary": None,
+            "episodes": [],
+            "invalid_attempts": [],
+            "prompt_context": (
+                None if prompt_context is None else prompt_context.identity
+            ),
+        },
     }
     if visualize_future_video:
         results["episode_future_video_psnr"] = []
@@ -815,8 +1258,10 @@ def run_single_task(
     valid_trial_idx = 0
     invalid_retries = 0
     attempted_idx = 0
+    valid_query_metrics: list[dict[str, Any]] = []
 
     while valid_trial_idx < target_valid_trials:
+        attempt_routing_trace: list[dict[str, Any]] = []
         try:
             success, replay_images, predicted_future_video_clips, episode_mean_psnr = run_single_episode(
                 env=env,
@@ -830,6 +1275,9 @@ def run_single_task(
                 input_w=input_w,
                 input_h=input_h,
                 model_device=model_device,
+                router=router,
+                prompt_context=prompt_context,
+                routing_trace=attempt_routing_trace,
             )
             invalid_reason = _invalid_episode_reason(replay_images, cfg)
         except Exception as exc:
@@ -860,8 +1308,14 @@ def run_single_task(
                 "target_trial": valid_trial_idx,
                 "attempt": attempted_idx - 1,
                 "reason": invalid_reason,
+                "routing_summary": _summarize_routing_queries(
+                    attempt_routing_trace
+                ),
             }
+            if save_query_metrics:
+                invalid_record["queries"] = attempt_routing_trace
             results["invalid_episodes"].append(invalid_record)
+            results["routing"]["invalid_attempts"].append(invalid_record)
             results["invalid_episode_count"] = invalid_retries
             logging.warning(
                 "Discarding invalid LIBERO episode and retrying: task=%s trial=%s attempt=%s reason=%s invalid_retries=%s/%s",
@@ -878,6 +1332,29 @@ def run_single_task(
                     f"{max_invalid_retries} for task={cfg.EVALUATION.task_suite_name}/{cfg.EVALUATION.task_id}."
                 )
             continue
+
+        episode_queries: list[dict[str, Any]] = []
+        for query in attempt_routing_trace:
+            global_query_index = len(valid_query_metrics)
+            query["attempt_index"] = int(attempted_idx - 1)
+            query["global_query_index"] = int(global_query_index)
+            query["timing_included"] = bool(
+                global_query_index >= timing_warmup_queries
+            )
+            valid_query_metrics.append(query)
+            episode_queries.append(query)
+        episode_routing = {
+            "episode_index": int(valid_trial_idx),
+            "success": bool(success),
+            "query_count": len(episode_queries),
+            "total_actual_video_steps": int(
+                sum(int(query["actual_video_steps"]) for query in episode_queries)
+            ),
+            "summary": _summarize_routing_queries(episode_queries),
+        }
+        if save_query_metrics:
+            episode_routing["queries"] = episode_queries
+        results["routing"]["episodes"].append(episode_routing)
 
         if success:
             results["successes"] += 1
@@ -932,6 +1409,9 @@ def run_single_task(
         valid_episode_psnr = [x for x in results["episode_future_video_psnr"] if x is not None]
         if len(valid_episode_psnr) > 0:
             results["future_video_psnr_mean"] = float(np.mean(valid_episode_psnr))
+    results["routing"]["summary"] = _summarize_routing_queries(
+        valid_query_metrics
+    )
     return results
 
 
@@ -940,6 +1420,7 @@ def eval_single_process(cfg: DictConfig):
     start_time = time.time()
     partial_state = PartialState()
     partial_state.config = cfg
+    evaluation_git_identity = read_git_identity(project_root).as_dict()
 
     if cfg.get("seed") is not None:
         set_global_seed(int(cfg.seed), get_worker_init_fn=False)
@@ -960,6 +1441,14 @@ def eval_single_process(cfg: DictConfig):
         cfg,
         dataset_stats_path=dataset_stats_path,
     )
+    model_device = _resolve_eval_device(cfg)
+    router, prompt_context_provider, routing_runtime_identity = (
+        _prepare_video_router(
+            cfg,
+            stage3_artifact_identity=stage3_artifact_identity,
+            model_device=model_device,
+        )
+    )
     dataset_stats = load_dataset_stats_from_json(str(dataset_stats_path))
     processor: FastWAMProcessor = instantiate(cfg.data.train.processor).eval()
     processor.set_normalizer_from_stats(dataset_stats)
@@ -971,7 +1460,6 @@ def eval_single_process(cfg: DictConfig):
         )
     logging.info("Using dataset stats: %s", dataset_stats_path)
 
-    model_device = _resolve_eval_device(cfg)
     model_dtype = _mixed_precision_to_model_dtype(cfg.get("mixed_precision", "bf16"))
     instantiate_kwargs: dict[str, Any] = {
         "model_dtype": model_dtype,
@@ -1040,20 +1528,28 @@ def eval_single_process(cfg: DictConfig):
     }
 
     logging.info("Running LIBERO evaluation with env_num=1")
-    task_results = run_single_task(
-        task=task,
-        initial_states=initial_states,
-        model=model,
-        processor=processor,
-        cfg=cfg,
-        video_dir=video_dir,
-        predicted_video_dir=predicted_video_dir,
-        action_horizon=action_horizon,
-        input_w=input_w,
-        input_h=input_h,
-        model_device=model_device,
-    )
+    try:
+        task_results = run_single_task(
+            task=task,
+            initial_states=initial_states,
+            model=model,
+            processor=processor,
+            cfg=cfg,
+            video_dir=video_dir,
+            predicted_video_dir=predicted_video_dir,
+            action_horizon=action_horizon,
+            input_w=input_w,
+            input_h=input_h,
+            model_device=model_device,
+            router=router,
+            prompt_context_provider=prompt_context_provider,
+        )
+    finally:
+        if prompt_context_provider is not None:
+            prompt_context_provider.close()
     results.update(task_results)
+    results["evaluation_git_identity"] = evaluation_git_identity
+    results["routing_runtime_identity"] = routing_runtime_identity
     if model_artifact_identity is not None:
         results["model_artifact_identity"] = model_artifact_identity
 

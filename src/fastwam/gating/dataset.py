@@ -351,6 +351,17 @@ class Stage2GateDataset(torch.utils.data.Dataset):
 
         return tuple(row.sample_id for row in self._rows)
 
+    @property
+    def sample_identities(self) -> tuple[dict[str, int], ...]:
+        """Return fixed-order, already-validated source identities.
+
+        The property deliberately exposes only the current-frame source address.
+        It contains no E0/E10 evidence, action targets, or future observations and
+        is intended for auditable validation-prediction exports.
+        """
+
+        return tuple(row.identity() for row in self._rows)
+
     def __getitem__(self, index: int) -> dict[str, Any]:
         if isinstance(index, bool) or not isinstance(index, int):
             raise TypeError("Stage2GateDataset index must be an integer")

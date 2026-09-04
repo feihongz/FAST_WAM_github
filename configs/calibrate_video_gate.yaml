@@ -1,0 +1,38 @@
+# @package _global_
+
+defaults:
+  - train_video_gate
+  - _self_
+
+# The inherited training contract is resolved again and compared byte-for-byte
+# with the selected Gate run_identity.  No training is performed.
+calibration:
+  gate_checkpoint: ???
+  gate_checkpoint_sha256: ???
+  gate_run_identity: ???
+  gate_run_identity_sha256: ???
+  output_dir: ???
+  source_split: validation
+  target_with_rates: [0.10, 0.25, 0.50, 0.75, 0.90]
+  configured_video_steps: 10
+  expected_validation_samples: 5408
+  validation_batch_size: 64
+  validation_num_workers: 0
+  validation_pin_memory: true
+  metric_abs_tolerance: 1.0e-6
+  # Training and calibration may differ in irrelevant executable metadata or
+  # a backend patch release.  In this mode all differences are published and
+  # the complete held-out metric vector must still reproduce within tolerance.
+  require_exact_training_numerical_runtime: false
+  progress_every_batches: 5
+  records_file: validation_predictions.jsonl
+  thresholds_file: thresholds.json
+  manifest_file: calibration_manifest.json
+  complete_file: COMPLETE
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null

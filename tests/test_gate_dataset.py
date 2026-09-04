@@ -180,10 +180,22 @@ def test_gate_dataset_is_lazy_fixed_order_and_current_only(selected_split):
     assert len(dataset) == len(expected_rows)
     assert dataset.labels == tuple(row["label"] for row in expected_rows)
     assert dataset.sample_ids == tuple(row["sample_id"] for row in expected_rows)
+    assert dataset.sample_identities == tuple(
+        {
+            "global_sample_index": row["global_sample_index"],
+            "dataset_index": row["dataset_index"],
+            "episode_index": row["episode_id"],
+            "frame_index": row["frame_id"],
+            "dataset_frame_index": row["dataset_frame_index"],
+        }
+        for row in expected_rows
+    )
     with pytest.raises(AttributeError):
         dataset.labels = ()
     with pytest.raises(AttributeError):
         dataset.sample_ids = ()
+    with pytest.raises(AttributeError):
+        dataset.sample_identities = ()
     for index, row in enumerate(expected_rows):
         item = dataset[index]
         source = base.samples[row["global_sample_index"]]
