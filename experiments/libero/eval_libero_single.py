@@ -74,12 +74,22 @@ from fastwam.alignment.eval_loading import (
     load_prepared_aligned_model,
     verify_aligned_runtime_asset,
 )
-from fastwam.alignment.checkpointing import read_git_identity
+from fastwam.alignment.checkpointing import (
+    canonical_json_sha256,
+    read_git_identity,
+    sha256_file,
+)
+from fastwam.alignment.libero_simulator_identity import (
+    capture_libero_simulator_runtime_identity,
+    verify_libero_simulator_runtime_identity,
+    verify_loaded_libero_module_location,
+)
 from fastwam.gating.eval_runtime import (
     BoundPromptContext,
     ManifestBoundPromptContextProvider,
     load_gate_for_evaluation,
 )
+from fastwam.gating.calibration_artifact import load_gate_calibration_selection
 from fastwam.gating.routing import (
     BinaryVideoRouter,
     summarize_routing_telemetry,
@@ -105,6 +115,258 @@ class NumpyEncoder(json.JSONEncoder):
         if isinstance(obj, np.ndarray):
             return obj.tolist()
         return super().default(obj)
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    """Durably publish one evaluator result without exposing partial JSON."""
+
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with temporary.open("x", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=4, cls=NumpyEncoder)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _prepare_simulator_runtime_identity(
+    cfg: DictConfig,
+) -> dict[str, Any] | None:
+    raw_expected_sha = cfg.EVALUATION.get(
+        "simulator_runtime_identity_sha256", None
+    )
+    if raw_expected_sha is None:
+        return None
+    expected_sha = str(raw_expected_sha).strip()
+    if len(expected_sha) != 64 or any(
+        character not in "0123456789abcdef" for character in expected_sha
+    ):
+        raise ValueError(
+            "EVALUATION.simulator_runtime_identity_sha256 must be 64 "
+            "lowercase hexadecimal characters"
+        )
+    libero_root = os.environ.get("FASTWAM_LIBERO_ROOT")
+    if not libero_root:
+        raise ValueError(
+            "formal simulator identity requires FASTWAM_LIBERO_ROOT"
+        )
+    if os.environ.get("MUJOCO_GL", "").strip().lower() != "egl":
+        raise ValueError("formal LIBERO evaluation requires MUJOCO_GL=egl")
+    if os.environ.get("PYOPENGL_PLATFORM", "").strip().lower() != "egl":
+        raise ValueError(
+            "formal LIBERO evaluation requires PYOPENGL_PLATFORM=egl"
+        )
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if not visible.isdigit():
+        raise ValueError(
+            "formal LIBERO evaluator requires one numeric "
+            "CUDA_VISIBLE_DEVICES token"
+        )
+    egl_device = os.environ.get("MUJOCO_EGL_DEVICE_ID", "").strip()
+    if egl_device != visible:
+        raise ValueError(
+            "MUJOCO_EGL_DEVICE_ID must equal the assigned physical "
+            "CUDA_VISIBLE_DEVICES token"
+        )
+    identity = capture_libero_simulator_runtime_identity(libero_root)
+    if identity['identity_sha256'] != expected_sha:
+        raise ValueError(
+            "LIBERO simulator runtime identity SHA256 mismatch: "
+            f"expected={expected_sha}, actual={identity['identity_sha256']}"
+        )
+    verify_loaded_libero_module_location(identity, benchmark.__file__)
+    return identity
+
+
+def _verify_evaluation_git_identity_unchanged(
+    expected: dict[str, Any], *, require_clean: bool
+) -> None:
+    observed = read_git_identity(project_root).as_dict()
+    if observed != expected:
+        raise RuntimeError(
+            "evaluation Git identity changed during closed-loop evaluation"
+        )
+    if require_clean and (
+        observed.get("tracked_dirty")
+        or observed.get("untracked_source_files")
+    ):
+        raise RuntimeError(
+            "formal closed-loop evaluation requires a clean Git identity"
+        )
+
+
+def _trusted_task_asset_identity(
+    root: str | Path,
+    relative_path: str | Path,
+    *,
+    label: str,
+) -> dict[str, Any]:
+    """Hash one LIBERO task asset while enforcing its configured root."""
+
+    trusted_root = Path(root).expanduser().resolve(strict=True)
+    path = (trusted_root / relative_path).resolve(strict=True)
+    try:
+        path.relative_to(trusted_root)
+    except ValueError as error:
+        raise ValueError(f"{label} escapes configured LIBERO root: {path}") from error
+    if not path.is_file():
+        raise ValueError(f"{label} must be a regular file: {path}")
+    before = path.stat()
+    digest = sha256_file(path)
+    after = path.stat()
+    if (
+        before.st_size != after.st_size
+        or before.st_mtime_ns != after.st_mtime_ns
+        or before.st_ino != after.st_ino
+    ):
+        raise RuntimeError(f"{label} changed while it was hashed: {path}")
+    return {
+        "path": str(path),
+        "sha256": digest,
+        "size_bytes": int(after.st_size),
+    }
+
+
+def _libero_task_asset_identities(task: Any) -> dict[str, dict[str, Any]]:
+    relative_path = Path(str(task.problem_folder))
+    return {
+        "task_bddl": _trusted_task_asset_identity(
+            benchmark.get_libero_path("bddl_files"),
+            relative_path / str(task.bddl_file),
+            label="LIBERO task BDDL",
+        ),
+        "initial_states": _trusted_task_asset_identity(
+            benchmark.get_libero_path("init_states"),
+            relative_path / str(task.init_states_file),
+            label="LIBERO task initial states",
+        ),
+    }
+
+
+def _verify_task_asset_identities_unchanged(
+    identities: dict[str, dict[str, Any]],
+) -> None:
+    for name in ("task_bddl", "initial_states"):
+        identity = identities[name]
+        path = Path(identity["path"])
+        observed = _trusted_task_asset_identity(
+            path.parent,
+            path.name,
+            label=f"LIBERO {name}",
+        )
+        if observed != identity:
+            raise RuntimeError(
+                f"LIBERO {name} changed during closed-loop evaluation: {path}"
+            )
+
+
+def _evaluation_protocol_identity(
+    cfg: DictConfig,
+    *,
+    action_horizon: int,
+    input_h: int,
+    input_w: int,
+    source_initial_state_count: int,
+    routing_runtime_identity: dict[str, Any],
+    environment_assets: dict[str, dict[str, Any]],
+    simulator_runtime_identity: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Return the scientific protocol that must match across curve points."""
+
+    evaluation = cfg.EVALUATION
+    protocol = {
+        "schema_version": 1,
+        "kind": "libero_closed_loop_evaluation_protocol",
+        "benchmark": "LIBERO",
+        "task_suite_name": str(evaluation.task_suite_name),
+        "task_id": int(evaluation.task_id),
+        "seed": None if cfg.get("seed") is None else int(cfg.seed),
+        "mixed_precision": str(cfg.get("mixed_precision", "bf16")),
+        "num_trials": int(evaluation.num_trials),
+        "source_initial_state_count": int(source_initial_state_count),
+        "initial_state_order": (
+            "official_task_order_repeat_prefix_only_if_num_trials_exceeds_source"
+        ),
+        "env_num": int(evaluation.get("env_num", 1)),
+        "render_resolution": int(LIBERO_ENV_RESOLUTION),
+        "environment_assets": environment_assets,
+        "max_environment_steps": _get_max_steps(str(evaluation.task_suite_name)),
+        "num_steps_wait": int(evaluation.get("num_steps_wait", 5)),
+        "action_horizon": int(action_horizon),
+        "replan_steps": int(evaluation.get("replan_steps", 5)),
+        "num_inference_steps": _configured_inference_steps(cfg),
+        "binarize_gripper": bool(evaluation.get("binarize_gripper", False)),
+        "use_action_ensembler": bool(
+            evaluation.get("use_action_ensembler", False)
+        ),
+        "visualize_future_video": bool(
+            evaluation.get("visualize_future_video", False)
+        ),
+        "save_videos": bool(evaluation.get("save_videos", True)),
+        "retry_invalid_episodes": bool(
+            evaluation.get("retry_invalid_episodes", False)
+        ),
+        "max_invalid_episode_retries": int(
+            evaluation.get("max_invalid_episode_retries", 20)
+        ),
+        "black_screen_filter": bool(
+            evaluation.get("black_screen_filter", False)
+        ),
+        "black_screen_thresholds": {
+            "mean": float(evaluation.get("black_screen_mean_threshold", 5.0)),
+            "std": float(evaluation.get("black_screen_std_threshold", 2.0)),
+            "minimum_frame_fraction": float(
+                evaluation.get("black_screen_min_frame_fraction", 0.8)
+            ),
+        },
+        "timing": {
+            "enabled": bool(evaluation.get("timing_enabled", True)),
+            "warmup_queries_per_task": int(
+                evaluation.get("timing_warmup_queries", 0)
+            ),
+            "save_query_metrics": bool(
+                evaluation.get("save_query_metrics", True)
+            ),
+        },
+        "sampling": {
+            "sigma_shift": (
+                None
+                if evaluation.get("sigma_shift") is None
+                else float(evaluation.get("sigma_shift"))
+            ),
+            "text_cfg_scale": float(evaluation.get("text_cfg_scale", 1.0)),
+            "negative_prompt": str(evaluation.get("negative_prompt", "")),
+            "rand_device": str(evaluation.get("rand_device", "cpu")),
+            "tiled": bool(evaluation.get("tiled", False)),
+        },
+        "model_input": {
+            "height": int(input_h),
+            "width": int(input_w),
+            "num_frames": int(cfg.data.train.num_frames),
+            "concat_multi_camera": cfg.data.train.get(
+                "concat_multi_camera", None
+            ),
+            "action_video_freq_ratio": int(
+                cfg.data.train.get("action_video_freq_ratio", 1)
+            ),
+        },
+        "prompt_template": DEFAULT_PROMPT,
+        "routing_runtime_identity_sha256": canonical_json_sha256(
+            routing_runtime_identity
+        ),
+        "simulator_runtime_identity_sha256": (
+            None
+            if simulator_runtime_identity is None
+            else simulator_runtime_identity['identity_sha256']
+        ),
+    }
+    protocol["protocol_sha256"] = canonical_json_sha256(protocol)
+    return protocol
 
 
 def _normalize_mixed_precision(mixed_precision: str) -> str:
@@ -320,6 +582,7 @@ def _prepare_video_router(
     )
     prompt_context_provider: Optional[ManifestBoundPromptContextProvider] = None
     gate_identity: Optional[dict[str, Any]] = None
+    gate_calibration_receipt: Optional[dict[str, Any]] = None
 
     if routing_mode == "static":
         inference_mode = str(
@@ -340,24 +603,141 @@ def _prepare_video_router(
                 "Gate routing is bound to N=10; set "
                 "EVALUATION.num_inference_steps=10"
             )
-        untracked = OmegaConf.to_container(
-            cfg.EVALUATION.get("gate_expected_git_untracked_source_files", []),
-            resolve=True,
+        calibration_complete = _optional_text(
+            cfg.EVALUATION.get("gate_calibration_complete")
         )
-        if not isinstance(untracked, list) or any(
-            not isinstance(path, str) for path in untracked
+        calibration_complete_sha = _optional_text(
+            cfg.EVALUATION.get("gate_calibration_complete_sha256")
+        )
+        calibration_target = cfg.EVALUATION.get(
+            "gate_calibration_target_with_rate", None
+        )
+        if calibration_complete is None and (
+            calibration_complete_sha is not None or calibration_target is not None
         ):
             raise ValueError(
-                "EVALUATION.gate_expected_git_untracked_source_files must be a list of strings"
+                "Gate calibration SHA/target require "
+                "EVALUATION.gate_calibration_complete"
             )
-        loaded_gate = load_gate_for_evaluation(
-            _required_evaluation_text(cfg, "gate_checkpoint"),
-            expected_checkpoint_sha256=_required_evaluation_text(
+
+        if calibration_complete is not None:
+            if calibration_complete_sha is None or calibration_target is None:
+                raise ValueError(
+                    "Formal Gate calibration routing requires COMPLETE SHA256 "
+                    "and target_with_rate"
+                )
+            direct_fields = (
+                "gate_checkpoint",
+                "gate_checkpoint_sha256",
+                "gate_threshold",
+                "gate_expected_label_manifest_sha256",
+                "gate_expected_episode_split_assignment_sha256",
+                "gate_expected_training_config_sha256",
+                "gate_expected_git_commit",
+            )
+            conflicts = [
+                field
+                for field in direct_fields
+                if _optional_text(cfg.EVALUATION.get(field)) is not None
+            ]
+            configured_untracked = OmegaConf.to_container(
+                cfg.EVALUATION.get("gate_expected_git_untracked_source_files", []),
+                resolve=True,
+            )
+            if bool(
+                cfg.EVALUATION.get("gate_expected_git_tracked_dirty", False)
+            ) or configured_untracked not in ([], None):
+                conflicts.extend(
+                    [
+                        "gate_expected_git_tracked_dirty",
+                        "gate_expected_git_untracked_source_files",
+                    ]
+                )
+            if conflicts:
+                raise ValueError(
+                    "Calibration-driven Gate routing rejects duplicate direct "
+                    f"Gate settings: {sorted(set(conflicts))}"
+                )
+            calibration = load_gate_calibration_selection(
+                calibration_complete,
+                expected_complete_sha256=calibration_complete_sha,
+                target_with_rate=float(calibration_target),
+                configured_video_steps=configured_video_steps,
+            )
+            calibrated_gate = calibration.manifest["gate_checkpoint"]
+            gate_path = str(calibrated_gate["path"])
+            gate_sha256 = str(calibrated_gate["sha256"])
+            label_manifest_sha256 = str(
+                calibrated_gate["label_manifest_sha256"]
+            )
+            episode_split_sha256 = str(
+                calibrated_gate["episode_split_assignment_sha256"]
+            )
+            training_config_sha256 = str(
+                calibrated_gate["training_config_sha256"]
+            )
+            expected_git_identity = dict(calibrated_gate["git_identity"])
+            gate_threshold = calibration.threshold
+            gate_calibration_receipt = calibration.receipt
+
+            runtime_assets = stage3_artifact_identity.get("runtime_assets")
+            if not isinstance(runtime_assets, dict) or not isinstance(
+                runtime_assets.get("normalization_stats"), dict
+            ):
+                raise ValueError(
+                    "formal calibrated Gate evaluation requires verified "
+                    "normalization_stats runtime identity"
+                )
+            if runtime_assets["normalization_stats"].get("sha256") != (
+                calibration.receipt["source_identities"][
+                    "normalization_stats_sha256"
+                ]
+            ):
+                raise ValueError(
+                    "Gate calibration normalization stats disagree with Stage 3"
+                )
+        else:
+            untracked = OmegaConf.to_container(
+                cfg.EVALUATION.get("gate_expected_git_untracked_source_files", []),
+                resolve=True,
+            )
+            if not isinstance(untracked, list) or any(
+                not isinstance(path, str) for path in untracked
+            ):
+                raise ValueError(
+                    "EVALUATION.gate_expected_git_untracked_source_files must be a list of strings"
+                )
+            gate_path = _required_evaluation_text(cfg, "gate_checkpoint")
+            gate_sha256 = _required_evaluation_text(
                 cfg, "gate_checkpoint_sha256"
-            ),
-            expected_label_manifest_sha256=_required_evaluation_text(
+            )
+            label_manifest_sha256 = _required_evaluation_text(
                 cfg, "gate_expected_label_manifest_sha256"
-            ),
+            )
+            episode_split_sha256 = _required_evaluation_text(
+                cfg, "gate_expected_episode_split_assignment_sha256"
+            )
+            training_config_sha256 = _required_evaluation_text(
+                cfg, "gate_expected_training_config_sha256"
+            )
+            expected_git_identity = {
+                "commit": _required_evaluation_text(
+                    cfg, "gate_expected_git_commit"
+                ),
+                "tracked_dirty": bool(
+                    cfg.EVALUATION.get("gate_expected_git_tracked_dirty", False)
+                ),
+                "untracked_source_files": untracked,
+            }
+            threshold_value = cfg.EVALUATION.get("gate_threshold", None)
+            if threshold_value is None:
+                raise ValueError("EVALUATION.gate_threshold is required")
+            gate_threshold = float(threshold_value)
+
+        loaded_gate = load_gate_for_evaluation(
+            gate_path,
+            expected_checkpoint_sha256=gate_sha256,
+            expected_label_manifest_sha256=label_manifest_sha256,
             expected_adapter_checkpoint_sha256=stage3_artifact_identity[
                 "alignment_export"
             ]["sha256"],
@@ -367,29 +747,21 @@ def _prepare_video_router(
             expected_data_manifest_sha256=stage3_artifact_identity[
                 "data_manifest_sha256"
             ],
-            expected_episode_split_assignment_sha256=_required_evaluation_text(
-                cfg, "gate_expected_episode_split_assignment_sha256"
-            ),
-            expected_training_config_sha256=_required_evaluation_text(
-                cfg, "gate_expected_training_config_sha256"
-            ),
-            expected_git_identity={
-                "commit": _required_evaluation_text(
-                    cfg, "gate_expected_git_commit"
-                ),
-                "tracked_dirty": bool(
-                    cfg.EVALUATION.get("gate_expected_git_tracked_dirty", False)
-                ),
-                "untracked_source_files": untracked,
-            },
+            expected_episode_split_assignment_sha256=episode_split_sha256,
+            expected_training_config_sha256=training_config_sha256,
+            expected_git_identity=expected_git_identity,
             device=model_device,
         )
         gate_identity = loaded_gate.identity
+        if calibration_complete is not None and gate_identity != calibrated_gate:
+            raise ValueError(
+                "loaded Gate identity disagrees with calibration manifest"
+            )
         router = BinaryVideoRouter(
             routing_mode="gate",
             configured_video_steps=configured_video_steps,
             gate=loaded_gate.gate,
-            threshold=float(cfg.EVALUATION.get("gate_threshold", 0.5)),
+            threshold=gate_threshold,
         )
         use_manifest_text_cache = True
     elif routing_mode == "random":
@@ -457,6 +829,7 @@ def _prepare_video_router(
             ),
         },
         "gate_checkpoint": gate_identity,
+        "gate_calibration": gate_calibration_receipt,
     }
     return router, prompt_context_provider, identity
 
@@ -1421,6 +1794,11 @@ def eval_single_process(cfg: DictConfig):
     partial_state = PartialState()
     partial_state.config = cfg
     evaluation_git_identity = read_git_identity(project_root).as_dict()
+    simulator_runtime_identity = _prepare_simulator_runtime_identity(cfg)
+    _verify_evaluation_git_identity_unchanged(
+        evaluation_git_identity,
+        require_clean=simulator_runtime_identity is not None,
+    )
 
     if cfg.get("seed") is not None:
         set_global_seed(int(cfg.seed), get_worker_init_fn=False)
@@ -1505,14 +1883,33 @@ def eval_single_process(cfg: DictConfig):
     benchmark_dict = benchmark.get_benchmark_dict()
     task_suite = benchmark_dict[cfg.EVALUATION.task_suite_name]()
     task = task_suite.get_task(cfg.EVALUATION.task_id)
+    environment_assets = _libero_task_asset_identities(task)
     initial_states = load_libero_task_init_states(
         task_suite,
         int(cfg.EVALUATION.task_id),
         init_states_root=benchmark.get_libero_path("init_states"),
     )
+    source_initial_state_count = len(initial_states)
+    if source_initial_state_count <= 0:
+        raise ValueError(
+            "LIBERO task has no official initial states: "
+            f"suite={cfg.EVALUATION.task_suite_name!r}, "
+            f"task_id={int(cfg.EVALUATION.task_id)}"
+        )
 
     while len(initial_states) < int(cfg.EVALUATION.num_trials):
         initial_states.extend(initial_states[: (int(cfg.EVALUATION.num_trials) - len(initial_states))])
+
+    evaluation_protocol_identity = _evaluation_protocol_identity(
+        cfg,
+        action_horizon=action_horizon,
+        input_h=input_h,
+        input_w=input_w,
+        source_initial_state_count=source_initial_state_count,
+        routing_runtime_identity=routing_runtime_identity,
+        environment_assets=environment_assets,
+        simulator_runtime_identity=simulator_runtime_identity,
+    )
 
     results = {
         "task_suite": cfg.EVALUATION.task_suite_name,
@@ -1547,9 +1944,22 @@ def eval_single_process(cfg: DictConfig):
     finally:
         if prompt_context_provider is not None:
             prompt_context_provider.close()
+    _verify_task_asset_identities_unchanged(environment_assets)
+    if simulator_runtime_identity is not None:
+        verify_libero_simulator_runtime_identity(simulator_runtime_identity)
+        verify_loaded_libero_module_location(
+            simulator_runtime_identity, benchmark.__file__
+        )
+    _verify_evaluation_git_identity_unchanged(
+        evaluation_git_identity,
+        require_clean=simulator_runtime_identity is not None,
+    )
     results.update(task_results)
     results["evaluation_git_identity"] = evaluation_git_identity
+    results["evaluation_protocol_identity"] = evaluation_protocol_identity
     results["routing_runtime_identity"] = routing_runtime_identity
+    if simulator_runtime_identity is not None:
+        results["simulator_runtime_identity"] = simulator_runtime_identity
     if model_artifact_identity is not None:
         results["model_artifact_identity"] = model_artifact_identity
 
@@ -1558,8 +1968,7 @@ def eval_single_process(cfg: DictConfig):
     output_dir.mkdir(parents=True, exist_ok=True)
     output_file = output_dir / f"gpu{cfg.gpu_id}_task{cfg.EVALUATION.task_id}_results.json"
 
-    with open(output_file, "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=4, cls=NumpyEncoder)
+    _write_json_atomic(output_file, results)
 
     print(
         f"Task {cfg.EVALUATION.task_id} completed: "

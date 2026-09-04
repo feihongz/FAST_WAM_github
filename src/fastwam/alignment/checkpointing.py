@@ -142,6 +142,7 @@ def read_git_identity(repo_dir: str | Path) -> GitIdentity:
             "src",
             "configs",
             "scripts",
+            "experiments",
             "tests",
         ],
         check=True,

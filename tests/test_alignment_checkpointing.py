@@ -345,6 +345,7 @@ def test_git_identity_reports_only_untracked_source_contract_paths(tmp_path):
         ("src", "new_module.py"),
         ("configs", "new_config.yaml"),
         ("scripts", "new_launcher.py"),
+        ("experiments", "new_evaluator.py"),
         ("tests", "test_new_contract.py"),
     ):
         path = repo / directory / filename

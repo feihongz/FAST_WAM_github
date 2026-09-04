@@ -4,17 +4,27 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 
+import numpy as np
 import pytest
 from hydra import compose, initialize_config_dir
+from omegaconf import OmegaConf
 
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+LIBERO_ROOT = Path("/root/feihong/FastWAM/third_party/LIBERO")
+os.environ.setdefault("FASTWAM_LIBERO_ROOT", str(LIBERO_ROOT))
+LIBERO_EVAL_DIR = str(REPO_ROOT / "experiments" / "libero")
+if LIBERO_EVAL_DIR not in sys.path:
+    sys.path.insert(0, LIBERO_EVAL_DIR)
+
+from experiments.libero import eval_libero_single as evaluator
 from experiments.libero.summarize_results import (
     aggregate_routing_results,
     summarize_results,
 )
 
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = REPO_ROOT / "scripts/jihe/eval_libero_gate_closed_loop_smoke_1xh100.sh"
 
 
@@ -233,3 +243,149 @@ def test_gate_closed_loop_launcher_is_one_h100_dry_run(tmp_path):
     assert "EVALUATION.visualize_future_video=false" in output
     assert "67db6f46abe67f5c6a4417b60864f0ad0535edf8f911d9e4d11eaed137b9b722" in output
     assert "cbc593bc6ce99c0249a65e5c7cef754c9a1d7ea602f81fdae2b8cb158a25858c" in output
+
+
+def test_evaluation_protocol_identity_is_self_hashed_and_task_specific():
+    cfg = OmegaConf.create(
+        {
+            "seed": 42,
+            "mixed_precision": "bf16",
+            "data": {
+                "train": {
+                    "num_frames": 33,
+                    "concat_multi_camera": "horizontal",
+                    "action_video_freq_ratio": 1,
+                }
+            },
+            "EVALUATION": {
+                "task_suite_name": "libero_10",
+                "task_id": 7,
+                "num_trials": 50,
+                "num_steps_wait": 30,
+                "replan_steps": 32,
+                "num_inference_steps": 10,
+                "binarize_gripper": True,
+                "use_action_ensembler": False,
+                "visualize_future_video": False,
+                "save_videos": False,
+                "retry_invalid_episodes": False,
+                "max_invalid_episode_retries": 20,
+                "black_screen_filter": True,
+                "timing_enabled": True,
+                "timing_warmup_queries": 3,
+                "save_query_metrics": True,
+                "sigma_shift": None,
+                "text_cfg_scale": 1.0,
+                "negative_prompt": "",
+                "rand_device": "cpu",
+                "tiled": False,
+            },
+        }
+    )
+    routing_identity = {"schema_version": 1, "routing_mode": "gate"}
+    environment_assets = {
+        "task_bddl": {
+            "path": "/tmp/task.bddl",
+            "sha256": "a" * 64,
+            "size_bytes": 10,
+        },
+        "initial_states": {
+            "path": "/tmp/task.pruned_init",
+            "sha256": "b" * 64,
+            "size_bytes": 20,
+        },
+    }
+
+    protocol = evaluator._evaluation_protocol_identity(
+        cfg,
+        action_horizon=32,
+        input_h=224,
+        input_w=448,
+        source_initial_state_count=50,
+        routing_runtime_identity=routing_identity,
+        environment_assets=environment_assets,
+        simulator_runtime_identity=None,
+    )
+
+    recorded_sha = protocol.pop("protocol_sha256")
+    assert recorded_sha == evaluator.canonical_json_sha256(protocol)
+    assert protocol["max_environment_steps"] == 700
+    assert protocol["env_num"] == 1
+    assert protocol["render_resolution"] == 256
+    assert protocol["environment_assets"] == environment_assets
+    assert protocol["num_trials"] == 50
+    assert protocol["model_input"]["width"] == 448
+    assert protocol["routing_runtime_identity_sha256"] == (
+        evaluator.canonical_json_sha256(routing_identity)
+    )
+    assert protocol["simulator_runtime_identity_sha256"] is None
+
+
+def test_formal_simulator_preflight_binds_physical_egl_device(monkeypatch):
+    identity = {"identity_sha256": "a" * 64}
+    cfg = OmegaConf.create(
+        {
+            "EVALUATION": {
+                "simulator_runtime_identity_sha256": "a" * 64
+            }
+        }
+    )
+    monkeypatch.setenv("FASTWAM_LIBERO_ROOT", "/frozen/LIBERO")
+    monkeypatch.setenv("MUJOCO_GL", "egl")
+    monkeypatch.setenv("PYOPENGL_PLATFORM", "egl")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "5")
+    monkeypatch.setenv("MUJOCO_EGL_DEVICE_ID", "5")
+    monkeypatch.setattr(
+        evaluator,
+        "capture_libero_simulator_runtime_identity",
+        lambda root: identity,
+    )
+    monkeypatch.setattr(
+        evaluator, "verify_loaded_libero_module_location", lambda *_args: None
+    )
+
+    assert evaluator._prepare_simulator_runtime_identity(cfg) == identity
+
+    monkeypatch.setenv("MUJOCO_EGL_DEVICE_ID", "0")
+    with pytest.raises(ValueError, match="must equal"):
+        evaluator._prepare_simulator_runtime_identity(cfg)
+
+
+def test_evaluator_git_identity_end_check_detects_drift(monkeypatch):
+    expected = {
+        "commit": "a" * 40,
+        "tracked_dirty": False,
+        "untracked_source_files": [],
+    }
+
+    class Identity:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def as_dict(self):
+            return self.payload
+
+    monkeypatch.setattr(
+        evaluator, "read_git_identity", lambda _root: Identity(expected)
+    )
+    evaluator._verify_evaluation_git_identity_unchanged(
+        expected, require_clean=True
+    )
+    changed = {**expected, "commit": "b" * 40}
+    monkeypatch.setattr(
+        evaluator, "read_git_identity", lambda _root: Identity(changed)
+    )
+    with pytest.raises(RuntimeError, match="changed"):
+        evaluator._verify_evaluation_git_identity_unchanged(
+            expected, require_clean=True
+        )
+
+
+def test_atomic_result_writer_replaces_complete_json_without_temp_file(tmp_path):
+    output = tmp_path / "gpu0_task0_results.json"
+
+    evaluator._write_json_atomic(output, {"value": 1, "array": np.array([2, 3])})
+    evaluator._write_json_atomic(output, {"value": 4})
+
+    assert json.loads(output.read_text(encoding="utf-8")) == {"value": 4}
+    assert list(tmp_path.glob(".*.tmp")) == []

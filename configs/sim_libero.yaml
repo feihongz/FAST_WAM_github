@@ -43,13 +43,19 @@ EVALUATION:
   inference_mode: wo
   gate_checkpoint: null
   gate_checkpoint_sha256: null
-  gate_threshold: 0.5
+  gate_threshold: null
   gate_expected_label_manifest_sha256: null
   gate_expected_episode_split_assignment_sha256: null
   gate_expected_training_config_sha256: null
   gate_expected_git_commit: null
   gate_expected_git_tracked_dirty: false
   gate_expected_git_untracked_source_files: []
+  # Formal Gate evaluation pins one COMPLETE receipt and selects a published
+  # target rate. The evaluator derives the threshold and all Gate identities;
+  # direct gate_* fields above remain available only for connectivity smokes.
+  gate_calibration_complete: null
+  gate_calibration_complete_sha256: null
+  gate_calibration_target_with_rate: null
   random_video_probability: 0.5
   random_seed: 42
   timing_enabled: true
@@ -72,6 +78,8 @@ EVALUATION:
   # identities default to the selected Stage 3 task contract.
   stage3_adapter_path: null
   stage3_adapter_sha256: null
+  # Formal Phase-A launcher supplies the frozen external simulator identity.
+  simulator_runtime_identity_sha256: null
   stage3_base_sha256: null
   stage3_data_manifest_sha256: null
   stage3_training_contract_sha256: null
