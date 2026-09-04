@@ -13,6 +13,8 @@ FASTWAM_ENV="${FASTWAM_ENV:-/root/.venvs/fastwam}"
 PYTHON_BIN="${PYTHON_BIN:-${FASTWAM_ENV}/bin/python}"
 FASTWAM_DRY_RUN="${FASTWAM_DRY_RUN:-0}"
 GPU_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
+FASTWAM_EVAL_CODE_SNAPSHOT_ROOT="${FASTWAM_EVAL_CODE_SNAPSHOT_ROOT:-/root/feihong/FastWAM/runtime/source_worktrees/libero_phase_a}"
+FASTWAM_PHASE_A_SNAPSHOT_ACTIVE="${FASTWAM_PHASE_A_SNAPSHOT_ACTIVE:-0}"
 
 fail() {
   echo "[error] $*" >&2
@@ -21,6 +23,88 @@ fail() {
 
 [[ -d "${FASTWAM_REPO_DIR}" ]] || fail "Missing repository: ${FASTWAM_REPO_DIR}"
 [[ -x "${PYTHON_BIN}" ]] || fail "Missing Python: ${PYTHON_BIN}"
+
+# Formal evaluation must never consume concurrent, uncommitted development.
+# Bootstrap into a persistent detached worktree for the exact committed
+# revision, then run the launcher from that committed snapshot.  The absolute
+# snapshot path is deterministic because it is frozen into run_manifest.json
+# and must remain identical across --resume invocations.
+if [[ "${FASTWAM_PHASE_A_SNAPSHOT_ACTIVE}" != "1" ]]; then
+  command -v git >/dev/null || fail "git is required"
+  command -v flock >/dev/null || fail "flock is required"
+
+  EVAL_COMMIT="$(git -C "${FASTWAM_REPO_DIR}" rev-parse HEAD)"
+  RECORDED_REPO_DIR=""
+  if [[ "$#" -eq 2 && "$1" == "--resume" ]]; then
+    [[ "$2" == /* ]] || fail "RUN_ROOT must be absolute"
+    RUN_MANIFEST="$2/run_manifest.json"
+    [[ -f "${RUN_MANIFEST}" ]] || fail "Missing resume manifest: ${RUN_MANIFEST}"
+    RESUME_METADATA="$("${PYTHON_BIN}" - "${RUN_MANIFEST}" <<'PY'
+import json
+import re
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as stream:
+    manifest = json.load(stream)
+spec = manifest.get("experiment_spec")
+if not isinstance(spec, dict):
+    raise SystemExit(f"invalid experiment_spec in {path}")
+identity = spec.get("git_identity")
+if not isinstance(identity, dict):
+    raise SystemExit(f"invalid git_identity in {path}")
+commit = identity.get("commit")
+repo_root = spec.get("repo_root")
+if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+    raise SystemExit(f"invalid git commit in {path}: {commit!r}")
+if (
+    not isinstance(repo_root, str)
+    or not repo_root.startswith("/")
+    or "\t" in repo_root
+    or "\n" in repo_root
+):
+    raise SystemExit(f"invalid repo_root in {path}: {repo_root!r}")
+print(f"{commit}\t{repo_root}")
+PY
+)"
+    IFS=$'\t' read -r EVAL_COMMIT RECORDED_REPO_DIR <<<"${RESUME_METADATA}"
+  elif [[ "$#" -ne 0 ]]; then
+    fail "Usage: bash $0 [--resume /absolute/run/root]"
+  fi
+
+  [[ "${EVAL_COMMIT}" =~ ^[0-9a-f]{40}$ ]] || fail "Invalid evaluation commit: ${EVAL_COMMIT}"
+  git -C "${FASTWAM_REPO_DIR}" cat-file -e "${EVAL_COMMIT}^{commit}" || \
+    fail "Evaluation commit is unavailable: ${EVAL_COMMIT}"
+  SNAPSHOT_REPO_DIR="${FASTWAM_EVAL_CODE_SNAPSHOT_ROOT}/${EVAL_COMMIT}"
+  if [[ -n "${RECORDED_REPO_DIR}" && "${RECORDED_REPO_DIR}" != "${SNAPSHOT_REPO_DIR}" ]]; then
+    fail "Resume source path mismatch: recorded=${RECORDED_REPO_DIR} expected=${SNAPSHOT_REPO_DIR}"
+  fi
+
+  mkdir -p "${FASTWAM_EVAL_CODE_SNAPSHOT_ROOT}"
+  exec 9>"${FASTWAM_EVAL_CODE_SNAPSHOT_ROOT}/.prepare.lock"
+  flock 9
+  if [[ ! -e "${SNAPSHOT_REPO_DIR}/.git" ]]; then
+    [[ ! -e "${SNAPSHOT_REPO_DIR}" ]] || \
+      fail "Incomplete code snapshot already exists: ${SNAPSHOT_REPO_DIR}"
+    git -C "${FASTWAM_REPO_DIR}" worktree add --detach \
+      "${SNAPSHOT_REPO_DIR}" "${EVAL_COMMIT}"
+  fi
+  SNAPSHOT_COMMIT="$(git -C "${SNAPSHOT_REPO_DIR}" rev-parse HEAD)"
+  [[ "${SNAPSHOT_COMMIT}" == "${EVAL_COMMIT}" ]] || \
+    fail "Code snapshot commit mismatch: expected=${EVAL_COMMIT} actual=${SNAPSHOT_COMMIT}"
+  SNAPSHOT_TRACKED_STATUS="$(git -C "${SNAPSHOT_REPO_DIR}" status --porcelain --untracked-files=no)"
+  SNAPSHOT_UNTRACKED_SOURCE="$(git -C "${SNAPSHOT_REPO_DIR}" ls-files --others --exclude-standard -- src configs scripts experiments tests)"
+  [[ -z "${SNAPSHOT_TRACKED_STATUS}" && -z "${SNAPSHOT_UNTRACKED_SOURCE}" ]] || \
+    fail "Managed code snapshot is dirty: ${SNAPSHOT_REPO_DIR}"
+  flock -u 9
+  exec 9>&-
+
+  echo "[source-snapshot] source=${FASTWAM_REPO_DIR} commit=${EVAL_COMMIT} repo=${SNAPSHOT_REPO_DIR}"
+  exec env \
+    FASTWAM_PHASE_A_SNAPSHOT_ACTIVE=1 \
+    FASTWAM_REPO_DIR="${SNAPSHOT_REPO_DIR}" \
+    bash "${SNAPSHOT_REPO_DIR}/scripts/jihe/eval_libero_phase_a_8xh100.sh" "$@"
+fi
 
 cd "${FASTWAM_REPO_DIR}"
 GIT_SHORT="$(git rev-parse --short=7 HEAD)"
